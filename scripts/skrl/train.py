@@ -45,6 +45,12 @@ parser.add_argument(
     help="The RL algorithm used for training the skrl agent.",
 )
 
+parser.add_argument(
+    "--record", action="store_true",
+    help="Record the environment (default: False)",
+)
+
+
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -152,6 +158,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "entity": "sebastien-epfl-epfl",
         "name": log_dir,
     }
+    if args_cli.record:
+        agent_cfg["trainer"]["class"] = "RecorderSequentialTrainer"
     # set the wandb api key if not already set
     if "WANDB_API_KEY" not in os.environ:
         print("Wandb API key not set. Setting it now.")

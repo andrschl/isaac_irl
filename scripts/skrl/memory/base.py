@@ -1,9 +1,8 @@
-from typing import List, Tuple
-import numpy as np
-from skrl.memories.torch.random import RandomMemory
+from skrl.memories.torch import Memory
 import torch
 
-class CustomRandomMemory(RandomMemory):
+
+class CustomMemory(Memory):
     
     def add_samples(self, **tensors: torch.Tensor) -> None:
         """ 
@@ -70,53 +69,4 @@ class CustomRandomMemory(RandomMemory):
 
             # export tensors to file
             if self.export:
-                self.save(directory=self.export_directory, format=self.export_format)   
-    
-    
-
-def load_memory(file: str) -> CustomRandomMemory:
-    data = np.load(file, allow_pickle=True)
-    key_shapes = {key: data[key].shape for key in data.files}
-
-    first_key = next(iter(data.files))
-    first_shape = data[first_key].shape
-
-    memory = CustomRandomMemory(
-        num_envs=first_shape[1],
-        memory_size=first_shape[0],
-    )
-    
-    print(f"Loaded Memory with {memory.memory_size} samples and {memory.num_envs} environments")
-
-    for key, shape in key_shapes.items():
-        memory.create_tensor(key, size=shape[-1])
-    for key in data.files:
-        for i in range(data[key].shape[0]):
-            memory.add_samples(**{key: torch.from_numpy(data[key][i]).squeeze(0)})
-    return memory    
-
-    
-if __name__ == "__main__":
-    # Example usage
-    num_envs = 1
-    memory = CustomRandomMemory(num_envs=num_envs, memory_size=548*num_envs)
-    print("Memory size:", memory.memory_size)
-    print("Number of environments:", memory.num_envs)
-    print("Memory index:", memory.memory_index)
-    
-    memory.create_tensor(name="states", size=3)
-    memory.create_tensor(name="actions", size=2)
-    memory.create_tensor(name="rewards", size=1)
-    
-    # Create some sample data
-    states = torch.randn(num_envs, 3)
-    actions = torch.randn(num_envs, 2)
-    rewards = torch.randn(num_envs, 1)
-    
-    # Add samples to memory
-    for _ in range(429):
-        memory.add_samples(states=states, actions=actions, rewards=rewards)
-    print("Memory index after adding samples:", memory.memory_index)
-    
-    res = memory.sample(names=["states", "actions"], batch_size=2, mini_batches=1, sequence_length=100)
-    print(res[0][0].shape)
+                self.save(directory=self.export_directory, format=self.export_format)

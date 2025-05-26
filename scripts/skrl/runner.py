@@ -11,6 +11,7 @@ from skrl.resources.preprocessors.torch import RunningStandardScaler  # noqa
 from skrl.resources.schedulers.torch import KLAdaptiveLR  # noqa
 from skrl.trainers.torch import Trainer
 from skrl.utils import set_seed
+import torch
 
 
 class Runner:
@@ -90,13 +91,15 @@ class Runner:
             from skrl.memories.torch import RandomMemory as component
         elif name == "customrandommemory":
             from scripts.skrl.memory.random_memory import CustomRandomMemory as component
+        elif name == "trajectorymemory":
+            from scripts.skrl.memory.trajectory_memory import TrajectoryMemory as component
         # agent
         elif name in ["a2c", "a2c_default_config"]:
             from skrl.agents.torch.a2c import A2C, A2C_DEFAULT_CONFIG
 
             component = A2C_DEFAULT_CONFIG if "default_config" in name else A2C
         elif name in ["amp", "amp_default_config"]:
-            from scripts.skrl.algorithm.amp import AMP, AMP_DEFAULT_CONFIG
+            from src.algorithms.amp import AMP, AMP_DEFAULT_CONFIG
 
             component = AMP_DEFAULT_CONFIG if "default_config" in name else AMP
         elif name in ["gail", "gail_default_config"]:
@@ -151,6 +154,8 @@ class Runner:
         # trainer
         elif name == "sequentialtrainer":
             from skrl.trainers.torch import SequentialTrainer as component
+        elif name == "recordersequentialtrainer":
+            from scripts.skrl.trainer.recorder import RecorderSequentialTrainer as component
 
         if component is None:
             raise ValueError(f"Unknown component '{name}' in runner cfg")
@@ -396,6 +401,7 @@ class Runner:
                 motion_dataset = self._component(motion_dataset_class)(
                     device=device, **self._process_cfg(cfg.get("motion_dataset", {}))
                 )
+                                    
             reply_buffer = None
             if cfg.get("reply_buffer"):
                 reply_buffer_class = cfg["reply_buffer"].get("class")
@@ -503,6 +509,7 @@ class Runner:
 
         :raises ValueError: The specified running mode is not valid
         """
+        print(f"Running {mode} mode")
         if mode == "train":
             self._trainer.train()
         elif mode == "eval":

@@ -47,6 +47,11 @@ parser.add_argument(
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 
+parser.add_argument(
+    "--record", action="store_true",
+    help="Record the environment (default: False)",
+)
+
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -161,7 +166,11 @@ def main():
     experiment_cfg["trainer"]["close_environment_at_exit"] = False
     experiment_cfg["agent"]["experiment"]["write_interval"] = 0  # don't log to TensorBoard
     experiment_cfg["agent"]["experiment"]["checkpoint_interval"] = 0  # don't generate checkpoints
+    experiment_cfg["agent"]["trainer"]
     runner = Runner(env, experiment_cfg)
+    
+    if args_cli.record:
+        experiment_cfg["trainer"]["class"] = "RecorderSequentialTrainer"
 
     print(f"[INFO] Loading model checkpoint from: {resume_path}")
     runner.agent.load(resume_path)

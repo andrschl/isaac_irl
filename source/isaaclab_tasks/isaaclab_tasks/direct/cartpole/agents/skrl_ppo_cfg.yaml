@@ -40,15 +40,15 @@ memory:
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html
 agent:
   class: PPO
-  rollouts: 32
+  rollouts: 100
   learning_epochs: 8
-  mini_batches: 8
+  mini_batches: 1
   discount_factor: 0.99
   lambda: 0.95
   learning_rate: 5.0e-04
-  learning_rate_scheduler: KLAdaptiveLR
-  learning_rate_scheduler_kwargs:
-    kl_threshold: 0.008
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs: null
+    # kl_threshold: 0.008
   state_preprocessor: RunningStandardScaler
   state_preprocessor_kwargs: null
   value_preprocessor: RunningStandardScaler

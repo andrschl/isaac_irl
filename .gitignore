@@ -5,3 +5,6 @@ source/isaaclab_rl/
 logs/
 apps/
 wandb/
+
+**/__pycache__/
+**/*.pyc
