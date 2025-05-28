@@ -81,9 +81,13 @@ singularity exec \
         export WANDB_USERNAME=sebastien-epfl-epfl &&
         export WANDB_API_KEY=377aa0f3fcfdedeeed6ad9a746b76bb67204b0e9 &&
         echo $TMPDIR &&
+        export ACCEPT_EULA=Y &&
         /isaac-sim/python.sh ${CLUSTER_PYTHON_EXECUTABLE} ${@:3}
     "
         # export ACCEPT_EULA=Y &&
+        # /isaac-sim/python.sh ${CLUSTER_PYTHON_EXECUTABLE} ${@:3}
+        # /isaac-sim/runheadless.sh ${CLUSTER_PYTHON_EXECUTABLE} ${@:3}
+
         # /isaac-sim/runheadless.sh
 # copy resulting cache files back to host
 rsync -azPv $TMPDIR/docker-isaac-sim $CLUSTER_ISAAC_SIM_CACHE_DIR/..

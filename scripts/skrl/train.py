@@ -50,6 +50,10 @@ parser.add_argument(
     help="Record the environment (default: False)",
 )
 
+parser.add_argument(
+    "--mode", type=str,
+    default="train", help="Mode to run (default: train)",
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -61,6 +65,11 @@ if args_cli.video:
 
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
+print("-------------------------------")
+print("DEBUUUUUUUUUUUUUUUUUUUUUUGGGGGGGGGGGGGGGGGGGGGG")
+print(f"sys.argv: {sys.argv}")
+print("---------------------------")
+sys_argv = [a for a in sys.argv if not a.startswith("--app_launcher_")]
 
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
@@ -145,19 +154,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # specify directory for logging runs: {time-stamp}_{run_name}
-    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_{algorithm}_{args_cli.ml_framework}"
+    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_{algorithm}_{args_cli.task}"
     print(f"Exact experiment name requested from command line {log_dir}")
     if agent_cfg["agent"]["experiment"]["experiment_name"]:
         log_dir += f'_{agent_cfg["agent"]["experiment"]["experiment_name"]}'
     # set directory into agent config
     agent_cfg["agent"]["experiment"]["directory"] = log_root_path
     agent_cfg["agent"]["experiment"]["experiment_name"] = log_dir
-    agent_cfg["agent"]["experiment"]["wandb"] = True
-    agent_cfg["agent"]["experiment"]["wandb_kwargs"] = {
-        "project": "GAIL_sycamore",
-        "entity": "sebastien-epfl-epfl",
-        "name": log_dir,
-    }
+    
+    mode = "train" if args_cli.mode == "train" else "eval"
+    if mode in ["train"]:
+        agent_cfg["agent"]["experiment"]["mode"] = mode
+        agent_cfg["agent"]["experiment"]["wandb"] = True
+        agent_cfg["agent"]["experiment"]["wandb_kwargs"] = {
+            "project": "GAIL_sycamore",
+            "entity": "sebastien-epfl-epfl",
+            "name": log_dir,
+        }
     if args_cli.record:
         agent_cfg["trainer"]["class"] = "RecorderSequentialTrainer"
     # set the wandb api key if not already set
@@ -210,7 +223,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner.agent.load(resume_path)
 
     # run training
-    runner.run()
+    runner.run(mode=mode)
 
     # close the simulator
     env.close()

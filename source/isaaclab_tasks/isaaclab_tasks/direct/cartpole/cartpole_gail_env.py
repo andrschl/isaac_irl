@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import os
+from typing import List
 import numpy as np
 import torch
 from collections.abc import Sequence
@@ -23,8 +24,8 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils import configclass
 from isaaclab.utils.math import sample_uniform
 # from source.isaac_reward_learning.isaac_reward_learning.storage.rollout_storage import ExpertRolloutStorage
-from scripts.utils.rollout_storage import ExpertRolloutStorage
-
+# from scripts.utils.rollout_storage import ExpertRolloutStorage
+from scripts.skrl.memory.trajectory_memory import load_memory
 
 @configclass
 class CartpoleEnvCfg(DirectRLEnvCfg):
@@ -45,7 +46,7 @@ class CartpoleEnvCfg(DirectRLEnvCfg):
     pole_dof_name = "cart_to_pole"
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=4.0, replicate_physics=True)
 
     # reset
     max_cart_pos = 3.0  # the cart is reset if it exceeds that position [m]
@@ -58,8 +59,9 @@ class CartpoleEnvCfg(DirectRLEnvCfg):
     rew_scale_cart_vel = -0.01
     rew_scale_pole_vel = -0.005
 
-    MOTIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demos.hdf5")
-
+    # MOTIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demos.hdf5")
+    # MOTIONS_PATH = "logs/skrl/cartpole_direct/memories/25-05-27_01-12-23-498496_memory_0x7fd4049f8f70.npz"
+    MOTIONS_PATH = "logs/skrl/cartpole_direct/memories/25-05-27_01-27-38-104445_memory_0x7fbe681c23b0.npz"
     num_amp_observations = 1
 
 
@@ -77,17 +79,8 @@ class CartpoleGailEnv(DirectRLEnv):
         self.joint_vel = self.cartpole.data.joint_vel
 
         
-        self._motion_loader = ExpertRolloutStorage(
-            expert_data_path=self.cfg.MOTIONS_PATH,
-            obs_shape=(cfg.observation_space,),
-            actions_shape=(cfg.action_space,),
-            gamma=0.99,
-            device=self.device,
-            max_num_demos=4096,
-            max_traj_length=4096,
-            subsampling=1,
-        )
-
+        self._motion_loader = load_memory(self.cfg.MOTIONS_PATH,)
+        
         self.amp_observation_size = self.cfg.num_amp_observations * self.cfg.observation_space
         self.amp_observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.amp_observation_size,))
         self.amp_observation_buffer = torch.zeros(
@@ -128,18 +121,13 @@ class CartpoleGailEnv(DirectRLEnv):
             ),
             dim=-1,
         )
-        # update AMP observation history
         for i in reversed(range(self.cfg.num_amp_observations - 1)):
             self.amp_observation_buffer[:, i + 1] = self.amp_observation_buffer[:, i]
-        # build AMP observation
         self.amp_observation_buffer[:, 0] = obs.clone()
 
-        # update AMP action history
         for i in reversed(range(self.cfg.num_amp_observations - 1)):
             self.amp_action_buffer[:, i + 1] = self.amp_action_buffer[:, i]
-        # build AMP action
         self.amp_action_buffer[:, 0] = self.actions.clone() # / self.action_scale
-
         self.extras = {
             "amp_obs": self.amp_observation_buffer.view(-1, self.amp_observation_size),
             "amp_actions": self.amp_action_buffer.view(-1, self.amp_action_size),
@@ -196,14 +184,13 @@ class CartpoleGailEnv(DirectRLEnv):
         self.cartpole.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
 
-    def collect_reference_motions(self, num_samples: int, current_times: np.ndarray | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        motions = list(self._motion_loader.mini_batch_generator(mini_batch_size=1, num_epochs=1))
-        states = [m[0] for m in motions]
-        actions = [m[1] for m in motions]
-        random_index = np.random.randint(0, len(states[0]))
-        # print(f"random_index: {random_index}")
-        return states[random_index][:num_samples].to(self.device), actions[random_index][:num_samples].to(self.device)
-
+    def collect_reference_motions(self, num_samples: int, current_times: np.ndarray | None = None) -> List[List[torch.Tensor]]:
+        motion_batches = self._motion_loader.sample(
+            names=('states', 'actions'),
+            batch_size=1,
+            sequence_length=num_samples,
+        )
+        return motion_batches
 
 
 @torch.jit.script

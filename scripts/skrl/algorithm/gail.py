@@ -15,7 +15,10 @@ from skrl.agents.torch import Agent
 from skrl.memories.torch import Memory
 from skrl.models.torch import Model
 from skrl.resources.schedulers.torch import KLAdaptiveLR
-from skrl.agents.torch.amp import AMP
+from skrl.agents.torch.ppo import PPO
+
+import matplotlib.pyplot as plt
+import numpy as np
 
 
 # fmt: off
@@ -24,6 +27,7 @@ GAIL_DEFAULT_CONFIG = {
     "rollouts": 16,                 # number of rollouts before updating
     "learning_epochs": 6,           # number of learning epochs during each update
     "mini_batches": 2,              # number of mini batches during each learning epoch
+    "n_discriminator_updates": 1,   # number of discriminator updates during each learning epoch
 
     "discount_factor": 0.99,        # discount factor (gamma)
     "lambda": 0.95,                 # TD(lambda) coefficient (lam) for computing returns and advantages
@@ -81,6 +85,16 @@ GAIL_DEFAULT_CONFIG = {
 # fmt: on
 
 
+def mixup_state_action(self, x_s_expert, x_a_expert, x_s_agent, x_a_agent, alpha=1.0):
+    lam = np.random.beta(alpha, alpha)
+    batch_size = x_s_expert.size()[0]
+    index = torch.randperm(batch_size).to(self.device)
+    mixed_x_s = lam * x_s_expert + (1 - lam) * x_s_agent[index, :]
+    mixed_x_a = lam * x_a_expert + (1 - lam) * x_a_agent[index, :]
+
+    return mixed_x_s, mixed_x_a, lam
+
+
 class GAIL(Agent):
     def __init__(
         self,
@@ -93,7 +107,7 @@ class GAIL(Agent):
         amp_observation_space: Union[int, Tuple[int], gymnasium.Space],
         motion_dataset: Memory,
         reply_buffer: Memory,
-        collect_reference_motions: Callable[[int], torch.Tensor],
+        collect_reference_motions: Callable[[int], tuple[torch.Tensor, torch.Tensor]] = None,
         collect_observation: Optional[Callable[[], torch.Tensor]] = None,
     ) -> None:
         """Adversarial Motion Priors (AMP)
@@ -141,7 +155,8 @@ class GAIL(Agent):
             device=device,
             cfg=_cfg,
         )
-
+        self.first_run = True
+        
         self.observation_space: Union[int, Tuple[int], gymnasium.Space]
         self.action_space: Union[int, Tuple[int], gymnasium.Space]
 
@@ -171,8 +186,12 @@ class GAIL(Agent):
             if self.discriminator is not None:
                 self.discriminator.broadcast_parameters()
 
+        # PLotting
+        plt.ion()
+        self.fig, self.ax = plt.subplots(5, 1, figsize=(10, 10))
         # configuration
         self._learning_epochs = self.cfg["learning_epochs"]
+        self.n_discriminator_updates = self.cfg["n_discriminator_updates"]
         self._mini_batches = self.cfg["mini_batches"]
         self._rollouts = self.cfg["rollouts"]
         self._rollout = 0
@@ -217,21 +236,31 @@ class GAIL(Agent):
         self._device_type = torch.device(device).type
         if version.parse(torch.__version__) >= version.parse("2.4"):
             self.scaler = torch.amp.GradScaler(device=self._device_type, enabled=self._mixed_precision)
+            self.scaler_disc = torch.amp.GradScaler(device=self._device_type, enabled=self._mixed_precision)
         else:
             self.scaler = torch.cuda.amp.GradScaler(enabled=self._mixed_precision)
+            self.scaler_disc = torch.cuda.amp.GradScaler(enabled=self._mixed_precision)
 
         # set up optimizer and learning rate scheduler
         if self.policy is not None and self.value is not None and self.discriminator is not None:
             self.optimizer = torch.optim.Adam(
-                itertools.chain(self.policy.parameters(), self.value.parameters(), self.discriminator.parameters()),
+                itertools.chain(self.policy.parameters(), self.value.parameters()),
+                lr=self._learning_rate,
+            )
+            self.optimizer_disc = torch.optim.Adam(
+                itertools.chain(self.discriminator.parameters()),
                 lr=self._learning_rate,
             )
             if self._learning_rate_scheduler is not None:
                 self.scheduler = self._learning_rate_scheduler(
                     self.optimizer, **self.cfg["learning_rate_scheduler_kwargs"]
                 )
+                self.scheduler_disc = self._learning_rate_scheduler(
+                    self.optimizer_disc, **self.cfg["learning_rate_scheduler_kwargs"]
+                )
 
             self.checkpoint_modules["optimizer"] = self.optimizer
+            self.checkpoint_modules["optimizer_disc"] = self.optimizer_disc
 
         # set up preprocessors
         if self._state_preprocessor:
@@ -277,9 +306,6 @@ class GAIL(Agent):
             self.memory.create_tensor(name="values", size=1, dtype=torch.float32)
             self.memory.create_tensor(name="returns", size=1, dtype=torch.float32)
             self.memory.create_tensor(name="advantages", size=1, dtype=torch.float32)
-
-            self.memory.create_tensor(name="amp_states", size=self.amp_observation_space, dtype=torch.float32)
-            self.memory.create_tensor(name="amp_actions", size=self.action_space, dtype=torch.float32)
             self.memory.create_tensor(name="next_values", size=1, dtype=torch.float32)
 
         self.tensors_names = [
@@ -292,8 +318,6 @@ class GAIL(Agent):
             "values",
             "returns",
             "advantages",
-            "amp_states",
-            "amp_actions",
             "next_values",
         ]
 
@@ -303,12 +327,12 @@ class GAIL(Agent):
             self.motion_dataset.create_tensor(name="actions", size=self.action_space, dtype=torch.float32)
             self.reply_buffer.create_tensor(name="states", size=self.amp_observation_space, dtype=torch.float32)
             self.reply_buffer.create_tensor(name="actions", size=self.action_space, dtype=torch.float32)
-
-            # initialize motion dataset
-            for _ in range(math.ceil(self.motion_dataset.memory_size / self._amp_batch_size)):
-                ref_motions = self.collect_reference_motions(self._amp_batch_size)
-                self.motion_dataset.add_samples(states=ref_motions[0], actions=ref_motions[1])
-
+            for i in range(math.ceil(self.motion_dataset.memory_size / self._amp_batch_size)):
+                if i % 10000 == 0:
+                    print(f"Collecting reference motions {self.motion_dataset.memory_index}")
+                motions = self.collect_reference_motions(self._amp_batch_size)
+                self.motion_dataset.add_samples(states=motions[0][0], actions=motions[0][1])
+                
         # create temporary variables needed for storage and computation
         self._current_log_prob = None
         self._current_states = None
@@ -329,9 +353,7 @@ class GAIL(Agent):
         # use collected states
         if self._current_states is not None:
             states = self._current_states
-
         states = self._state_preprocessor(states)
-
         # sample random actions
         # TODO, check for stochasticity
         if timestep < self._random_timesteps:
@@ -385,9 +407,6 @@ class GAIL(Agent):
         )
 
         if self.memory is not None:
-            amp_states = infos["amp_obs"]
-            amp_actions = infos["amp_actions"]
-
             # reward shaping
             if self._rewards_shaper is not None:
                 rewards = self._rewards_shaper(rewards, timestep, timesteps)
@@ -410,11 +429,6 @@ class GAIL(Agent):
                 else:
                     next_values *= terminated.view(-1, 1).logical_not()
 
-            # print('State shape: ', states.shape)
-            # print('Action shape: ', actions.shape)
-            # print('AMP States shape: ', amp_states.shape)
-            # print('AMP actions shape', amp_actions.shape)
-
             self.memory.add_samples(
                 states=states,
                 actions=actions,
@@ -424,8 +438,6 @@ class GAIL(Agent):
                 truncated=truncated,
                 log_prob=self._current_log_prob,
                 values=values,
-                amp_states=amp_states,
-                amp_actions=amp_actions,
                 next_values=next_values,
             )
             for memory in self.secondary_memories:
@@ -438,8 +450,6 @@ class GAIL(Agent):
                     truncated=truncated,
                     log_prob=self._current_log_prob,
                     values=values,
-                    amp_states=amp_states,
-                    amp_actions=amp_actions,
                     next_values=next_values,
                 )
 
@@ -466,11 +476,118 @@ class GAIL(Agent):
         if not self._rollout % self._rollouts and timestep >= self._learning_starts:
             self.set_mode("train")
             self._update(timestep, timesteps)
+            self._update_discriminator(timestep, timesteps)
             self.set_mode("eval")
 
-        # write tracking data and checkpoints
-        super().post_interaction(timestep, timesteps)
+        super().post_interaction(timestep, timesteps) # write tracking data and checkpoints
 
+        
+    def _update_discriminator(self, timestep: int, timesteps: int) -> None:
+        for i in range(self.n_discriminator_updates):
+            # print(f"[DEBUG] {self.reply_buffer.memory_index}")
+            sampled_replay_batches = self.reply_buffer.sample(
+                names=["states", "actions"],
+                batch_size=self.memory.num_envs,
+                mini_batches=self._mini_batches,
+                sequence_length=self._amp_batch_size,
+            )
+            sampled_expert_batches = self.motion_dataset.sample(
+                names=["states", "actions"],
+                batch_size=self.memory.num_envs,
+                mini_batches=self._mini_batches,
+                sequence_length=self._amp_batch_size,
+            )
+            
+            cumulative_discriminator_loss = 0
+            for batch_index, (generator_sample, expert_sample) in enumerate(zip(sampled_replay_batches, sampled_expert_batches)):
+                with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):                
+                    # Get from replay buffer
+                    sampled_generator_states = self._amp_state_preprocessor(generator_sample[0], train=True)
+                    sampled_generator_actions = self._amp_action_preprocessor(generator_sample[1], train=True)
+                    # Get from motion dataset   
+                    sampled_expert_states = self._amp_state_preprocessor(expert_sample[0], train=True)
+                    sampled_expert_actions = self._amp_action_preprocessor(expert_sample[1], train=True)                  
+
+                    if i == 0 and (timestep-99) % 1000 == 0 and False:
+                        plot_trajectories(
+                            sampled_generator_states, sampled_generator_actions, 
+                            sampled_expert_states, sampled_expert_actions,
+                            self.fig, self.ax
+                        )
+                            
+                    sampled_expert_states.requires_grad_(True)
+                    sampled_expert_actions.requires_grad_(True)
+                    generator_logits, _, _ = self.discriminator.act({"states": sampled_generator_states, "taken_actions": sampled_generator_actions}, role="discriminator")
+                    expert_logits, _, _ = self.discriminator.act({"states": sampled_expert_states, "taken_actions": sampled_expert_actions}, role="discriminator")
+
+                    mixup = True
+                    both = False
+                    if mixup or both:
+                        sampled_mixed_states, sampled_mixed_actions, lam = mixup_state_action(
+                            self, sampled_expert_states, sampled_expert_actions, sampled_generator_states, sampled_generator_actions
+                        )
+                        mixed_logits, _, _ = self.discriminator.act(
+                            {"states": sampled_mixed_states, "taken_actions": sampled_mixed_actions}, role="discriminator"
+                        )
+                        # Mixup loss
+                        mixup_loss = lam * nn.BCEWithLogitsLoss()(mixed_logits, torch.ones_like(mixed_logits)) + \
+                                     (1 - lam) * nn.BCEWithLogitsLoss()(mixed_logits, torch.zeros_like(mixed_logits))
+                
+                    # Discriminator loss with expert logits high and generator logits low
+                    discriminator_loss = 0.5 * (
+                        nn.BCEWithLogitsLoss()(generator_logits, torch.zeros_like(generator_logits))
+                        + torch.nn.BCEWithLogitsLoss()(expert_logits, torch.ones_like(expert_logits))
+                    )
+                    
+                    if mixup:
+                        discriminator_loss = mixup_loss
+                    if both:
+                        discriminator_loss += mixup_loss
+                    
+                    if self._discriminator_logit_regularization_scale:
+                        logit_weights = torch.flatten(list(self.discriminator.modules())[-1].weight)
+                        discriminator_loss += self._discriminator_logit_regularization_scale * torch.sum(
+                            torch.square(logit_weights)
+                        )
+
+                    if self._discriminator_gradient_penalty_scale:
+                        amp_motion_gradient = torch.autograd.grad(
+                            expert_logits,
+                            sampled_expert_states,
+                            grad_outputs=torch.ones_like(expert_logits),
+                            create_graph=True,
+                            retain_graph=True,
+                            only_inputs=True,
+                        )
+                        gradient_penalty = torch.sum(torch.square(amp_motion_gradient[0]), dim=-1).mean()
+                        discriminator_loss += self._discriminator_gradient_penalty_scale * gradient_penalty
+
+                    if self._discriminator_weight_decay_scale:
+                        weights = [
+                            torch.flatten(module.weight)
+                            for module in self.discriminator.modules()
+                            if isinstance(module, torch.nn.Linear)
+                        ]
+                        weight_decay = torch.sum(torch.square(torch.cat(weights, dim=-1)))
+                        discriminator_loss += self._discriminator_weight_decay_scale * weight_decay
+
+                    discriminator_loss *= self._discriminator_loss_scale
+                    cumulative_discriminator_loss += discriminator_loss.item()
+                    
+            # Optimization step
+            self.optimizer_disc.zero_grad()
+            self.scaler_disc.scale(discriminator_loss).backward()
+            if config.torch.is_distributed:
+                self.discriminator.reduce_parameters()
+                
+            self.scaler_disc.step(self.optimizer_disc)
+            self.scaler_disc.update()
+
+            self.track_data(
+                "Loss / Discriminator loss", cumulative_discriminator_loss / (self._mini_batches)
+            )
+                    
+            
     def _update(self, timestep: int, timesteps: int) -> None:
         """Algorithm's main update step
 
@@ -480,89 +597,28 @@ class GAIL(Agent):
         :type timesteps: int
         """
 
-        def compute_gae(
-            rewards: torch.Tensor,
-            dones: torch.Tensor,
-            values: torch.Tensor,
-            next_values: torch.Tensor,
-            discount_factor: float = 0.99,
-            lambda_coefficient: float = 0.95,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            """Compute the Generalized Advantage Estimator (GAE)
-
-            :param rewards: Rewards obtained by the agent
-            :type rewards: torch.Tensor
-            :param dones: Signals to indicate that episodes have ended
-            :type dones: torch.Tensor
-            :param values: Values obtained by the agent
-            :type values: torch.Tensor
-            :param next_values: Next values obtained by the agent
-            :type next_values: torch.Tensor
-            :param discount_factor: Discount factor
-            :type discount_factor: float
-            :param lambda_coefficient: Lambda coefficient
-            :type lambda_coefficient: float
-
-            :return: Generalized Advantage Estimator
-            :rtype: torch.Tensor
-            """
-            advantage = 0
-            advantages = torch.zeros_like(rewards)
-            not_dones = dones.logical_not()
-            memory_size = rewards.shape[0]
-
-            # advantages computation
-            for i in reversed(range(memory_size)):
-                advantage = (
-                    rewards[i]
-                    - values[i]
-                    + discount_factor * (next_values[i] + lambda_coefficient * not_dones[i] * advantage)
-                )
-                advantages[i] = advantage
-            # returns computation
-            returns = advantages + values
-            # normalize advantages
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-            return returns, advantages
-
-        # update dataset of reference motions
-        motion_states, motion_actions = self.collect_reference_motions(self._amp_batch_size)
-        self.motion_dataset.add_samples(
-            states=motion_states,
-            actions=motion_actions,
-        )
-
-        # print(f"Motion_states: {motion_states.shape}, Motion_actions: {motion_actions.shape}")
-        # # Check if there are nan values in the motion dataset
-        if torch.isnan(motion_states).any() or torch.isnan(motion_actions).any():
-            ("NaN values found in the motion dataset")
-
-        # compute combined rewards
+        # Compute Combined Rewards from Discriminator
         rewards = self.memory.get_tensor_by_name("rewards")
-        amp_states = self.memory.get_tensor_by_name("amp_states")
-        amp_actions = self.memory.get_tensor_by_name("amp_actions")
-
-        # print(f"Amp_states: {amp_states.shape}, Amp_actions: {amp_actions.shape}")
-        # # Check if there are nan values in the amp states and actions
-        if torch.isnan(amp_states).any() or torch.isnan(amp_actions).any():
-            print("NaN values found in the amp states and actions")
-        # print(f"amp_states: {amp_states.shape}, amp_actions: {amp_actions.shape}")
-
-
+        states = self.memory.get_tensor_by_name("states")
+        actions = self.memory.get_tensor_by_name("actions")
+        self.reply_buffer.add_samples(
+            actions=actions.permute(1, 0, *range(2, actions.ndim)).contiguous().view(-1, actions.shape[-1]),
+            states=states.permute(1, 0, *range(2, states.ndim)).contiguous().view(-1, states.shape[-1]),
+        )
+        
         with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
-            amp_logits, _, _ = self.discriminator.act(
-                {"states": self._amp_state_preprocessor(amp_states), "taken_actions": self._amp_action_preprocessor(amp_actions)}, role="discriminator"
+            disc_logits, _, _ = self.discriminator.act(
+                {"states": self._amp_state_preprocessor(states), "taken_actions": self._amp_action_preprocessor(actions)}, role="discriminator"
             )
-            style_reward = -torch.log(
-                torch.maximum(1 - 1 / (1 + torch.exp(-amp_logits)), torch.tensor(0.0001, device=self.device))
-            )
+            style_reward = -torch.log(torch.clamp(1 - torch.sigmoid(disc_logits), min=1e-4))
             style_reward *= self._discriminator_reward_scale
             style_reward = style_reward.view(rewards.shape)
+        
+        combined_rewards = style_reward    
+        self.track_data("Reward / Combined reward", combined_rewards.mean().item())
+        self.track_data("Reward / Style reward", style_reward.mean().item())
 
-        combined_rewards = style_reward
-        # print(f"Combined_rewards: {combined_rewards.shape}")
-
-        # compute returns and advantages
+        # Compute returns and advantages
         values = self.memory.get_tensor_by_name("values")
         next_values = self.memory.get_tensor_by_name("next_values")
         returns, advantages = compute_gae(
@@ -573,47 +629,18 @@ class GAIL(Agent):
             discount_factor=self._discount_factor,
             lambda_coefficient=self._lambda,
         )
-
         self.memory.set_tensor_by_name("values", self._value_preprocessor(values, train=True))
         self.memory.set_tensor_by_name("returns", self._value_preprocessor(returns, train=True))
         self.memory.set_tensor_by_name("advantages", advantages)
-
-        # sample mini-batches from memory => Change to sampling a full trajectory ? 
-        sampled_batches = self.memory.sample_all(names=self.tensors_names, mini_batches=self._mini_batches)
-        sampled_motion_batches = self.motion_dataset.sample(
-            names=["states", "actions"], batch_size=self.memory.memory_size * self.memory.num_envs, mini_batches=self._mini_batches
-        )
-        # print(f"Sampled_motion_batches: {sampled_motion_batches[0][0].shape}, {sampled_motion_batches[1][0].shape}")
-        # # Check if there are nan values in the sampled motion batches
-        if torch.isnan(sampled_motion_batches[0][0]).any() or torch.isnan(sampled_motion_batches[1][0]).any():
-            print("NaN values found in the sampled motion batches")
-        if len(self.reply_buffer):
-            # print(f"Reply_buffer size: {self.reply_buffer.memory_index}")
-            sampled_replay_batches = self.reply_buffer.sample(
-                names=["states", "actions"],
-                batch_size=self.memory.memory_size * self.memory.num_envs,
-                mini_batches=self._mini_batches,
-            )
-        else:
-            # print(f"Reply_buffer size is 0")
-            sampled_replay_batches = [[batches[self.tensors_names.index(elem)] for elem in ["amp_states", "amp_actions"]] for batches in sampled_batches]
-        
-        # print(f"Sampled_replay_batches: {sampled_replay_batches[0][0].shape}, {sampled_replay_batches[1][0].shape}")
-        # Check if there are nan values in the sampled replay batches
-        if torch.isnan(sampled_replay_batches[0][0]).any():
-            print("NaN values found in the sampled replay batches states")
-        if torch.isnan(sampled_replay_batches[1][0]).any():
-            print("NaN values found in the sampled replay batches actions")
-
+                
+                
+        # Perform learning steps for the generator
         cumulative_policy_loss = 0
         cumulative_entropy_loss = 0
         cumulative_value_loss = 0
-        cumulative_discriminator_loss = 0
+        sampled_batches = self.memory.sample_all(names=self.tensors_names, mini_batches=self._mini_batches)
 
-        # learning epochs
         for epoch in range(self._learning_epochs):
-            kl_divergences = []
-
             # mini-batches loop
             for batch_index, (
                 sampled_states,
@@ -625,237 +652,136 @@ class GAIL(Agent):
                 sampled_values,
                 sampled_returns,
                 sampled_advantages,
-                sampled_amp_states,
-                sampled_amp_actions,
                 _,
             ) in enumerate(sampled_batches):
 
                 with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
 
                     sampled_states = self._state_preprocessor(sampled_states, train=True)
-
                     _, next_log_prob, _ = self.policy.act(
                         {"states": sampled_states, "taken_actions": sampled_actions}, role="policy"
                     )
-
-                    # compute approximate KL divergence
-                    with torch.no_grad():
-                        ratio = next_log_prob - sampled_log_prob
-                        kl_divergence = ((torch.exp(ratio) - 1) - ratio).mean()
-                        kl_divergences.append(kl_divergence)
-
-                    # compute entropy loss
+ 
+                    # Entropy loss
                     if self._entropy_loss_scale:
                         entropy_loss = -self._entropy_loss_scale * self.policy.get_entropy(role="policy").mean()
                     else:
                         entropy_loss = 0
 
-                    # compute policy loss
+                    # Policy loss
                     ratio = torch.exp(next_log_prob - sampled_log_prob)
                     surrogate = sampled_advantages * ratio
-                    surrogate_clipped = sampled_advantages * torch.clip(
-                        ratio, 1.0 - self._ratio_clip, 1.0 + self._ratio_clip
-                    )
-
+                    surrogate_clipped = sampled_advantages * torch.clip(ratio, 1.0 - self._ratio_clip, 1.0 + self._ratio_clip)
+                    # print(f"[DEBUG] surrogate: {surrogate.view(-1)}")
+                    # print(f"[DEBUG] surrogate clipped: {surrogate_clipped.view(-1)}")
                     policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
+                    # print(f"[DEBUG] policy loss: {policy_loss.item()}")
 
-                    # compute value loss
+                    # Value loss
                     predicted_values, _, _ = self.value.act({"states": sampled_states}, role="value")
-
                     if self._clip_predicted_values:
                         predicted_values = sampled_values + torch.clip(
                             predicted_values - sampled_values, min=-self._value_clip, max=self._value_clip
                         )
                     value_loss = self._value_loss_scale * F.mse_loss(sampled_returns, predicted_values)
 
-                    # compute discriminator loss
-                    if self._discriminator_batch_size:
-                        sampled_amp_states = self._amp_state_preprocessor(
-                            sampled_amp_states[0 : self._discriminator_batch_size], train=True
-                        )
-                        sampled_amp_actions = self._amp_action_preprocessor(
-                            sampled_amp_actions[0 : self._discriminator_batch_size], train=True
-                        )
-                        
-                        sampled_amp_replay_states = self._amp_state_preprocessor(
-                            sampled_replay_batches[batch_index][0][0 : self._discriminator_batch_size], train=True
-                        )
-                        sampled_replay_actions = self._amp_action_preprocessor(
-                            sampled_replay_batches[batch_index][1][0 : self._discriminator_batch_size], train=True
-                        )
-
-                        sampled_amp_motion_states = self._amp_state_preprocessor(
-                            sampled_motion_batches[batch_index][0][0 : self._discriminator_batch_size], train=True
-                        )
-                        sampled_motion_actions = self._amp_action_preprocessor(
-                            sampled_motion_batches[batch_index][1][0 : self._discriminator_batch_size], train=True
-                        )
-                    else:
-                        sampled_amp_states = self._amp_state_preprocessor(sampled_amp_states, train=True)
-                        sampled_amp_actions = self._amp_action_preprocessor(sampled_amp_actions, train=True)
-
-                        sampled_amp_replay_states = self._amp_state_preprocessor(
-                            sampled_replay_batches[batch_index][0], train=True
-                        )
-                        sampled_replay_actions = self._amp_action_preprocessor(
-                            sampled_replay_batches[batch_index][1], train=True
-                        )
-
-                        sampled_amp_motion_states = self._amp_state_preprocessor(
-                            sampled_motion_batches[batch_index][0], train=True
-                        )
-                        sampled_motion_actions = self._amp_action_preprocessor(
-                            sampled_motion_batches[batch_index][1], train=True
-                        )
-
-                    # print("Epoch: ", epoch)
-                    # print(f"Sampled_amp_states: {sampled_amp_states.shape}, Sampled_amp_actions: {sampled_amp_actions.shape}")
-                    # # Check if there are nan values in the sampled amp states and actions
-                    if torch.isnan(sampled_amp_states).any() or torch.isnan(sampled_amp_actions).any():
-                        print("NaN values found in the sampled amp states and actions")
- 
-                    # print(f"Sampled_amp_replay_states: {sampled_amp_replay_states.shape}, Sampled_replay_actions: {sampled_replay_actions.shape}")
-                    # # Check if there are nan values in the sampled amp replay states and actions
-                    if torch.isnan(sampled_amp_replay_states).any() or torch.isnan(sampled_replay_actions).any():
-                        print("NaN values found in the sampled amp replay states and actions")
-
-                    # print(f"Sampled_amp_motion_states: {sampled_amp_motion_states.shape}, Sampled_motion_actions: {sampled_motion_actions.shape}")
-                    # # Check if there are nan values in the sampled amp motion states and actions
-                    if torch.isnan(sampled_amp_motion_states).any() or torch.isnan(sampled_motion_actions).any():
-                        print("NaN values found in the sampled amp motion states and actions")
-                    
-
-                    sampled_amp_motion_states.requires_grad_(True)
-                    amp_logits, _, _ = self.discriminator.act(
-                        {"states": sampled_amp_states, "taken_actions": sampled_amp_actions}, role="discriminator"
-                    )
-                    amp_replay_logits, _, _ = self.discriminator.act(
-                        {"states": sampled_amp_replay_states, "taken_actions": sampled_replay_actions}, role="discriminator"
-                    )
-                    amp_motion_logits, _, _ = self.discriminator.act(
-                        {"states": sampled_amp_motion_states, "taken_actions": sampled_motion_actions}, role="discriminator"
-                    )
-
-                    # print(f"Amp_logits: {amp_logits.shape}, Amp_replay_logits: {amp_replay_logits.shape}, Amp_motion_logits: {amp_motion_logits.shape}")
-                    # Check if there are nan values in the amp logits
-                    if torch.isnan(amp_logits).any() or torch.isnan(amp_replay_logits).any() or torch.isnan(amp_motion_logits).any():
-                        print("NaN values found in the amp logits")
-
-                    amp_cat_logits = torch.cat([amp_logits, amp_replay_logits], dim=0)
-
-                    # discriminator prediction loss
-                    discriminator_loss = 0.5 * (
-                        nn.BCEWithLogitsLoss()(amp_cat_logits, torch.zeros_like(amp_cat_logits))
-                        + torch.nn.BCEWithLogitsLoss()(amp_motion_logits, torch.ones_like(amp_motion_logits))
-                    )
-
-                    # discriminator logit regularization
-                    if self._discriminator_logit_regularization_scale:
-                        logit_weights = torch.flatten(list(self.discriminator.modules())[-1].weight)
-                        discriminator_loss += self._discriminator_logit_regularization_scale * torch.sum(
-                            torch.square(logit_weights)
-                        )
-
-                    # discriminator gradient penalty
-                    if self._discriminator_gradient_penalty_scale:
-                        amp_motion_gradient = torch.autograd.grad(
-                            amp_motion_logits,
-                            sampled_amp_motion_states,
-                            grad_outputs=torch.ones_like(amp_motion_logits),
-                            create_graph=True,
-                            retain_graph=True,
-                            only_inputs=True,
-                        )
-                        gradient_penalty = torch.sum(torch.square(amp_motion_gradient[0]), dim=-1).mean()
-                        discriminator_loss += self._discriminator_gradient_penalty_scale * gradient_penalty
-
-                    # discriminator weight decay
-                    if self._discriminator_weight_decay_scale:
-                        weights = [
-                            torch.flatten(module.weight)
-                            for module in self.discriminator.modules()
-                            if isinstance(module, torch.nn.Linear)
-                        ]
-                        weight_decay = torch.sum(torch.square(torch.cat(weights, dim=-1)))
-                        discriminator_loss += self._discriminator_weight_decay_scale * weight_decay
-
-                    discriminator_loss *= self._discriminator_loss_scale
-
-                # optimization step
+                # Optimization step
                 self.optimizer.zero_grad()
-                self.scaler.scale(policy_loss + entropy_loss + value_loss + discriminator_loss).backward()
-
-                # print(f"Policy loss: {policy_loss.item()}, Value loss: {value_loss.item()}, Discriminator loss: {discriminator_loss.item()}")
-                # print()
+                self.scaler.scale(policy_loss + entropy_loss + value_loss).backward()
 
                 if config.torch.is_distributed:
                     self.policy.reduce_parameters()
                     self.value.reduce_parameters()
-                    self.discriminator.reduce_parameters()
-
-                if self._grad_norm_clip > 0:
-                    self.scaler.unscale_(self.optimizer)
-                    nn.utils.clip_grad_norm_(
-                        itertools.chain(
-                            self.policy.parameters(), self.value.parameters(), self.discriminator.parameters()
-                        ),
-                        self._grad_norm_clip,
-                    )
 
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
 
-                # update cumulative losses
+                # Update cumulative losses
                 cumulative_policy_loss += policy_loss.item()
                 cumulative_value_loss += value_loss.item()
                 if self._entropy_loss_scale:
                     cumulative_entropy_loss += entropy_loss.item()
-                cumulative_discriminator_loss += discriminator_loss.item()
 
             # update learning rate
             if self._learning_rate_scheduler:
-                if isinstance(self.scheduler, KLAdaptiveLR):
-                    kl = torch.tensor(kl_divergences, device=self.device).mean()
-                    # reduce (collect from all workers/processes) KL in distributed runs
-                    if config.torch.is_distributed:
-                        torch.distributed.all_reduce(kl, op=torch.distributed.ReduceOp.SUM)
-                        kl /= config.torch.world_size
-                    self.scheduler.step(kl.item())
-                else:
-                    self.scheduler.step()
+                self.scheduler.step()
 
-
-
-        # update GAIL replay buffer
-        # print(f"Before Replay assignement: {amp_states.shape}, {amp_actions.shape}")
-        # # Check if there are nan values in the amp states and actions
-        if torch.isnan(amp_states).any():
-            print("NaN values found in the amp states")
-        if torch.isnan(amp_actions).any():
-            print("NaN values found in the amp actions")
-
-
-        self.reply_buffer.add_samples(
-            states=amp_states.view(-1, amp_states.shape[-1]),
-            actions=amp_actions.view(-1, amp_actions.shape[-1]),
-        )
-
-        # record data
-        # print(f"Recording data, Loss / Policy loss: {cumulative_policy_loss / (self._learning_epochs * self._mini_batches)}")
-        # print(f"Recording data, Loss / Value loss: {cumulative_value_loss / (self._learning_epochs * self._mini_batches)}")
-        # print(f"Recording data, Loss / Discriminator loss: {cumulative_discriminator_loss / (self._learning_epochs * self._mini_batches)}")
-        # print()
         self.track_data("Loss / Policy loss", cumulative_policy_loss / (self._learning_epochs * self._mini_batches))
+        self.track_data("Advantage / Mean", advantages.mean().item())
+        self.track_data("Advantage / Standard deviation", advantages.std().item())
+        
         self.track_data("Loss / Value loss", cumulative_value_loss / (self._learning_epochs * self._mini_batches))
         if self._entropy_loss_scale:
             self.track_data(
                 "Loss / Entropy loss", cumulative_entropy_loss / (self._learning_epochs * self._mini_batches)
             )
-        self.track_data(
-            "Loss / Discriminator loss", cumulative_discriminator_loss / (self._learning_epochs * self._mini_batches)
-        )
-
         self.track_data("Policy / Standard deviation", self.policy.distribution(role="policy").stddev.mean().item())
-
         if self._learning_rate_scheduler:
             self.track_data("Learning / Learning rate", self.scheduler.get_last_lr()[0])
+            
+            
+def compute_gae(
+    rewards: torch.Tensor,
+    dones: torch.Tensor,
+    values: torch.Tensor,
+    next_values: torch.Tensor,
+    discount_factor: float = 0.99,
+    lambda_coefficient: float = 0.95,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    advantage = 0
+    advantages = torch.zeros_like(rewards)
+    not_dones = dones.logical_not()
+    memory_size = rewards.shape[0]
+
+    # advantages computation
+    for i in reversed(range(memory_size)):
+        advantage = (
+            rewards[i]
+            - values[i]
+            + discount_factor * (next_values[i] + lambda_coefficient * not_dones[i] * advantage)
+        )
+        advantages[i] = advantage
+    # print(f"[DEBUG] Memory size: {memory_size}")
+    # print(f"[DEBUG] rewards: {rewards.view(-1)}")
+    # print(f"[DEBUG] values: {values.view(-1)}")
+    # print(f"[DEBUG] advantages: {advantages.view(-1)}")
+    # print(f"[DEBUG] adv mean: {advantages.mean()} | adv std: {advantages.std()}")
+    
+    # returns computation
+    returns = advantages + values
+    # normalize advantages
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    # print(f"[DEBUG] Normalized advantages: {advantages.view(-1)}")
+    return returns, advantages
+
+
+
+def plot_trajectories(
+    sampled_generator_states, sampled_generator_actions, sampled_expert_states, sampled_expert_actions,
+    fig, ax
+    ):
+    n_states = sampled_expert_states.shape[1]
+    n_actions = sampled_expert_actions.shape[1]
+
+    for i in range(n_states):
+        ax[i].clear()
+        # ax[i].plot(sampled_amp_states[:, i].cpu().numpy(), label="AMP States")
+        ax[i].plot(sampled_generator_states[:, i].cpu().numpy(), label="Generator States")
+        ax[i].plot(sampled_expert_states[:, i].cpu().numpy(), label="Expert States")
+        ax[i].set_title(f"State {i}")
+        ax[i].legend()
+        ax[i].set_xlabel("Time")
+        ax[i].set_ylabel("Value")
+        
+    for i in range(n_actions):
+        ax[n_states + i].clear()
+        # ax[n_states + i].plot(sampled_amp_actions[:, i].cpu().numpy(), label="AMP Actions")
+        ax[n_states + i].plot(sampled_generator_actions[:, i].cpu().numpy(), label="Generator Actions")
+        ax[n_states + i].plot(sampled_expert_actions[:, i].cpu().numpy(), label="Expert Actions")
+        ax[n_states + i].set_title(f"Actions {i}")
+        ax[n_states + i].legend()
+        ax[n_states + i].set_xlabel("Time")
+        ax[n_states + i].set_ylabel("Value")
+    plt.tight_layout()
+    plt.draw()
+    plt.pause(0.01)
