@@ -25,3 +25,13 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )
+
+gym.register(
+    id="Isaac-Franka-Cabinet-Direct-GAIL-v0",
+    entry_point=f"{__name__}.franka_cabinet_gail_env:FrankaCabinetEnvGAIL",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.franka_cabinet_gail_env:FrankaCabinetEnvGAILCfg",
+        "skrl_gail_cfg_entry_point": f"{agents.__name__}:skrl_gail_cfg.yaml",
+    },
+)
