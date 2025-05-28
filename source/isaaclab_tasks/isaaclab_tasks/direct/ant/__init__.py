@@ -32,6 +32,6 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.ant_gail_env:AntEnvGAILCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_gail_cfg.yaml",
+        "skrl_gail_cfg_entry_point": f"{agents.__name__}:skrl_gail_cfg.yaml",
     },
 )

@@ -63,7 +63,8 @@ GAIL_DEFAULT_CONFIG = {
     "discriminator_logit_regularization_scale": 0.05,   # logit regularization scale factor for the discriminator loss
     "discriminator_gradient_penalty_scale": 5,          # gradient penalty scaling factor for the discriminator loss
     "discriminator_weight_decay_scale": 0.0001,         # weight decay scaling factor for the discriminator loss
-
+    "mixup_type": None,          # mixup type for the discriminator loss (None, Mix, Both)
+    
     "rewards_shaper": None,         # rewards shaping function: Callable(reward, timestep, timesteps) -> reward
     "time_limit_bootstrap": False,  # bootstrap at timeout termination (episode truncation)
 
@@ -226,6 +227,9 @@ class GAIL(Agent):
         self._discriminator_logit_regularization_scale = self.cfg["discriminator_logit_regularization_scale"]
         self._discriminator_gradient_penalty_scale = self.cfg["discriminator_gradient_penalty_scale"]
         self._discriminator_weight_decay_scale = self.cfg["discriminator_weight_decay_scale"]
+        
+        self._mixup_type = self.cfg["mixup_type"]
+        assert self._mixup_type in [None, "Mix", "Both"], f"Invalid mixup type: {self._mixup_type}"
 
         self._rewards_shaper = self.cfg["rewards_shaper"]
         self._time_limit_bootstrap = self.cfg["time_limit_bootstrap"]
@@ -520,9 +524,8 @@ class GAIL(Agent):
                     generator_logits, _, _ = self.discriminator.act({"states": sampled_generator_states, "taken_actions": sampled_generator_actions}, role="discriminator")
                     expert_logits, _, _ = self.discriminator.act({"states": sampled_expert_states, "taken_actions": sampled_expert_actions}, role="discriminator")
 
-                    mixup = True
-                    both = False
-                    if mixup or both:
+                    # Mixup
+                    if self._mixup_type in ["Mix", "Both"]:
                         sampled_mixed_states, sampled_mixed_actions, lam = mixup_state_action(
                             self, sampled_expert_states, sampled_expert_actions, sampled_generator_states, sampled_generator_actions
                         )
@@ -538,11 +541,12 @@ class GAIL(Agent):
                         nn.BCEWithLogitsLoss()(generator_logits, torch.zeros_like(generator_logits))
                         + torch.nn.BCEWithLogitsLoss()(expert_logits, torch.ones_like(expert_logits))
                     )
-                    
-                    if mixup:
+                    if self._mixup_type == "Mix":
                         discriminator_loss = mixup_loss
-                    if both:
+                    elif self._mixup_type == "Both":
                         discriminator_loss += mixup_loss
+                    
+                    
                     
                     if self._discriminator_logit_regularization_scale:
                         logit_weights = torch.flatten(list(self.discriminator.modules())[-1].weight)

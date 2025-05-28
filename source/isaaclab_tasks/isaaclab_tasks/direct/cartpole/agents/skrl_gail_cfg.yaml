@@ -92,6 +92,7 @@ agent:
   discriminator_weight_decay_scale: 1.0e-06
   # rewards_shaper_scale: 1.0
   time_limit_bootstrap: False
+  mixup_type: null
 
 
   # logging and checkpoint

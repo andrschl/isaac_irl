@@ -46,7 +46,7 @@ class AntEnvGAILCfg(DirectRLEnvCfg):
     )
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=512, env_spacing=4.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1024, env_spacing=4.0, replicate_physics=True)
 
     # robot
     robot: ArticulationCfg = ANT_CFG.replace(prim_path="/World/envs/env_.*/Robot")
@@ -70,7 +70,7 @@ class AntEnvGAILCfg(DirectRLEnvCfg):
     num_amp_observations = 1
 
 
-class AntGAILEnv(LocomotionGAILEnv):
+class AntEnvGAIL(LocomotionGAILEnv):
     cfg: AntEnvGAILCfg
 
     def __init__(self, cfg: AntEnvGAILCfg, render_mode: str | None = None, **kwargs):
