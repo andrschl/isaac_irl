@@ -16,7 +16,7 @@ models:
     network:
       - name: net
         input: STATES
-        layers: [256, 128, 64]
+        layers: [32, 32]
         activations: relu
     output: ACTIONS
   value:  # see deterministic_model parameters
@@ -25,7 +25,7 @@ models:
     network:
       - name: net
         input: STATES
-        layers: [256, 128, 64]
+        layers: [32, 32]
         activations: relu
     output: ONE
   discriminator:  # see deterministic_model parameters
@@ -51,15 +51,15 @@ motion_dataset:
 
 reply_buffer:
   class: TrajectoryMemory
-  memory_size: 102400
+  memory_size: 20000
 
 # PPO agent configuration (field names are from PPO_DEFAULT_CONFIG)
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html
 agent:
-  class: GAIL
+  class: IRL
   rollouts: 100 # Rollout is longer then in PPO (32)
   learning_epochs: 8 # 8 in PPO
-  n_discriminator_updates: 15
+  n_discriminator_updates: 10
   mini_batches: 1
   discount_factor: 0.99 # same
   lambda: 0.95
@@ -82,17 +82,18 @@ agent:
   clip_predicted_values: True
   entropy_loss_scale: 0.0
   value_loss_scale: 2.0
-  discriminator_loss_scale: 0.3 # 5.0
+  discriminator_loss_scale: 1.0 # 5.0
   amp_batch_size: 100
   task_reward_weight: 0.0
   style_reward_weight: 1.0
   discriminator_reward_scale: 1.0
   discriminator_logit_regularization_scale: 0.001
-  discriminator_gradient_penalty_scale: 2.0 # 0.001
+  discriminator_gradient_penalty_scale: 0.01 # 5.0
   discriminator_weight_decay_scale: 1.0e-06
   # rewards_shaper_scale: 1.0
   time_limit_bootstrap: False
   mixup_type: null
+  enable_discounted_reward: True
 
 
   # logging and checkpoint
@@ -107,7 +108,8 @@ agent:
 # https://skrl.readthedocs.io/en/latest/api/trainers/sequential.html
 trainer:
   class: SequentialTrainer
-  timesteps: 40000
-  environment_info: log
+  timesteps: 100000
+  environment_info: log  
 
-expert_data_path: "logs/skrl/franka_cabinet_direct/memories/25-06-09_18-28-06-884565_memory_0x7f40cf9131c0.npz"
+
+expert_data_path: "logs/skrl/cartpole_direct/memories/25-05-27_01-27-38-104445_memory_0x7fbe681c23b0.npz"

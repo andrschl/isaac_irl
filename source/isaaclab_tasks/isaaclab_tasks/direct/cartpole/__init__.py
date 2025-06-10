@@ -25,6 +25,9 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:CartpolePPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
         "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+        "skrl_gail_cfg_entry_point": f"{agents.__name__}:skrl_gail_cfg.yaml",
+        "skrl_irl_cfg_entry_point": f"{agents.__name__}:skrl_irl_cfg.yaml",
+        "skrl_bc_cfg_entry_point": f"{agents.__name__}:skrl_bc_cfg.yaml",
     },
 )
 
@@ -44,7 +47,6 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.cartpole_gail_env:CartpoleEnvCfg",
-        "skrl_gail_cfg_entry_point": f"{agents.__name__}:skrl_gail_cfg.yaml",
     },
 )
 

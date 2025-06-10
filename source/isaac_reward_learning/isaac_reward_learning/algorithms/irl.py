@@ -40,7 +40,7 @@ class IRL:
         self.transition = RolloutStorage.Transition()
         self.reward_optimizer = optim.RMSprop(self.reward.parameters(), lr=rl_alg.learning_rate, weight_decay=weight_decay)
 
-        # IRL parameters
+        # IRL parameters 
         self.batch_size = batch_size
         self.num_learning_epochs = num_learning_epochs
         self.reward_loss_coef = reward_loss_coef

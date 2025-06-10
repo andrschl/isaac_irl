@@ -16,6 +16,7 @@ import argparse
 import sys
 
 from isaaclab.app import AppLauncher
+from scripts.skrl.env.irl_wrapper import ExpertTrajectoriesWrapper
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with skrl.")
@@ -41,7 +42,7 @@ parser.add_argument(
     "--algorithm",
     type=str,
     default="PPO",
-    choices=["AMP", "PPO", "IPPO", "MAPPO", "GAIL"],
+    choices=["AMP", "PPO", "IPPO", "MAPPO", "GAIL", "IRL", "BC"],
     help="The RL algorithm used for training the skrl agent.",
 )
 
@@ -168,7 +169,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent_cfg["agent"]["experiment"]["mode"] = mode
         agent_cfg["agent"]["experiment"]["wandb"] = True
         agent_cfg["agent"]["experiment"]["wandb_kwargs"] = {
-            "project": "GAIL_sycamore",
+            "project": f"SCITAS_{args_cli.task}",
             "entity": "sebastien-epfl-epfl",
             "name": log_dir,
         }
@@ -208,6 +209,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print("[INFO] Recording videos during training.")
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
+        
+    if 'expert_data_path' in agent_cfg:
+        env = ExpertTrajectoriesWrapper(env, expert_data_path=agent_cfg['expert_data_path'])
 
     # wrap around environment for skrl
     env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)  # same as: `wrap_env(env, wrapper="auto")`

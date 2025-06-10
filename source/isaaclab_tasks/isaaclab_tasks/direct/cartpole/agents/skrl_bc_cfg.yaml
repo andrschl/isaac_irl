@@ -56,48 +56,36 @@ reply_buffer:
 # PPO agent configuration (field names are from PPO_DEFAULT_CONFIG)
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html
 agent:
-  class: GAIL
-  rollouts: 100 # Rollout is longer then in PPO (32)
-  learning_epochs: 8 # 8 in PPO
-  n_discriminator_updates: 10
-  mini_batches: 1
-  discount_factor: 0.99 # same
-  lambda: 0.95
-  learning_rate: 5.0e-04 # 5.0e-04 in PPO 5.0e-05 in GAIL
-  learning_rate_scheduler: null # KLAdaptiveLR in PPO
-  learning_rate_scheduler_kwargs: null
-  state_preprocessor: RunningStandardScaler
-  state_preprocessor_kwargs: null
-  value_preprocessor: RunningStandardScaler
-  value_preprocessor_kwargs: null
-  amp_state_preprocessor: RunningStandardScaler
-  amp_state_preprocessor_kwargs: null
-  amp_action_preprocessor: RunningStandardScaler
-  amp_action_preprocessor_kwargs: null
-  random_timesteps: 0
-  learning_starts: 100
-  grad_norm_clip: 1.0  # 1.0 in PPO
-  ratio_clip: 0.2
-  value_clip: 0.2
-  clip_predicted_values: True
-  entropy_loss_scale: 0.0
-  value_loss_scale: 2.0
-  discriminator_loss_scale: 1.0 # 5.0
-  amp_batch_size: 100
-  task_reward_weight: 0.0
-  style_reward_weight: 1.0
-  discriminator_reward_scale: 1.0
-  discriminator_logit_regularization_scale: 0.001
-  discriminator_gradient_penalty_scale: 0.01 # 5.0
-  discriminator_weight_decay_scale: 1.0e-06
-  # rewards_shaper_scale: 1.0
-  time_limit_bootstrap: False
-  mixup_type: null
+  class: BC
+  rollouts: 100                 # number of rollouts before updating
+  learning_epochs: 6           # number of learning epochs during each update
+  mini_batches: 2              # number of mini batches during each learning epoch
+  n_policy_updates: 20         # number of discriminator updates during each learning epoch
+  discount_factor: 0.99        # discount factor (gamma)
+  lambda: 0.95                 # TD(lambda) coefficient (lam) for computing returns and advantages
+
+  learning_rate: 5.0e-5                  # learning rate
+  learning_rate_scheduler: null        # learning rate scheduler class (see torch.optim.lr_scheduler)
+  learning_rate_scheduler_kwargs: {}   # learning rate scheduler's kwargs (e.g. {"step_size": 1e-3})
+
+  state_preprocessor: null             # state preprocessor class (see skrl.resources.preprocessors)
+  state_preprocessor_kwargs: {}        # state preprocessor's kwargs (e.g. {"size": env.observation_space})
+  
+  random_timesteps: 0          # random exploration steps
+  learning_starts: 0           # learning starts after this many steps
+
+  grad_norm_clip: 0.0              # clipping coefficient for the norm of the gradients
+  batch_size: 64                  # batch size for updating the reference motion dataset
+
+  rewards_shaper: null         # rewards shaping function: Callable(reward, timestep, timesteps) -> reward
+  time_limit_bootstrap: false  # bootstrap at timeout termination (episode truncation)
+
+  mixed_precision: false       # enable automatic mixed precision for higher performance
 
 
   # logging and checkpoint
   experiment:
-    directory: "InvertedPendulumGail"
+    directory: "InvertedPendulumBC"
     experiment_name: ""
     write_interval: auto
     checkpoint_interval: auto
@@ -108,7 +96,6 @@ agent:
 trainer:
   class: SequentialTrainer
   timesteps: 10000
-  environment_info: log  
-
+  environment_info: log
 
 expert_data_path: "logs/skrl/cartpole_direct/memories/25-05-27_01-27-38-104445_memory_0x7fbe681c23b0.npz"

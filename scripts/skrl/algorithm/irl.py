@@ -23,7 +23,7 @@ import numpy as np
 
 # fmt: off
 # [start-config-dict-torch]
-GAIL_DEFAULT_CONFIG = {
+IRL_DEFAULT_CONFIG = {
     "rollouts": 16,                 # number of rollouts before updating
     "learning_epochs": 6,           # number of learning epochs during each update
     "mini_batches": 2,              # number of mini batches during each learning epoch
@@ -69,6 +69,7 @@ GAIL_DEFAULT_CONFIG = {
     "time_limit_bootstrap": False,  # bootstrap at timeout termination (episode truncation)
 
     "mixed_precision": False,       # enable automatic mixed precision for higher performance
+    "enable_discounted_reward": True,  # enable discounted reward computation for reward update
 
     "experiment": {
         "directory": "",            # experiment's parent directory
@@ -96,7 +97,7 @@ def mixup_state_action(self, x_s_expert, x_a_expert, x_s_agent, x_a_agent, alpha
     return mixed_x_s, mixed_x_a, lam
 
 
-class GAIL(Agent):
+class IRL(Agent):
     def __init__(
         self,
         models: Mapping[str, Model],
@@ -146,7 +147,7 @@ class GAIL(Agent):
 
         :raises KeyError: If the models dictionary is missing a required key
         """
-        _cfg = copy.deepcopy(GAIL_DEFAULT_CONFIG)
+        _cfg = copy.deepcopy(IRL_DEFAULT_CONFIG)
         _cfg.update(cfg if cfg is not None else {})
         super().__init__(
             models=models,
@@ -188,8 +189,8 @@ class GAIL(Agent):
                 self.discriminator.broadcast_parameters()
 
         # PLotting
-        plt.ion()
-        self.fig, self.ax = plt.subplots(5, 1, figsize=(10, 10))
+        # plt.ion()
+        # self.fig, self.ax = plt.subplots(5, 1, figsize=(10, 10))
         # configuration
         self._learning_epochs = self.cfg["learning_epochs"]
         self.n_discriminator_updates = self.cfg["n_discriminator_updates"]
@@ -215,6 +216,7 @@ class GAIL(Agent):
         self._amp_action_preprocessor = self.cfg["amp_action_preprocessor"]
 
         self._discount_factor = self.cfg["discount_factor"]
+        self._enable_discounted_reward = self.cfg["enable_discounted_reward"]
         self._lambda = self.cfg["lambda"]
 
         self._random_timesteps = self.cfg["random_timesteps"]
@@ -508,6 +510,7 @@ class GAIL(Agent):
                     # Get from replay buffer
                     sampled_generator_states = self._amp_state_preprocessor(generator_sample[0], train=True)
                     sampled_generator_actions = self._amp_action_preprocessor(generator_sample[1], train=True)
+                    
                     # Get from motion dataset   
                     sampled_expert_states = self._amp_state_preprocessor(expert_sample[0], train=True)
                     sampled_expert_actions = self._amp_action_preprocessor(expert_sample[1], train=True)                  
@@ -525,26 +528,46 @@ class GAIL(Agent):
                     expert_logits, _, _ = self.discriminator.act({"states": sampled_expert_states, "taken_actions": sampled_expert_actions}, role="discriminator")
 
                     # Mixup
-                    if self._mixup_type in ["Mix", "Both"]:
-                        sampled_mixed_states, sampled_mixed_actions, lam = mixup_state_action(
-                            self, sampled_expert_states, sampled_expert_actions, sampled_generator_states, sampled_generator_actions
-                        )
-                        mixed_logits, _, _ = self.discriminator.act(
-                            {"states": sampled_mixed_states, "taken_actions": sampled_mixed_actions}, role="discriminator"
-                        )
-                        # Mixup loss
-                        mixup_loss = lam * nn.BCEWithLogitsLoss()(mixed_logits, torch.ones_like(mixed_logits)) + \
-                                     (1 - lam) * nn.BCEWithLogitsLoss()(mixed_logits, torch.zeros_like(mixed_logits))
+                    # if self._mixup_type in ["Mix", "Both"]:
+                    #     sampled_mixed_states, sampled_mixed_actions, lam = mixup_state_action(
+                    #         self, sampled_expert_states, sampled_expert_actions, sampled_generator_states, sampled_generator_actions
+                    #     )
+                    #     mixed_logits, _, _ = self.discriminator.act(
+                    #         {"states": sampled_mixed_states, "taken_actions": sampled_mixed_actions}, role="discriminator"
+                    #     )
+                    #     # Mixup loss
+                    #     mixup_loss = lam * nn.BCEWithLogitsLoss()(mixed_logits, torch.ones_like(mixed_logits)) + \
+                    #                  (1 - lam) * nn.BCEWithLogitsLoss()(mixed_logits, torch.zeros_like(mixed_logits))
                 
                     # Discriminator loss with expert logits high and generator logits low
-                    discriminator_loss = 0.5 * (
-                        nn.BCEWithLogitsLoss()(generator_logits, torch.zeros_like(generator_logits))
-                        + torch.nn.BCEWithLogitsLoss()(expert_logits, torch.ones_like(expert_logits))
-                    )
-                    if self._mixup_type == "Mix":
-                        discriminator_loss = mixup_loss
-                    elif self._mixup_type == "Both":
-                        discriminator_loss += mixup_loss
+                    # discriminator_loss = 0.5 * (
+                    #     nn.BCEWithLogitsLoss()(generator_logits, torch.zeros_like(generator_logits))
+                    #     + torch.nn.BCEWithLogitsLoss()(expert_logits, torch.ones_like(expert_logits))
+                    # )
+                    
+                    # Compute Wasserstein-1 loss (generator_logits - expert_logits)
+                    # Then apply a discount factor to the loss as a "discounted reward"
+                    if self._enable_discounted_reward:
+                        batch_size = self._amp_batch_size
+                        print(f"[DEBUG] batch_size: {batch_size}")
+                        # Repeat discounts for each environment in the batch
+                        discounts = torch.pow(
+                            self._discount_factor,
+                            torch.arange(batch_size, device=generator_logits.device, dtype=generator_logits.dtype)
+                        )
+                        # Expand discounts to match the shape (num_envs * batch_size,)
+                        discounts = discounts.repeat(self.memory.num_envs)
+                        discounted_generator = generator_logits.view(-1) * discounts
+                        discounted_expert = expert_logits.view(-1) * discounts
+                        discriminator_loss = discounted_generator.mean() - discounted_expert.mean()
+                    else:
+                        discriminator_loss = generator_logits.mean() - expert_logits.mean()
+                    
+                    # if self._mixup_type == "Mix":
+                    #     discriminator_loss = mixup_loss
+                    # elif self._mixup_type == "Both":
+                    #     discriminator_loss += mixup_loss
+                    
                     
                     
                     if self._discriminator_logit_regularization_scale:
@@ -553,31 +576,17 @@ class GAIL(Agent):
                             torch.square(logit_weights)
                         )
 
-                    # Gradient penalty (WGAN-GP)
                     if self._discriminator_gradient_penalty_scale:
-                        
-                        expert_gradient = torch.autograd.grad(
+                        amp_motion_gradient = torch.autograd.grad(
                             expert_logits,
-                            (sampled_expert_states, sampled_expert_actions),
+                            sampled_expert_states,
                             grad_outputs=torch.ones_like(expert_logits),
                             create_graph=True,
                             retain_graph=True,
                             only_inputs=True,
                         )
-                        # Concatenate gradients for state and action
-                        expert_gradient = torch.cat([g.view(g.size(0), -1) for g in expert_gradient], dim=1)
-                        gradient_penalty = torch.sum(torch.square(expert_gradient[0]), dim=-1).mean()
+                        gradient_penalty = torch.sum(torch.square(amp_motion_gradient[0]), dim=-1).mean()
                         discriminator_loss += self._discriminator_gradient_penalty_scale * gradient_penalty
-                    
-                    # Chi2 regularization
-                    self._discriminator_chi2_regularization_scale = None
-                    if self._discriminator_chi2_regularization_scale:
-                        expert_probs = torch.sigmoid(expert_logits)
-                        policy_probs = torch.sigmoid(generator_logits)
-                        policy_probs = torch.clamp(policy_probs, min=1e-8)
-                        chi2_reg = torch.mean(((expert_probs - policy_probs) ** 2) / policy_probs)
-                        discriminator_loss += self._discriminator_chi2_regularization_scale * chi2_reg
-
 
                     if self._discriminator_weight_decay_scale:
                         weights = [
@@ -627,7 +636,7 @@ class GAIL(Agent):
             disc_logits, _, _ = self.discriminator.act(
                 {"states": self._amp_state_preprocessor(states), "taken_actions": self._amp_action_preprocessor(actions)}, role="discriminator"
             )
-            style_reward = -torch.log(torch.clamp(1 - torch.sigmoid(disc_logits), min=1e-4))
+            style_reward = disc_logits # (disc_logits - disc_logits.mean()) / (disc_logits.std() + 1e-8)
             style_reward *= self._discriminator_reward_scale
             style_reward = style_reward.view(rewards.shape)
         
@@ -723,6 +732,7 @@ class GAIL(Agent):
             if self._learning_rate_scheduler:
                 self.scheduler.step()
 
+        # Track data
         self.track_data("Loss / Policy loss", cumulative_policy_loss / (self._learning_epochs * self._mini_batches))
         self.track_data("Advantage / Mean", advantages.mean().item())
         self.track_data("Advantage / Standard deviation", advantages.std().item())
@@ -737,20 +747,12 @@ class GAIL(Agent):
             self.track_data("Learning / Learning rate", self.scheduler.get_last_lr()[0])
             
             
-def compute_gae(
-    rewards: torch.Tensor,
-    dones: torch.Tensor,
-    values: torch.Tensor,
-    next_values: torch.Tensor,
-    discount_factor: float = 0.99,
-    lambda_coefficient: float = 0.95,
-) -> tuple[torch.Tensor, torch.Tensor]:
+def compute_gae(rewards: torch.Tensor, dones: torch.Tensor, values: torch.Tensor, next_values: torch.Tensor, discount_factor: float = 0.99, lambda_coefficient: float = 0.95) -> tuple[torch.Tensor, torch.Tensor]:
     advantage = 0
     advantages = torch.zeros_like(rewards)
     not_dones = dones.logical_not()
     memory_size = rewards.shape[0]
 
-    # advantages computation
     for i in reversed(range(memory_size)):
         advantage = (
             rewards[i]
@@ -758,47 +760,38 @@ def compute_gae(
             + discount_factor * (next_values[i] + lambda_coefficient * not_dones[i] * advantage)
         )
         advantages[i] = advantage
-    # print(f"[DEBUG] Memory size: {memory_size}")
-    # print(f"[DEBUG] rewards: {rewards.view(-1)}")
-    # print(f"[DEBUG] values: {values.view(-1)}")
-    # print(f"[DEBUG] advantages: {advantages.view(-1)}")
-    # print(f"[DEBUG] adv mean: {advantages.mean()} | adv std: {advantages.std()}")
-    
-    # returns computation
     returns = advantages + values
-    # normalize advantages
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-    # print(f"[DEBUG] Normalized advantages: {advantages.view(-1)}")
     return returns, advantages
 
 
 
-def plot_trajectories(
-    sampled_generator_states, sampled_generator_actions, sampled_expert_states, sampled_expert_actions,
-    fig, ax
-    ):
-    n_states = sampled_expert_states.shape[1]
-    n_actions = sampled_expert_actions.shape[1]
-
-    for i in range(n_states):
-        ax[i].clear()
-        # ax[i].plot(sampled_amp_states[:, i].cpu().numpy(), label="AMP States")
-        ax[i].plot(sampled_generator_states[:, i].cpu().numpy(), label="Generator States")
-        ax[i].plot(sampled_expert_states[:, i].cpu().numpy(), label="Expert States")
-        ax[i].set_title(f"State {i}")
-        ax[i].legend()
-        ax[i].set_xlabel("Time")
-        ax[i].set_ylabel("Value")
-        
-    for i in range(n_actions):
-        ax[n_states + i].clear()
-        # ax[n_states + i].plot(sampled_amp_actions[:, i].cpu().numpy(), label="AMP Actions")
-        ax[n_states + i].plot(sampled_generator_actions[:, i].cpu().numpy(), label="Generator Actions")
-        ax[n_states + i].plot(sampled_expert_actions[:, i].cpu().numpy(), label="Expert Actions")
-        ax[n_states + i].set_title(f"Actions {i}")
-        ax[n_states + i].legend()
-        ax[n_states + i].set_xlabel("Time")
-        ax[n_states + i].set_ylabel("Value")
-    plt.tight_layout()
-    plt.draw()
-    plt.pause(0.01)
+# def plot_trajectories(
+#     sampled_generator_states, sampled_generator_actions, sampled_expert_states, sampled_expert_actions,
+#     fig, ax
+#     ):
+#     n_states = sampled_expert_states.shape[1]
+#     n_actions = sampled_expert_actions.shape[1]
+# 
+#     for i in range(n_states):
+#         ax[i].clear()
+#         # ax[i].plot(sampled_amp_states[:, i].cpu().numpy(), label="AMP States")
+#         ax[i].plot(sampled_generator_states[:, i].cpu().numpy(), label="Generator States")
+#         ax[i].plot(sampled_expert_states[:, i].cpu().numpy(), label="Expert States")
+#         ax[i].set_title(f"State {i}")
+#         ax[i].legend()
+#         ax[i].set_xlabel("Time")
+#         ax[i].set_ylabel("Value")
+#         
+#     for i in range(n_actions):
+#         ax[n_states + i].clear()
+#         # ax[n_states + i].plot(sampled_amp_actions[:, i].cpu().numpy(), label="AMP Actions")
+#         ax[n_states + i].plot(sampled_generator_actions[:, i].cpu().numpy(), label="Generator Actions")
+#         ax[n_states + i].plot(sampled_expert_actions[:, i].cpu().numpy(), label="Expert Actions")
+#         ax[n_states + i].set_title(f"Actions {i}")
+#         ax[n_states + i].legend()
+#         ax[n_states + i].set_xlabel("Time")
+#         ax[n_states + i].set_ylabel("Value")
+#     plt.tight_layout()
+#     plt.draw()
+#     plt.pause(0.01)

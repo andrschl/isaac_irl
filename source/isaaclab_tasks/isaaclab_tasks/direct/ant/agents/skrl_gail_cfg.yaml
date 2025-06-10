@@ -109,3 +109,6 @@ trainer:
   class: SequentialTrainer
   timesteps: 100000
   environment_info: log
+
+
+expert_data_path: "logs/skrl/ant_direct/memories/25-05-27_21-14-57-034850_memory_0x7f2707337640.npz"

@@ -99,13 +99,21 @@ class Runner:
 
             component = A2C_DEFAULT_CONFIG if "default_config" in name else A2C
         elif name in ["amp", "amp_default_config"]:
-            from src.algorithms.amp import AMP, AMP_DEFAULT_CONFIG
+            from scripts.skrl.algorithm.amp import AMP, AMP_DEFAULT_CONFIG
 
             component = AMP_DEFAULT_CONFIG if "default_config" in name else AMP
         elif name in ["gail", "gail_default_config"]:
             from scripts.skrl.algorithm.gail import GAIL, GAIL_DEFAULT_CONFIG
 
             component = GAIL_DEFAULT_CONFIG if "default_config" in name else GAIL
+        elif name in ["bc", "bc_default_config"]:
+            from scripts.skrl.algorithm.bc import BC, BC_DEFAULT_CONFIG
+            
+            component = BC_DEFAULT_CONFIG if "default_config" in name else BC
+        elif name in ["irl", "irl_default_config"]:
+            from scripts.skrl.algorithm.irl import IRL, IRL_DEFAULT_CONFIG
+
+            component = IRL_DEFAULT_CONFIG if "default_config" in name else IRL
         elif name in ["cem", "cem_default_config"]:
             from skrl.agents.torch.cem import CEM, CEM_DEFAULT_CONFIG
 
@@ -248,7 +256,7 @@ class Runner:
                     observation_space = observation_spaces[agent_id]
                     if agent_class == "mappo" and role == "value":
                         observation_space = state_spaces[agent_id]
-                    if agent_class in ["amp", "gail"] and role == "discriminator":
+                    if agent_class in ["amp", "gail", "irl"] and role == "discriminator":
                         try:
                             observation_space = env.amp_observation_space
                         except Exception as e:
@@ -375,7 +383,7 @@ class Runner:
             memories[agent_id] = memory_class(num_envs=num_envs, device=device, **self._process_cfg(cfg["memory"]))
 
         # single-agent configuration and instantiation
-        if agent_class in ["amp", "gail"]:
+        if agent_class in ["amp", "gail", "bc", "irl"]:
             agent_id = possible_agents[0]
             try:
                 amp_observation_space = env.amp_observation_space
@@ -386,12 +394,25 @@ class Runner:
                 amp_observation_space = observation_spaces[agent_id]
             agent_cfg = self._component(f"{agent_class}_DEFAULT_CONFIG").copy()
             agent_cfg.update(self._process_cfg(cfg["agent"]))
-            agent_cfg["state_preprocessor_kwargs"].update({"size": observation_spaces[agent_id], "device": device})
-            agent_cfg["value_preprocessor_kwargs"].update({"size": 1, "device": device})
-            agent_cfg["amp_state_preprocessor_kwargs"].update({"size": amp_observation_space, "device": device})
-            if agent_class == "gail":
-                agent_cfg["amp_action_preprocessor_kwargs"].update({"size": action_spaces[agent_id], "device": device})
+            
+            if agent_class in ["amp", "gail", "irl"]:
+                agent_cfg["state_preprocessor_kwargs"].update({"size": observation_spaces[agent_id], "device": device})
+                agent_cfg["value_preprocessor_kwargs"].update({"size": 1, "device": device})
+                agent_cfg["amp_state_preprocessor_kwargs"].update({"size": amp_observation_space, "device": device})
+                if agent_class in ["gail", "irl"]:
+                    agent_cfg["amp_action_preprocessor_kwargs"].update({"size": action_spaces[agent_id], "device": device})
 
+                                        
+                reply_buffer = None
+                if cfg.get("reply_buffer"):
+                    reply_buffer_class = cfg["reply_buffer"].get("class")
+                    if not reply_buffer_class:
+                        raise ValueError(f"No 'class' field defined in 'reply_buffer' cfg")
+                    del cfg["reply_buffer"]["class"]
+                    reply_buffer = self._component(reply_buffer_class)(
+                        device=device, **self._process_cfg(cfg.get("reply_buffer", {}))
+                    )
+                
             motion_dataset = None
             if cfg.get("motion_dataset"):
                 motion_dataset_class = cfg["motion_dataset"].get("class")
@@ -401,27 +422,27 @@ class Runner:
                 motion_dataset = self._component(motion_dataset_class)(
                     device=device, **self._process_cfg(cfg.get("motion_dataset", {}))
                 )
-                                    
-            reply_buffer = None
-            if cfg.get("reply_buffer"):
-                reply_buffer_class = cfg["reply_buffer"].get("class")
-                if not reply_buffer_class:
-                    raise ValueError(f"No 'class' field defined in 'reply_buffer' cfg")
-                del cfg["reply_buffer"]["class"]
-                reply_buffer = self._component(reply_buffer_class)(
-                    device=device, **self._process_cfg(cfg.get("reply_buffer", {}))
-                )
-
-            agent_kwargs = {
-                "models": models[agent_id],
-                "memory": memories[agent_id],
-                "observation_space": observation_spaces[agent_id],
-                "action_space": action_spaces[agent_id],
-                "amp_observation_space": amp_observation_space,
-                "motion_dataset": motion_dataset,
-                "reply_buffer": reply_buffer,
-                "collect_reference_motions": lambda num_samples: env.collect_reference_motions(num_samples),
-            }
+            
+            if agent_class in ["bc"]:
+                agent_kwargs = {
+                    "models": models[agent_id],
+                    "memory": memories[agent_id],
+                    "observation_space": observation_spaces[agent_id],
+                    "action_space": action_spaces[agent_id],
+                    "motion_dataset": motion_dataset,
+                    "collect_reference_motions": lambda num_samples: env.collect_reference_motions(num_samples),
+                }
+            else:
+                agent_kwargs = {
+                    "models": models[agent_id],
+                    "memory": memories[agent_id],
+                    "observation_space": observation_spaces[agent_id],
+                    "action_space": action_spaces[agent_id],
+                    "amp_observation_space": amp_observation_space,
+                    "motion_dataset": motion_dataset,
+                    "reply_buffer": reply_buffer,
+                    "collect_reference_motions": lambda num_samples: env.collect_reference_motions(num_samples),
+                }
         elif agent_class in ["a2c", "cem", "ddpg", "ddqn", "dqn", "ppo", "rpo", "sac", "td3", "trpo"]:
             agent_id = possible_agents[0]
             agent_cfg = self._component(f"{agent_class}_DEFAULT_CONFIG").copy()
