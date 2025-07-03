@@ -156,23 +156,29 @@ if __name__ == "__main__":
     print(memory.sampling_indexes)
 
 
-def load_memory(file: str) -> TrajectoryMemory:
+def load_memory(file: str, max_trajectories: int = 1000) -> TrajectoryMemory:
     data = np.load(file, allow_pickle=True)
     key_shapes = {key: data[key].shape for key in data.files}
 
     first_key = next(iter(data.files))
     first_shape = data[first_key].shape
+    
+    traj_length = first_shape[0]
+    num_trajectories = first_shape[1]
+    num_trajectories = min(num_trajectories, max_trajectories)
 
     memory = TrajectoryMemory(
         num_envs=1,
-        memory_size=first_shape[0] * first_shape[1],
+        memory_size=traj_length * num_trajectories,
     )
     
     print(f"Loaded Memory with {memory.memory_size} samples and {memory.num_envs} environments")
+    print(f"Trajectory length: {traj_length}, Number of trajectories: {num_trajectories}")
 
     for key, shape in key_shapes.items():
         memory.create_tensor(key, size=shape[-1])
     for key in data.files:
-        for i in range(data[key].shape[0]):
-            memory.add_samples(**{key: torch.from_numpy(data[key][i]).squeeze(0)})
+        for i in range(num_trajectories):
+            mem_data = torch.from_numpy(data[key][:, i]).squeeze(0) 
+            memory.add_samples(**{key: mem_data})
     return memory

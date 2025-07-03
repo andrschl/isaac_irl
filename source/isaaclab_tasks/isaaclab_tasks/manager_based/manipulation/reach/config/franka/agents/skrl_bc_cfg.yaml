@@ -1,4 +1,4 @@
-seed: 43
+seed: 42
 
 
 # Models are instantiated using skrl's model instantiator utility
@@ -16,7 +16,7 @@ models:
     network:
       - name: net
         input: STATES
-        layers: [32, 32]
+        layers: [64, 64]
         activations: relu
     output: ACTIONS
   value:  # see deterministic_model parameters
@@ -25,7 +25,7 @@ models:
     network:
       - name: net
         input: STATES
-        layers: [32, 32]
+        layers: [64, 64]
         activations: relu
     output: ONE
   discriminator:  # see deterministic_model parameters
@@ -51,13 +51,13 @@ motion_dataset:
 
 reply_buffer:
   class: TrajectoryMemory
-  memory_size: 20000
+  memory_size: 300000
 
 # PPO agent configuration (field names are from PPO_DEFAULT_CONFIG)
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html
 agent:
   class: BC
-  rollouts: 100                 # number of rollouts before updating
+  rollouts: 60                 # number of rollouts before updating
   learning_epochs: 6           # number of learning epochs during each update
   mini_batches: 2              # number of mini batches during each learning epoch
   n_policy_updates: 20         # number of discriminator updates during each learning epoch
@@ -85,7 +85,7 @@ agent:
 
   # logging and checkpoint
   experiment:
-    directory: "InvertedPendulumBC"
+    directory: "FrankaReachBC"
     experiment_name: ""
     write_interval: auto
     checkpoint_interval: auto
@@ -95,7 +95,7 @@ agent:
 # https://skrl.readthedocs.io/en/latest/api/trainers/sequential.html
 trainer:
   class: SequentialTrainer
-  timesteps: 10000
+  timesteps: 24000
   environment_info: log
 
-expert_data_path: "logs/skrl/cartpole_direct/memories/25-06-18_10-44-15-872442_memory_0x7efc27172350.npz"
+expert_data_path: "logs/skrl/reach_franka/memories/25-06-11_10-55-44-787587_memory_0x7fe76896ea70.npz"

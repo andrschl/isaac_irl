@@ -339,18 +339,15 @@ class BC(Agent):
             cumulative_policy_loss = 0
             for batch_index, expert_sample in enumerate(sampled_expert_batches):
                 with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):                
-                    # Get from motion dataset   
                     sampled_expert_states = self._state_preprocessor(expert_sample[0], train=True)
                     sampled_expert_actions = expert_sample[1]             
-                            
-                    sampled_expert_states.requires_grad_(True)
-                    sampled_expert_actions.requires_grad_(False)
                     
-                    next_action, next_log_prob, _ = self.policy.act(
-                        {"states": sampled_expert_states}, role="policy"
-                    )
-                    # Policy loss [MSE over next action and current action]
-                    policy_loss = F.mse_loss(next_action, sampled_expert_actions)
+                    _, log_prob, _ = self.policy.act({
+                        "states": sampled_expert_states,
+                        "taken_actions": sampled_expert_actions
+                    })
+
+                    policy_loss = -log_prob.mean()
                     
                 # Optimization step
                 self.optimizer.zero_grad()

@@ -21,7 +21,7 @@ from isaaclab_tasks.direct.locomotion.locomotion_env import LocomotionEnv
 @configclass
 class AntEnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 15.0
+    episode_length_s = 5.0
     decimation = 2
     action_scale = 0.5
     action_space = 8
@@ -45,7 +45,7 @@ class AntEnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=512, env_spacing=4.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1024, env_spacing=4.0, replicate_physics=True)
 
     # robot
     robot: ArticulationCfg = ANT_CFG.replace(prim_path="/World/envs/env_.*/Robot")

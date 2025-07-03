@@ -56,6 +56,10 @@ parser.add_argument(
     default="train", help="Mode to run (default: train)",
 )
 
+parser.add_argument(
+    "--n_traj", type=int,
+    default=1000, help="Number of trajectories to collect (default: 1000)",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -156,7 +160,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # specify directory for logging runs: {time-stamp}_{run_name}
     mixup_type = agent_cfg["agent"].get("mixup_type", "")
-    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_{algorithm}_{args_cli.task}_{mixup_type}"
+    
+    gradient_climping = agent_cfg["agent"].get("discriminator_gradient_penalty_scale", 0.0)
+    chi2square = agent_cfg["agent"].get("discriminator_chi2_regularization_scale", 0.0)
+    entropy_loss = agent_cfg["agent"].get("entropy_loss_scale", 0.0)
+    
+    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_{algorithm}_{args_cli.task}_{mixup_type}_{gradient_climping:.2f}_{chi2square:.2f}_traj:{args_cli.n_traj}_{entropy_loss}"
+    
     print(f"Exact experiment name requested from command line {log_dir}")
     if agent_cfg["agent"]["experiment"]["experiment_name"]:
         log_dir += f'_{agent_cfg["agent"]["experiment"]["experiment_name"]}'
@@ -166,10 +176,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     
     mode = "train" if args_cli.mode == "train" else "eval"
     if mode in ["train"]:
+        project_name = "SYCAMORE_small_discri"
+        project_name = "SYCAMORE_short"
         agent_cfg["agent"]["experiment"]["mode"] = mode
         agent_cfg["agent"]["experiment"]["wandb"] = True
         agent_cfg["agent"]["experiment"]["wandb_kwargs"] = {
-            "project": f"SCITAS_{args_cli.task}",
+            "project": f"{project_name}_{args_cli.task}",
             "entity": "sebastien-epfl-epfl",
             "name": log_dir,
         }
@@ -211,7 +223,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
         
     if 'expert_data_path' in agent_cfg:
-        env = ExpertTrajectoriesWrapper(env, expert_data_path=agent_cfg['expert_data_path'])
+        env = ExpertTrajectoriesWrapper(env, expert_data_path=agent_cfg['expert_data_path'], max_trajectories=args_cli.n_traj)
 
     # wrap around environment for skrl
     env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)  # same as: `wrap_env(env, wrapper="auto")`

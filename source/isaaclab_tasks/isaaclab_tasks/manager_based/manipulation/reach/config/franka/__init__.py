@@ -24,6 +24,9 @@ gym.register(
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FrankaReachPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+        "skrl_gail_cfg_entry_point": f"{agents.__name__}:skrl_gail_cfg.yaml",    
+        "skrl_bc_cfg_entry_point": f"{agents.__name__}:skrl_bc_cfg.yaml",
+        "skrl_irl_cfg_entry_point": f"{agents.__name__}:skrl_irl_cfg.yaml",
     },
 )
 

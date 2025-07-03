@@ -28,6 +28,7 @@ GAIL_DEFAULT_CONFIG = {
     "learning_epochs": 6,           # number of learning epochs during each update
     "mini_batches": 2,              # number of mini batches during each learning epoch
     "n_discriminator_updates": 1,   # number of discriminator updates during each learning epoch
+    "n_generator_updates": 1,        # number of generator updates during each learning epoch
 
     "discount_factor": 0.99,        # discount factor (gamma)
     "lambda": 0.95,                 # TD(lambda) coefficient (lam) for computing returns and advantages
@@ -63,6 +64,7 @@ GAIL_DEFAULT_CONFIG = {
     "discriminator_logit_regularization_scale": 0.05,   # logit regularization scale factor for the discriminator loss
     "discriminator_gradient_penalty_scale": 5,          # gradient penalty scaling factor for the discriminator loss
     "discriminator_weight_decay_scale": 0.0001,         # weight decay scaling factor for the discriminator loss
+    "discriminator_chi2_regularization_scale": 0.0, # chi2 regularization scaling factor for the discriminator loss
     "mixup_type": None,          # mixup type for the discriminator loss (None, Mix, Both)
     
     "rewards_shaper": None,         # rewards shaping function: Callable(reward, timestep, timesteps) -> reward
@@ -193,6 +195,7 @@ class GAIL(Agent):
         # configuration
         self._learning_epochs = self.cfg["learning_epochs"]
         self.n_discriminator_updates = self.cfg["n_discriminator_updates"]
+        self.n_generator_updates = self.cfg["n_generator_updates"]
         self._mini_batches = self.cfg["mini_batches"]
         self._rollouts = self.cfg["rollouts"]
         self._rollout = 0
@@ -227,6 +230,7 @@ class GAIL(Agent):
         self._discriminator_logit_regularization_scale = self.cfg["discriminator_logit_regularization_scale"]
         self._discriminator_gradient_penalty_scale = self.cfg["discriminator_gradient_penalty_scale"]
         self._discriminator_weight_decay_scale = self.cfg["discriminator_weight_decay_scale"]
+        self._discriminator_chi2_regularization_scale = self.cfg["discriminator_chi2_regularization_scale"]
         
         self._mixup_type = self.cfg["mixup_type"]
         assert self._mixup_type in [None, "Mix", "Both"], f"Invalid mixup type: {self._mixup_type}"
@@ -480,13 +484,15 @@ class GAIL(Agent):
         if not self._rollout % self._rollouts and timestep >= self._learning_starts:
             self.set_mode("train")
             self._update(timestep, timesteps)
-            self._update_discriminator(timestep, timesteps)
+            if not self._rollout % (self.n_generator_updates * self._rollouts):
+                self._update_discriminator(timestep, timesteps)
             self.set_mode("eval")
 
         super().post_interaction(timestep, timesteps) # write tracking data and checkpoints
 
         
     def _update_discriminator(self, timestep: int, timesteps: int) -> None:
+        cumulative_discriminator_loss = 0
         for i in range(self.n_discriminator_updates):
             # print(f"[DEBUG] {self.reply_buffer.memory_index}")
             sampled_replay_batches = self.reply_buffer.sample(
@@ -502,7 +508,6 @@ class GAIL(Agent):
                 sequence_length=self._amp_batch_size,
             )
             
-            cumulative_discriminator_loss = 0
             for batch_index, (generator_sample, expert_sample) in enumerate(zip(sampled_replay_batches, sampled_expert_batches)):
                 with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):                
                     # Get from replay buffer
@@ -512,12 +517,12 @@ class GAIL(Agent):
                     sampled_expert_states = self._amp_state_preprocessor(expert_sample[0], train=True)
                     sampled_expert_actions = self._amp_action_preprocessor(expert_sample[1], train=True)                  
 
-                    if i == 0 and (timestep-99) % 1000 == 0 and False:
-                        plot_trajectories(
-                            sampled_generator_states, sampled_generator_actions, 
-                            sampled_expert_states, sampled_expert_actions,
-                            self.fig, self.ax
-                        )
+                    # if i == 0 and (timestep-99) % 1000 == 0 and False:
+                    #     plot_trajectories(
+                    #         sampled_generator_states, sampled_generator_actions, 
+                    #         sampled_expert_states, sampled_expert_actions,
+                    #         self.fig, self.ax
+                    #     )
                             
                     sampled_expert_states.requires_grad_(True)
                     sampled_expert_actions.requires_grad_(True)
@@ -554,8 +559,7 @@ class GAIL(Agent):
                         )
 
                     # Gradient penalty (WGAN-GP)
-                    if self._discriminator_gradient_penalty_scale:
-                        
+                    if self._discriminator_gradient_penalty_scale is not None:
                         expert_gradient = torch.autograd.grad(
                             expert_logits,
                             (sampled_expert_states, sampled_expert_actions),
@@ -564,13 +568,13 @@ class GAIL(Agent):
                             retain_graph=True,
                             only_inputs=True,
                         )
-                        # Concatenate gradients for state and action
-                        expert_gradient = torch.cat([g.view(g.size(0), -1) for g in expert_gradient], dim=1)
-                        gradient_penalty = torch.sum(torch.square(expert_gradient[0]), dim=-1).mean()
+                        gradient_penalty = (
+                            torch.sum(torch.square(expert_gradient[0]), dim=-1) +
+                            torch.sum(torch.square(expert_gradient[1]), dim=-1)
+                        ).mean()
                         discriminator_loss += self._discriminator_gradient_penalty_scale * gradient_penalty
-                    
+
                     # Chi2 regularization
-                    self._discriminator_chi2_regularization_scale = None
                     if self._discriminator_chi2_regularization_scale:
                         expert_probs = torch.sigmoid(expert_logits)
                         policy_probs = torch.sigmoid(generator_logits)
@@ -591,18 +595,18 @@ class GAIL(Agent):
                     discriminator_loss *= self._discriminator_loss_scale
                     cumulative_discriminator_loss += discriminator_loss.item()
                     
-            # Optimization step
-            self.optimizer_disc.zero_grad()
-            self.scaler_disc.scale(discriminator_loss).backward()
-            if config.torch.is_distributed:
-                self.discriminator.reduce_parameters()
-                
-            self.scaler_disc.step(self.optimizer_disc)
-            self.scaler_disc.update()
+                # Optimization step
+                self.optimizer_disc.zero_grad()
+                self.scaler_disc.scale(discriminator_loss).backward()
+                if config.torch.is_distributed:
+                    self.discriminator.reduce_parameters()
+                    
+                self.scaler_disc.step(self.optimizer_disc)
+                self.scaler_disc.update()
 
-            self.track_data(
-                "Loss / Discriminator loss", cumulative_discriminator_loss / (self._mini_batches)
-            )
+        self.track_data(
+            "Loss / Discriminator loss", cumulative_discriminator_loss / (self._mini_batches * self.n_discriminator_updates)
+        )
                     
             
     def _update(self, timestep: int, timesteps: int) -> None:

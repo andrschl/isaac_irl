@@ -34,7 +34,7 @@ models:
     network:
       - name: net
         input: STATES_ACTIONS
-        layers: [32, 32]
+        layers: [256, 128, 64]
         activations: relu
     output: ONE
 
@@ -59,7 +59,8 @@ agent:
   class: IRL
   rollouts: 100 # Rollout is longer then in PPO (32)
   learning_epochs: 8 # 8 in PPO
-  n_discriminator_updates: 15
+  n_discriminator_updates: 10
+  n_generator_updates: 5
   mini_batches: 1
   discount_factor: 0.99 # same
   lambda: 0.95
@@ -87,9 +88,11 @@ agent:
   task_reward_weight: 0.0
   style_reward_weight: 1.0
   discriminator_reward_scale: 1.0
-  discriminator_logit_regularization_scale: 0.001
-  discriminator_gradient_penalty_scale: 0.01 # 5.0
-  discriminator_weight_decay_scale: 1.0e-06
+  discriminator_logit_regularization_scale: 50.0
+  discriminator_gradient_penalty_scale: 0.0 # 5.0
+  discriminator_weight_decay_scale: 0.0
+  discriminator_chi2_regularization_scale: 0.0
+
   # rewards_shaper_scale: 1.0
   time_limit_bootstrap: False
   enable_discounted_reward: True

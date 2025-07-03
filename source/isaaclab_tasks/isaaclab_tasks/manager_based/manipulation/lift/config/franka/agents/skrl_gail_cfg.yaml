@@ -34,7 +34,7 @@ models:
     network:
       - name: net
         input: STATES_ACTIONS
-        layers: [256, 128, 64]
+        layers: [32, 32]
         activations: relu
     output: ONE
 
@@ -51,19 +51,19 @@ motion_dataset:
 
 reply_buffer:
   class: TrajectoryMemory
-  memory_size: 102400
+  memory_size: 1024000
 
 # PPO agent configuration (field names are from PPO_DEFAULT_CONFIG)
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html
 agent:
   class: GAIL
-  rollouts: 100 # Rollout is longer then in PPO (32)
+  rollouts: 250 # Rollout is longer then in PPO (32)
   learning_epochs: 8 # 8 in PPO
   n_discriminator_updates: 15
   mini_batches: 1
   discount_factor: 0.99 # same
   lambda: 0.95
-  learning_rate: 5.0e-04 # 5.0e-04 in PPO 5.0e-05 in GAIL
+  learning_rate: 1.0e-04 # 5.0e-04 in PPO 5.0e-05 in GAIL
   learning_rate_scheduler: null # KLAdaptiveLR in PPO
   learning_rate_scheduler_kwargs: null
   state_preprocessor: RunningStandardScaler
@@ -75,7 +75,7 @@ agent:
   amp_action_preprocessor: RunningStandardScaler
   amp_action_preprocessor_kwargs: null
   random_timesteps: 0
-  learning_starts: 100
+  learning_starts: 250
   grad_norm_clip: 1.0  # 1.0 in PPO
   ratio_clip: 0.2
   value_clip: 0.2
@@ -83,14 +83,14 @@ agent:
   entropy_loss_scale: 0.0
   value_loss_scale: 2.0
   discriminator_loss_scale: 0.3 # 5.0
-  amp_batch_size: 100
+  amp_batch_size: 250
   task_reward_weight: 0.0
   style_reward_weight: 1.0
   discriminator_reward_scale: 1.0
   discriminator_logit_regularization_scale: 0.0
   discriminator_gradient_penalty_scale: 0.0 # 0.001
   discriminator_weight_decay_scale: 0.0
-  discriminator_chi2_regularization_scale: 1.0
+  discriminator_chi2_regularization_scale: 0.0
   # rewards_shaper_scale: 1.0
   time_limit_bootstrap: False
   mixup_type: null  # "Mixup" or "None"
@@ -98,7 +98,7 @@ agent:
 
   # logging and checkpoint
   experiment:
-    directory: "franka_cabinet_direct"
+    directory: "franka_lift"
     experiment_name: ""
     write_interval: auto
     checkpoint_interval: auto
@@ -108,8 +108,7 @@ agent:
 # https://skrl.readthedocs.io/en/latest/api/trainers/sequential.html
 trainer:
   class: SequentialTrainer
-  timesteps: 40000 # 
+  timesteps: 36000 # 
   environment_info: log
 
-expert_data_path: "logs/skrl/franka_cabinet_direct/memories/25-06-09_18-28-06-884565_memory_0x7f40cf9131c0.npz"
-# expert_data_path: "logs/skrl/franka_cabinet_direct/memories/25-05-27_18-34-08-145742_memory_0x7f1cf1124850.npz"
+expert_data_path: "logs/skrl/franka_lift/memories/25-06-11_11-16-52-616060_memory_0x7fea77b85750.npz"

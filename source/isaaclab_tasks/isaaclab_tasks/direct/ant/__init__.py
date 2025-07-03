@@ -26,6 +26,7 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
         "skrl_gail_cfg_entry_point": f"{agents.__name__}:skrl_gail_cfg.yaml",
         "skrl_irl_cfg_entry_point": f"{agents.__name__}:skrl_irl_cfg.yaml",
+        "skrl_bc_cfg_entry_point": f"{agents.__name__}:skrl_bc_cfg.yaml",
     },
 )
 

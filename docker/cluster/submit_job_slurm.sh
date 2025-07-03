@@ -11,11 +11,10 @@ cat <<EOT > job.sh
 #SBATCH -n 1
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus=1
-#SBATCH --time=0:59:00
+#SBATCH --time=4:59:00
 #SBATCH --mem-per-cpu=4048
 #SBATCH --job-name="training-$(date +"%Y-%m-%dT%H:%M")"
 #SBATCH --output="/home/chahoud/logs/%j--$4--%x.out"
-#SBATCH --qos=debug
 
 # Pass the container profile first to run_singularity.sh, then all arguments intended for the executed script
 bash "$1/docker/cluster/run_singularity.sh" "$1" "$2" "${@:3}"

@@ -28,6 +28,7 @@ IRL_DEFAULT_CONFIG = {
     "learning_epochs": 6,           # number of learning epochs during each update
     "mini_batches": 2,              # number of mini batches during each learning epoch
     "n_discriminator_updates": 1,   # number of discriminator updates during each learning epoch
+    "n_generator_updates": 1,       # number of generator updates during each learning epoch
 
     "discount_factor": 0.99,        # discount factor (gamma)
     "lambda": 0.95,                 # TD(lambda) coefficient (lam) for computing returns and advantages
@@ -63,7 +64,9 @@ IRL_DEFAULT_CONFIG = {
     "discriminator_logit_regularization_scale": 0.05,   # logit regularization scale factor for the discriminator loss
     "discriminator_gradient_penalty_scale": 5,          # gradient penalty scaling factor for the discriminator loss
     "discriminator_weight_decay_scale": 0.0001,         # weight decay scaling factor for the discriminator loss
+    "discriminator_chi2_regularization_scale": 0.0,  # chi2 regularization scale factor for the discriminator loss
     "mixup_type": None,          # mixup type for the discriminator loss (None, Mix, Both)
+    
     
     "rewards_shaper": None,         # rewards shaping function: Callable(reward, timestep, timesteps) -> reward
     "time_limit_bootstrap": False,  # bootstrap at timeout termination (episode truncation)
@@ -194,6 +197,7 @@ class IRL(Agent):
         # configuration
         self._learning_epochs = self.cfg["learning_epochs"]
         self.n_discriminator_updates = self.cfg["n_discriminator_updates"]
+        self.n_generator_updates = self.cfg["n_generator_updates"]
         self._mini_batches = self.cfg["mini_batches"]
         self._rollouts = self.cfg["rollouts"]
         self._rollout = 0
@@ -229,6 +233,7 @@ class IRL(Agent):
         self._discriminator_logit_regularization_scale = self.cfg["discriminator_logit_regularization_scale"]
         self._discriminator_gradient_penalty_scale = self.cfg["discriminator_gradient_penalty_scale"]
         self._discriminator_weight_decay_scale = self.cfg["discriminator_weight_decay_scale"]
+        self._discriminator_chi2_regularization_scale = self.cfg["discriminator_chi2_regularization_scale"]
         
         self._mixup_type = self.cfg["mixup_type"]
         assert self._mixup_type in [None, "Mix", "Both"], f"Invalid mixup type: {self._mixup_type}"
@@ -411,6 +416,9 @@ class IRL(Agent):
         super().record_transition(
             states, actions, rewards, next_states, terminated, truncated, infos, timestep, timesteps
         )
+        
+        if self._rollout % self._rollouts == 0 and timestep >= self._learning_starts:
+            print(f"Reward: {torch.mean(rewards).item():.3f}, Timestep: {timestep}, Rollout: {self._rollout}")
 
         if self.memory is not None:
             # reward shaping
@@ -482,13 +490,16 @@ class IRL(Agent):
         if not self._rollout % self._rollouts and timestep >= self._learning_starts:
             self.set_mode("train")
             self._update(timestep, timesteps)
-            self._update_discriminator(timestep, timesteps)
+            if not self._rollout % (self.n_generator_updates * self._rollouts):
+                self._update_discriminator(timestep, timesteps)
             self.set_mode("eval")
 
         super().post_interaction(timestep, timesteps) # write tracking data and checkpoints
 
         
     def _update_discriminator(self, timestep: int, timesteps: int) -> None:
+        cumulative_discriminator_loss = 0
+        cumulative_gradient_norm = 0
         for i in range(self.n_discriminator_updates):
             # print(f"[DEBUG] {self.reply_buffer.memory_index}")
             sampled_replay_batches = self.reply_buffer.sample(
@@ -504,7 +515,7 @@ class IRL(Agent):
                 sequence_length=self._amp_batch_size,
             )
             
-            cumulative_discriminator_loss = 0
+
             for batch_index, (generator_sample, expert_sample) in enumerate(zip(sampled_replay_batches, sampled_expert_batches)):
                 with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):                
                     # Get from replay buffer
@@ -524,6 +535,8 @@ class IRL(Agent):
                             
                     sampled_expert_states.requires_grad_(True)
                     sampled_expert_actions.requires_grad_(True)
+                    sampled_generator_states.requires_grad_(True)
+                    sampled_generator_actions.requires_grad_(True)
                     generator_logits, _, _ = self.discriminator.act({"states": sampled_generator_states, "taken_actions": sampled_generator_actions}, role="discriminator")
                     expert_logits, _, _ = self.discriminator.act({"states": sampled_expert_states, "taken_actions": sampled_expert_actions}, role="discriminator")
 
@@ -549,7 +562,7 @@ class IRL(Agent):
                     # Then apply a discount factor to the loss as a "discounted reward"
                     if self._enable_discounted_reward:
                         batch_size = self._amp_batch_size
-                        print(f"[DEBUG] batch_size: {batch_size}")
+                        # print(f"[DEBUG] batch_size: {batch_size}")
                         # Repeat discounts for each environment in the batch
                         discounts = torch.pow(
                             self._discount_factor,
@@ -576,17 +589,49 @@ class IRL(Agent):
                             torch.square(logit_weights)
                         )
 
-                    if self._discriminator_gradient_penalty_scale:
-                        amp_motion_gradient = torch.autograd.grad(
-                            expert_logits,
-                            sampled_expert_states,
-                            grad_outputs=torch.ones_like(expert_logits),
+
+                    # Gradient penalty (WGAN-GP)
+                    if self._discriminator_gradient_penalty_scale is not None:     
+                        epsilon = torch.rand(sampled_expert_actions.shape[0], 1, device=sampled_expert_states.device)
+
+                        # Broadcast to states and actions
+                        epsilon_states = epsilon.expand_as(sampled_expert_states)   # (batch_size, 3)
+                        epsilon_actions = epsilon.expand_as(sampled_expert_actions) # (batch_size, 2)
+                        
+                        # Interpolate expert and generator states and actions
+                        interp_states = epsilon_states * sampled_expert_states + (1 - epsilon_states) * sampled_generator_states
+                        interp_actions = epsilon_actions * sampled_expert_actions + (1 - epsilon_actions) * sampled_generator_actions
+                        interp_states.requires_grad_(True)
+                        interp_actions.requires_grad_(True)
+                        interp_logits, _, _ = self.discriminator.act(
+                            {"states": interp_states, "taken_actions": interp_actions}, role="discriminator"
+                        )
+                        
+                        # Compute gradients of the logits with respect to the interpolated states and actions
+                        grad_outputs = torch.ones_like(interp_logits)
+                        grad_states, grad_actions = torch.autograd.grad(
+                            interp_logits,
+                            (interp_states, interp_actions),
+                            grad_outputs=grad_outputs,
                             create_graph=True,
                             retain_graph=True,
                             only_inputs=True,
                         )
-                        gradient_penalty = torch.sum(torch.square(amp_motion_gradient[0]), dim=-1).mean()
+                        # Compute the gradient penalty
+                        grad_norm = torch.sqrt(
+                            torch.sum(grad_states ** 2, dim=1) + torch.sum(grad_actions ** 2, dim=1)
+                        )
+                        gradient_penalty = torch.mean((grad_norm - 1) ** 2)
                         discriminator_loss += self._discriminator_gradient_penalty_scale * gradient_penalty
+                        cumulative_gradient_norm += grad_norm.mean().item()
+
+                    # Chi2 regularization
+                    if self._discriminator_chi2_regularization_scale:
+                        expert_probs = torch.sigmoid(expert_logits)
+                        policy_probs = torch.sigmoid(generator_logits)
+                        policy_probs = torch.clamp(policy_probs, min=1e-8)
+                        chi2_reg = torch.mean(((expert_probs - policy_probs) ** 2) / policy_probs)
+                        discriminator_loss += self._discriminator_chi2_regularization_scale * chi2_reg
 
                     if self._discriminator_weight_decay_scale:
                         weights = [
@@ -600,19 +645,21 @@ class IRL(Agent):
                     discriminator_loss *= self._discriminator_loss_scale
                     cumulative_discriminator_loss += discriminator_loss.item()
                     
-            # Optimization step
-            self.optimizer_disc.zero_grad()
-            self.scaler_disc.scale(discriminator_loss).backward()
-            if config.torch.is_distributed:
-                self.discriminator.reduce_parameters()
-                
-            self.scaler_disc.step(self.optimizer_disc)
-            self.scaler_disc.update()
-
-            self.track_data(
-                "Loss / Discriminator loss", cumulative_discriminator_loss / (self._mini_batches)
-            )
+                # Optimization step
+                self.optimizer_disc.zero_grad()
+                self.scaler_disc.scale(discriminator_loss).backward()
+                if config.torch.is_distributed:
+                    self.discriminator.reduce_parameters()
                     
+                self.scaler_disc.step(self.optimizer_disc)
+                self.scaler_disc.update()
+
+        self.track_data(
+            "Loss / Discriminator loss", cumulative_discriminator_loss / (self._mini_batches * self.n_discriminator_updates)
+        )
+        self.track_data(
+            "Loss / Discriminator gradient norm", cumulative_gradient_norm / (self._mini_batches * self.n_discriminator_updates)
+        )        
             
     def _update(self, timestep: int, timesteps: int) -> None:
         """Algorithm's main update step
