@@ -537,8 +537,8 @@ class IRL(Agent):
                     sampled_expert_actions.requires_grad_(True)
                     sampled_generator_states.requires_grad_(True)
                     sampled_generator_actions.requires_grad_(True)
-                    generator_logits, _, _ = self.discriminator.act({"states": sampled_generator_states, "taken_actions": sampled_generator_actions}, role="discriminator")
-                    expert_logits, _, _ = self.discriminator.act({"states": sampled_expert_states, "taken_actions": sampled_expert_actions}, role="discriminator")
+                    generator_reward, _, _ = self.discriminator.act({"states": sampled_generator_states, "taken_actions": sampled_generator_actions}, role="discriminator")
+                    expert_reward, _, _ = self.discriminator.act({"states": sampled_expert_states, "taken_actions": sampled_expert_actions}, role="discriminator")
 
                     # Mixup
                     # if self._mixup_type in ["Mix", "Both"]:
@@ -566,15 +566,15 @@ class IRL(Agent):
                         # Repeat discounts for each environment in the batch
                         discounts = torch.pow(
                             self._discount_factor,
-                            torch.arange(batch_size, device=generator_logits.device, dtype=generator_logits.dtype)
+                            torch.arange(batch_size, device=generator_reward.device, dtype=generator_reward.dtype)
                         )
                         # Expand discounts to match the shape (num_envs * batch_size,)
                         discounts = discounts.repeat(self.memory.num_envs)
-                        discounted_generator = generator_logits.view(-1) * discounts
-                        discounted_expert = expert_logits.view(-1) * discounts
+                        discounted_generator = generator_reward.view(-1) * discounts
+                        discounted_expert = expert_reward.view(-1) * discounts
                         discriminator_loss = discounted_generator.mean() - discounted_expert.mean()
                     else:
-                        discriminator_loss = generator_logits.mean() - expert_logits.mean()
+                        discriminator_loss = generator_reward.mean() - expert_reward.mean()
                     
                     # if self._mixup_type == "Mix":
                     #     discriminator_loss = mixup_loss
@@ -627,10 +627,7 @@ class IRL(Agent):
 
                     # Chi2 regularization
                     if self._discriminator_chi2_regularization_scale:
-                        expert_probs = torch.sigmoid(expert_logits)
-                        policy_probs = torch.sigmoid(generator_logits)
-                        policy_probs = torch.clamp(policy_probs, min=1e-8)
-                        chi2_reg = torch.mean(((expert_probs - policy_probs) ** 2) / policy_probs)
+                        chi2_reg = 0.25 * torch.mean(expert_reward ** 2)
                         discriminator_loss += self._discriminator_chi2_regularization_scale * chi2_reg
 
                     if self._discriminator_weight_decay_scale:

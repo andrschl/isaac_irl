@@ -577,9 +577,7 @@ class GAIL(Agent):
                     # Chi2 regularization
                     if self._discriminator_chi2_regularization_scale:
                         expert_probs = torch.sigmoid(expert_logits)
-                        policy_probs = torch.sigmoid(generator_logits)
-                        policy_probs = torch.clamp(policy_probs, min=1e-8)
-                        chi2_reg = torch.mean(((expert_probs - policy_probs) ** 2) / policy_probs)
+                        chi2_reg = 0.25 * torch.mean(torch.exp(expert_probs)** 2)
                         discriminator_loss += self._discriminator_chi2_regularization_scale * chi2_reg
 
 
