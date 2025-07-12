@@ -1,14 +1,30 @@
 # isaac_reward_learning
 Library for inverse reinforcement learning and RLHF for robotic manipulation.
 
-## Collecting trajectories from existing policy
-- `python scripts/rsl_rl/train_rl.py --task Isaac-Lift-Cube-Franka-v0 --headless`
-- `python scripts/utils/record_synthetic_demos.py --task Isaac-Lift-Cube-Franka-v0 --num_demos 1000`
-- `python scripts/irl/train_irl.py --task Isaac-Lift-Cube-Franka-v0 --headless --expert_data_path 'logs/rsl_rl/franka_lift/demos/hdf_dataset.hdf5'`
-- `~/IsaacLab/isaaclab.sh -p scripts/imitation_learning/tools/inspect_demonstrations.py logs/rsl_rl/franka_lift/DATASET`
-- `~/IsaacLab/isaaclab.sh -p scripts/imitation_learning/tools/split_train_val.py PATH_TO_DATASET --ratio 0.2`
-- `~/IsaacLab/isaaclab.sh -p scripts/imitation_learning/train_bc.py --task Isaac-Lift-Cube-Franka-v0 --algo bc --dataset scripts/imitation_learning/logs/demos/hdf_dataset.hdf5`
-- ``
+
+
+## SKRL Train Script
+Run a training script using SKRL with the following command:
+- `./docker/cluster/cluster_interface.sh job --task Isaac-Lift-Cube-Franka-v0 --headless`
+- `--algo <name of the algorithm>`
+- `--mode <train|eval|>`
+- `--record <True|False>` 
+- `--checkpoint <path to the checkpoint file>`
+- `--n_traj <number of trajectories to use from the dataset>`
+  
+
+## IRL workflow
+
+```bash
+# 1. Train a policy
+./docker/cluster/cluster_interface.sh job --task Isaac-Cartpole-v0 --headless
+
+# 2. Collect expert demonstrations using the trained policy
+./docker/cluster/cluster_interface.sh job --task Isaac-Cartpole-v0 --headless --record --mode eval --checkpoint <path_to_checkpoint_file>
+
+# 3. Train an IRL algorithm using the collected expert demonstrations
+./docker/cluster/cluster_interface.sh job --task Isaac-Cartpole-v0 --headless --algo <IRL|GAIL|BC> --n_traj <number_of_trajectories>
+```
 
 
 ## Connecting to the cluster
