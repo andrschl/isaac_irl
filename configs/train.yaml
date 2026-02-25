@@ -1,0 +1,43 @@
+defaults:
+  env: env/isaac_lift_cube_franka.yaml
+  reward: reward/dense_mlp.yaml
+  policy: policy/mlp.yaml
+  algo: algo/ppo.yaml
+
+experiment_name: default_experiment
+run_name: ""
+logger: tensorboard
+
+seed: 42
+max_iterations: 1500
+
+feature_map:
+  ignored_reward_terms: []
+
+irl:
+  expert_data_path: ""
+  batch_size: 256
+  num_learning_epochs: 1
+  weight_decay: 1.0e-6
+  max_grad_norm: 1.0
+  reward_loss_coef: 1.0
+  reward_learning_rate: null
+  discount_gamma: null
+  normalize_returns_by_episode_length: true
+
+runner:
+  num_steps_per_env_rl: 24
+  save_interval: 50
+  policy_updates_per_cycle: 1
+  reward_updates_per_cycle: 1
+  expert_num_envs: 1
+  imitator_buffer:
+    capacity_steps: 1000000
+    store_device: cpu
+    min_ep_len: 2
+    sample_weighted_by_length: true
+  expert_buffer:
+    capacity_steps: 1000000
+    store_device: cpu
+    min_ep_len: 1
+    sample_weighted_by_length: true
