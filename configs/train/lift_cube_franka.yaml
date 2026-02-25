@@ -1,0 +1,7 @@
+defaults:
+  env: env/isaac_lift_cube_franka.yaml
+  reward: reward/dense_mlp.yaml
+  policy: policy/mlp.yaml
+  algo: algo/ppo.yaml
+
+experiment_name: franka_lift

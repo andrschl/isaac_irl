@@ -1,0 +1,4 @@
+type: dense_mlp
+hidden_dims: [256, 128, 64]
+activation: elu
+is_linear: false

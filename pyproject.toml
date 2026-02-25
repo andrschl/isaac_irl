@@ -1,6 +1,26 @@
 [build-system]
-requires = ["setuptools", "toml"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "isaac_irl"
+version = "0.1.0"
+description = "Reward learning library for robotic manipulation in Isaac Lab."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Isaac Lab Project Developers" },
+]
+dependencies = [
+    "psutil",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.isort]
 
@@ -56,7 +76,7 @@ known_isaaclabparty = [
 ]
 
 # Modify the following to include the package names of your first-party code
-known_firstparty = "isaac_reward_learning"
+known_firstparty = "isaac_irl"
 known_local_folder = "config"
 
 [tool.pyright]

@@ -1,0 +1,10 @@
+# Core dependencies for isaac_irl code paths and scripts.
+# If you are using an existing Isaac Lab environment, you may already have
+# some of these installed (especially torch/gymnasium).
+psutil>=5.9
+torch>=2.3
+einops>=0.8
+PyYAML>=6.0
+gymnasium>=0.29
+h5py>=3.9
+tensorboard>=2.14

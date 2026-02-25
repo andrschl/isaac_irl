@@ -1,0 +1,6 @@
+type: ppo
+learning_rate: 1.0e-4
+gamma: 0.98
+lam: 0.95
+num_learning_epochs: 5
+num_mini_batches: 4

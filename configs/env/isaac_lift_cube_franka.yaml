@@ -1,0 +1,4 @@
+name: Isaac-Lift-Cube-Franka-v0
+device: cuda:0
+num_envs: 4096
+headless: true
