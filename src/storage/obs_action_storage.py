@@ -47,7 +47,7 @@ class ObsActionBuffer:
         return self._n_total
 
     @property
-    def num_actions(self) -> int | None:
+    def action_dim(self) -> int | None:
         if self._actions is None:
             return None
         return self._actions.shape[-1]

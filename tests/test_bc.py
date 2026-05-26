@@ -35,7 +35,7 @@ def test_obs_action_buffer_load_and_sample_round_trip():
     )
     buf.load_episodes([ep1, ep2])
     assert len(buf) == 9
-    assert buf.num_actions == 2
+    assert buf.action_dim == 2
 
     obs_mb, act_mb = buf.sample(batch_size=4, device=torch.device("cpu"))
     assert act_mb.shape == (4, 2)
