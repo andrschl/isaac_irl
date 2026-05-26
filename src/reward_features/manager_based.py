@@ -131,3 +131,53 @@ class ManagerBasedRewardFeatureEncoder:
             device=self.device,
             force_include_terms=self.cfg.force_include_terms,
         )
+
+
+class ManagerBasedFeatureSource:
+    """``FeatureSource`` over Isaac Lab's reward manager.
+
+    Probes the env's reward manager once at construction to fix the feature
+    order (and learn the feature names) and exposes that via ``spec``. Per
+    step it ignores everything in ``StepContext`` except ``ctx.env`` —
+    Isaac's reward manager already owns the env state internally.
+    """
+
+    def __init__(
+        self,
+        env,
+        cfg: ManagerBasedFeatureCfg | None = None,
+        device: torch.device | str | None = None,
+    ) -> None:
+        self.cfg = cfg or ManagerBasedFeatureCfg()
+        self.device = device
+        feature_dict = manager_based_reward_feature_dict(
+            env=env,
+            ignored_reward_terms=self.cfg.ignored_reward_terms,
+            device=device,
+            force_include_terms=self.cfg.force_include_terms,
+        )
+        names = tuple(feature_dict.keys())
+        # interfaces.FeatureSpec is imported lazily to keep this module free
+        # of a top-level dependency on the protocols layer.
+        from interfaces import FeatureSpec  # noqa: PLC0415
+        self.spec = FeatureSpec(dim=len(names), names=names)
+
+    def features(self, ctx) -> torch.Tensor:
+        """Extract `[num_envs, D]` features from ``ctx.env``. Other ctx
+        fields are intentionally ignored for the Isaac reward-manager backend.
+        """
+        return manager_based_reward_features(
+            env=ctx.env,
+            ignored_reward_terms=self.cfg.ignored_reward_terms,
+            device=self.device,
+            force_include_terms=self.cfg.force_include_terms,
+        )
+
+    def features_from_env(self, env) -> torch.Tensor:
+        """Compatibility shim for the runner's legacy `feature_map(env)` API."""
+        return manager_based_reward_features(
+            env=env,
+            ignored_reward_terms=self.cfg.ignored_reward_terms,
+            device=self.device,
+            force_include_terms=self.cfg.force_include_terms,
+        )

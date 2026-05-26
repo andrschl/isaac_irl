@@ -50,8 +50,7 @@ from data import (
 )
 from reward_features.manager_based import (
     ManagerBasedFeatureCfg,
-    manager_based_reward_feature_dict,
-    manager_based_reward_features,
+    ManagerBasedFeatureSource,
 )
 from reward_features.success_bonus import add_success_bonus_term
 from reward_model import DenseFeatureRewardModel, LinearFeatureRewardModel
@@ -133,21 +132,6 @@ def _build_actor_critic(
     return actor, critic
 
 
-def _build_feature_map(
-    cfg: ManagerBasedFeatureCfg,
-    device: str | torch.device,
-) -> Callable[[Any], torch.Tensor]:
-    def _feature_map(env: Any) -> torch.Tensor:
-        return manager_based_reward_features(
-            env=env,
-            ignored_reward_terms=cfg.ignored_reward_terms,
-            device=device,
-            force_include_terms=cfg.force_include_terms,
-        )
-
-    return _feature_map
-
-
 def _build_success_fn(
     *,
     task_name: str,
@@ -180,16 +164,6 @@ def _build_success_fn(
 
     print(f"[INFO] Success metric enabled: object within {threshold} m of goal pose.")
     return success_fn
-
-
-def _feature_dim_from_feature_map(feature_map: Callable[[Any], torch.Tensor], env: Any) -> int:
-    with torch.no_grad():
-        features = feature_map(env)
-    if not isinstance(features, torch.Tensor):
-        features = torch.as_tensor(features)
-    if features.ndim != 2:
-        raise ValueError(f"Feature map must return shape [N, D], got {tuple(features.shape)}")
-    return int(features.shape[1])
 
 
 
@@ -592,21 +566,16 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
             MLPModel=runtime_deps.MLPModel,
         )
 
-        feature_map = _build_feature_map(train_cfg.feature_map, device=train_cfg.device)
-        feature_dim = _feature_dim_from_feature_map(feature_map, env)
+        feature_source = ManagerBasedFeatureSource(
+            env, cfg=train_cfg.feature_map, device=train_cfg.device,
+        )
+        feature_map = feature_source.features_from_env
         runtime_ctx = RuntimeContext(
             num_envs=int(env.num_envs),
-            feature_dim=feature_dim,
+            feature_dim=int(feature_source.spec.dim),
             device=train_cfg.device,
         )
-        feature_names = list(
-            manager_based_reward_feature_dict(
-                env,
-                ignored_reward_terms=train_cfg.feature_map.ignored_reward_terms,
-                device=train_cfg.device,
-                force_include_terms=train_cfg.feature_map.force_include_terms,
-            ).keys()
-        )
+        feature_names = list(feature_source.spec.names or ())
 
         # Optional task success predicate for the validation success-rate metric.
         # Uses the Lift task's built-in `object_reached_goal` (object within

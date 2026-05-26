@@ -63,6 +63,59 @@ class FeatureStep:
     dones: torch.Tensor
 
 
+@dataclass(frozen=True)
+class FeatureSpec:
+    """Static description of what a :class:`FeatureSource` emits.
+
+    `dim` is the per-step feature dimensionality D. `names` is optional
+    metadata used for logging; when present, its length must equal `dim`.
+    """
+
+    dim: int
+    names: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.dim <= 0:
+            raise ValueError(f"FeatureSpec.dim must be > 0, got {self.dim}.")
+        if self.names is not None and len(self.names) != self.dim:
+            raise ValueError(
+                f"FeatureSpec.names length ({len(self.names)}) must equal dim ({self.dim})."
+            )
+
+
+@dataclass(slots=True)
+class StepContext:
+    """Inputs available to a :class:`FeatureSource` at one vectorized step.
+
+    Built by the rollout helper. Backends consume whichever fields they need:
+    Isaac's reward-manager FeatureSource reads only `ctx.env`; tabular MDPs
+    consume `(obs, action, next_obs)`. `info` carries any extra dict the env
+    emitted on the last `step()` (e.g. rsl_rl's `time_outs`).
+    """
+
+    env: Any
+    obs: Any
+    action: torch.Tensor
+    next_obs: Any
+    env_reward: torch.Tensor
+    done: torch.Tensor
+    info: dict[str, Any]
+
+
+class FeatureSource(Protocol):
+    """Compute per-step features φ(...) for the visited state(s).
+
+    Implementations declare what they emit via `spec` and produce a
+    `[num_envs, spec.dim]` tensor from a `StepContext`. The protocol is the
+    one per-env seam that genuinely varies across backends — everything
+    downstream consumes [N, D] features uniformly.
+    """
+
+    spec: FeatureSpec
+
+    def features(self, ctx: StepContext) -> torch.Tensor: ...
+
+
 class RlAlgorithm(Protocol):
     """RL algorithm adapter owned by the runner.
 

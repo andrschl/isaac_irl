@@ -198,13 +198,25 @@ def test_train_irl_main_smoke_with_mocked_runtime(tmp_path: Path, monkeypatch):
         },
     )
 
+    class _FakeFeatureSource:
+        def __init__(self, env, cfg=None, device=None):
+            del env, cfg, device
+
+        @property
+        def spec(self):
+            class _Spec:
+                dim = 2
+                names = ("feat_a", "feat_b")
+            return _Spec()
+
+        def features_from_env(self, env):
+            return torch.zeros(env.num_envs, 2)
+
+        def features(self, ctx):
+            return torch.zeros(ctx.env.num_envs, 2)
+
     monkeypatch.setattr(module, "_repo_root", lambda: tmp_path)
-    monkeypatch.setattr(module, "_build_feature_map", lambda cfg, device: (lambda env: torch.zeros(env.num_envs, 2)))
-    monkeypatch.setattr(module, "_feature_dim_from_feature_map", lambda feature_map, env: 2)
-    monkeypatch.setattr(
-        module, "manager_based_reward_feature_dict",
-        lambda env, ignored_reward_terms, device, force_include_terms=(): {"feat_a": None, "feat_b": None},
-    )
+    monkeypatch.setattr(module, "ManagerBasedFeatureSource", _FakeFeatureSource)
     monkeypatch.setattr(module, "DenseFeatureRewardModel", _FakeRewardModel)
     monkeypatch.setattr(module, "LinearFeatureRewardModel", _FakeRewardModel)
     monkeypatch.setattr(module, "FeatureRewardLearner", _FakeIrlAlg)
