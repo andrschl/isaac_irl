@@ -13,8 +13,17 @@ _root = Path(__file__).resolve().parents[1]
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
+from data import (
+    load_expert_success_rate,
+    load_feature_episodes,
+    subset_episodes,
+)
+
 
 def _load_train_irl_module():
+    """Compatibility shim — only used for tests that touch script-side helpers
+    (e.g. ``_install_expert_episodes``) that still live in
+    ``scripts/irl/train_irl.py``."""
     root = Path(__file__).resolve().parents[1]
     module_path = root / "scripts" / "irl" / "train_irl.py"
     module_name = "train_irl_module_expert_loader"
@@ -41,7 +50,7 @@ def test_load_feature_episodes_accepts_pt_payload(tmp_path: Path):
         payload_path,
     )
 
-    episodes = module.load_feature_episodes(str(payload_path), expected_feature_dim=2)
+    episodes = load_feature_episodes(str(payload_path), expected_feature_dim=2)
     assert len(episodes) == 2
     assert episodes[0].shape == (3, 2)
     assert episodes[1].shape == (5, 2)
@@ -65,7 +74,7 @@ def test_load_feature_episodes_accepts_named_hdf5_payload(tmp_path: Path):
         demo_1_features.create_dataset("reach", data=torch.zeros(4).numpy())
         demo_1_features.create_dataset("lift", data=torch.ones(4).numpy())
 
-    episodes = module.load_feature_episodes(
+    episodes = load_feature_episodes(
         str(payload_path),
         expected_feature_dim=2,
         expected_feature_names=["reach", "lift"],
@@ -92,7 +101,7 @@ def test_load_feature_episodes_rejects_hdf5_feature_name_mismatch(tmp_path: Path
         demo_0_features.create_dataset("lift", data=torch.ones(3).numpy())
 
     with pytest.raises(ValueError, match="feature-name mismatch"):
-        module.load_feature_episodes(
+        load_feature_episodes(
             str(payload_path),
             expected_feature_dim=2,
             expected_feature_names=["reach", "success_bonus"],
@@ -113,7 +122,7 @@ def test_load_expert_success_rate_any_time(tmp_path: Path):
         d1 = data_group.create_group("demo_1")
         d1.create_dataset("success", data=torch.tensor([0.0, 0.0]).numpy())
 
-    rate = module.load_expert_success_rate(str(payload_path))
+    rate = load_expert_success_rate(str(payload_path))
     assert rate == pytest.approx(0.5)
 
 
@@ -129,9 +138,9 @@ def test_load_expert_success_rate_none_when_absent(tmp_path: Path):
         demo_0_features.create_dataset("reach", data=torch.ones(3).numpy())
 
     # No 'success' dataset on any demo -> None (back-compat with old demos).
-    assert module.load_expert_success_rate(str(payload_path)) is None
+    assert load_expert_success_rate(str(payload_path)) is None
     # Non-HDF5 payloads also return None.
-    assert module.load_expert_success_rate(str(tmp_path / "x.pt")) is None
+    assert load_expert_success_rate(str(tmp_path / "x.pt")) is None
 
 
 def test_load_feature_episodes_rejects_legacy_hdf5_matrix_payload(tmp_path: Path):
@@ -145,7 +154,7 @@ def test_load_feature_episodes_rejects_legacy_hdf5_matrix_payload(tmp_path: Path
         demo_0.create_dataset("features", data=torch.ones(3, 2).numpy())
 
     with pytest.raises(ValueError, match="legacy feature format|Regenerate demos"):
-        module.load_feature_episodes(str(payload_path), expected_feature_dim=2)
+        load_feature_episodes(str(payload_path), expected_feature_dim=2)
 
 
 def test_load_feature_episodes_rejects_non_feature_torch_payload(tmp_path: Path):
@@ -154,7 +163,7 @@ def test_load_feature_episodes_rejects_non_feature_torch_payload(tmp_path: Path)
     torch.save({"obs": torch.randn(3, 2)}, payload_path)
 
     with pytest.raises(ValueError, match="must contain one of keys"):
-        module.load_feature_episodes(str(payload_path), expected_feature_dim=2)
+        load_feature_episodes(str(payload_path), expected_feature_dim=2)
 
 
 def test_load_feature_episodes_rejects_feature_dim_mismatch(tmp_path: Path):
@@ -163,7 +172,7 @@ def test_load_feature_episodes_rejects_feature_dim_mismatch(tmp_path: Path):
     torch.save([torch.randn(3, 3)], payload_path)
 
     with pytest.raises(ValueError, match="feature dim mismatch"):
-        module.load_feature_episodes(str(payload_path), expected_feature_dim=2)
+        load_feature_episodes(str(payload_path), expected_feature_dim=2)
 
 
 def test_subset_episodes_first_returns_first_n():
@@ -173,7 +182,7 @@ def test_subset_episodes_first_returns_first_n():
         torch.ones(3, 2) * 2,
         torch.ones(4, 2) * 3,
     ]
-    out = module._subset_episodes(episodes, max_num=2, strategy="first", seed=42)
+    out = subset_episodes(episodes, max_num=2, strategy="first", seed=42)
     assert len(out) == 2
     assert torch.allclose(out[0], episodes[0])
     assert torch.allclose(out[1], episodes[1])
@@ -182,8 +191,8 @@ def test_subset_episodes_first_returns_first_n():
 def test_subset_episodes_random_same_seed_returns_same_subset():
     module = _load_train_irl_module()
     episodes = [torch.ones(i + 1, 2) * i for i in range(10)]
-    out_a = module._subset_episodes(episodes, max_num=3, strategy="random", seed=123)
-    out_b = module._subset_episodes(episodes, max_num=3, strategy="random", seed=123)
+    out_a = subset_episodes(episodes, max_num=3, strategy="random", seed=123)
+    out_b = subset_episodes(episodes, max_num=3, strategy="random", seed=123)
     assert len(out_a) == 3
     assert len(out_b) == 3
     for a, b in zip(out_a, out_b):
