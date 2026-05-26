@@ -16,8 +16,12 @@ dist/
 
 # Project artifacts
 logs/
+wandb/
 outputs/
 *.hdf5
+
+# Secrets
+.env
 
 # IDE
 .vscode/
