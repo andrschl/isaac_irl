@@ -165,9 +165,11 @@ def _parse_feature_buffer_cfg(section: dict[str, Any], default_cfg: FeatureBufCf
             "FeatureTrajectoryBuffer always stores episode features."
         )
 
+    raw_store_device = section.get("store_device", default_cfg.store_device)
+    store_device = str(raw_store_device) if raw_store_device is not None else None
     return FeatureBufCfg(
         capacity_steps=int(section.get("capacity_steps", default_cfg.capacity_steps)),
-        store_device=str(section.get("store_device", default_cfg.store_device)),
+        store_device=store_device,
         store_dtype=_parse_torch_dtype(section.get("store_dtype"), default_cfg.store_dtype),
         min_ep_len=int(section.get("min_ep_len", default_cfg.min_ep_len)),
         sample_weighted_by_length=bool(section.get("sample_weighted_by_length", default_cfg.sample_weighted_by_length)),

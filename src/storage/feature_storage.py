@@ -15,7 +15,11 @@ class FeatureBufCfg:
     """Buffer-specific configuration (chosen by the experiment)."""
 
     capacity_steps: int = 1_000_000
-    store_device: torch.device | str = "cpu"
+    # `None` -> resolved to `ctx.device` in FeatureTrajectoryBuffer.__init__.
+    # Imitator buffers default to ctx.device so the per-step append stays on
+    # GPU; long-lived expert buffers should set "cpu" explicitly to keep
+    # episode storage off the device.
+    store_device: torch.device | str | None = None
     store_dtype: torch.dtype = torch.float32
     min_ep_len: int = 2
     sample_weighted_by_length: bool = False
@@ -38,7 +42,8 @@ class FeatureTrajectoryBuffer:
         self.ctx = ctx
         self.gamma = float(gamma)
 
-        self._store_device = torch.device(cfg.store_device)
+        store_device = cfg.store_device if cfg.store_device is not None else ctx.device
+        self._store_device = torch.device(store_device)
 
         # Current unfinished episodes, one list per env. Each entry is a [D] tensor.
         self._cur: list[list[torch.Tensor]] = [[] for _ in range(ctx.num_envs)]
@@ -85,14 +90,15 @@ class FeatureTrajectoryBuffer:
                 f"Expected done shape [{self.ctx.num_envs}], got {tuple(done.shape)}"
             )
 
-        # Move once to storage device/dtype.
+        # Move once to storage device/dtype, then pull dones once to a Python
+        # list so the per-env loop never triggers a GPU->CPU sync.
         z_store = z.detach().to(device=self._store_device, dtype=self.cfg.store_dtype)
-        done_cpu = done.detach().to("cpu").bool()
+        done_list = done.detach().to("cpu").bool().tolist()
 
         for i in range(self.ctx.num_envs):
             # clone() avoids retaining a view into the full [N,D] tensor
             self._cur[i].append(z_store[i].clone())
-            if bool(done_cpu[i].item()):
+            if done_list[i]:
                 self._finalize(i)
 
     def finalize_in_progress_episodes(self) -> None:

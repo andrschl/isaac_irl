@@ -132,7 +132,7 @@ class FeatureRewardLearner:
         Overrides ``num_envs`` on the runtime context (default 1 for a single
         expert trajectory stream) while preserving ``feature_dim`` and device.
         """
-        buf_cfg = cfg or FeatureBufCfg(min_ep_len=1)
+        buf_cfg = cfg or FeatureBufCfg(min_ep_len=1, store_device="cpu")
         expert_ctx = replace(runtime_ctx, num_envs=int(num_envs))
         self.expert_storage = FeatureTrajectoryBuffer(cfg=buf_cfg, ctx=expert_ctx, gamma=self.gamma)
 

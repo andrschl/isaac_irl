@@ -25,7 +25,9 @@ class IrlRunnerCfg:
     use_learned_reward: bool = True
 
     imitator_buffer: FeatureBufCfg = field(default_factory=FeatureBufCfg)
-    expert_buffer: FeatureBufCfg = field(default_factory=lambda: FeatureBufCfg(min_ep_len=1))
+    expert_buffer: FeatureBufCfg = field(
+        default_factory=lambda: FeatureBufCfg(min_ep_len=1, store_device="cpu")
+    )
     expert_num_envs: int = 1
 
     # Length of the dedicated full-trajectory imitator rollout used to refresh
