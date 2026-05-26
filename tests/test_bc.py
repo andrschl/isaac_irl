@@ -77,7 +77,9 @@ class _FakeMLPActor(nn.Module):
     def _features(self, obs):
         return obs["policy"]["x"] if isinstance(obs, dict) else obs
 
-    def forward(self, obs, masks=None, hidden_state=None, stochastic_output: bool = False):
+    def forward(
+        self, obs, masks=None, hidden_state=None, stochastic_output: bool = False
+    ):
         del masks, hidden_state
         mean = self.mean_net(self._features(obs))
         if not stochastic_output:
@@ -118,7 +120,9 @@ def test_bc_loss_decreases_under_optimization(loss_type: str):
         loss.backward()
         opt.step()
     final = bc.compute_loss(actor).item()
-    assert final < initial - 0.1, f"BC {loss_type} loss did not decrease (init={initial}, final={final})"
+    assert final < initial - 0.1, (
+        f"BC {loss_type} loss did not decrease (init={initial}, final={final})"
+    )
 
 
 def test_bc_validation_loss_none_without_split():
@@ -131,7 +135,9 @@ def test_bc_validation_loss_none_without_split():
 def test_bc_validation_loss_is_float_and_gradless(loss_type: str):
     torch.manual_seed(0)
     train_buf = _make_buffer()
-    train_buf.load_episodes([({"policy": {"x": torch.randn(32, 3)}}, torch.randn(32, 2))])
+    train_buf.load_episodes(
+        [({"policy": {"x": torch.randn(32, 3)}}, torch.randn(32, 2))]
+    )
     val_buf = _make_buffer()
     val_buf.load_episodes([({"policy": {"x": torch.randn(16, 3)}}, torch.randn(16, 2))])
 
@@ -201,7 +207,9 @@ class _TinyActor(nn.Module):
         self.w = nn.Parameter(torch.zeros(3, 2))
         self._distribution: torch.distributions.Normal | None = None
 
-    def forward(self, obs, masks=None, hidden_state=None, stochastic_output: bool = False):
+    def forward(
+        self, obs, masks=None, hidden_state=None, stochastic_output: bool = False
+    ):
         del masks, hidden_state
         mean = obs["policy"]["x"] @ self.w
         if not stochastic_output:
@@ -324,7 +332,12 @@ def test_obs_action_hdf5_loader_round_trip(tmp_path: Path):
     import importlib.util
     import sys
 
-    module_path = Path(__file__).resolve().parents[1] / "scripts" / "irl" / "train_irl.py"
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "irl"
+        / "_train_expert_data.py"
+    )
     spec = importlib.util.spec_from_file_location("train_irl_for_bc_tests", module_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -337,12 +350,19 @@ def test_obs_action_hdf5_loader_round_trip(tmp_path: Path):
         demo = data.create_group("demo_0")
         obs_group = demo.create_group("obs")
         policy_group = obs_group.create_group("policy")
-        policy_group.create_dataset("x", data=torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3).numpy())
-        demo.create_dataset("actions", data=torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2).numpy())
+        policy_group.create_dataset(
+            "x", data=torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3).numpy()
+        )
+        demo.create_dataset(
+            "actions",
+            data=torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2).numpy(),
+        )
 
     episodes = module.load_obs_action_episodes(str(path))
     assert len(episodes) == 1
     obs, actions = episodes[0]
     assert actions.shape == (5, 2)
     assert obs["policy"]["x"].shape == (5, 3)
-    assert torch.allclose(actions, torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2))
+    assert torch.allclose(
+        actions, torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2)
+    )

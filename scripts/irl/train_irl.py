@@ -3,18 +3,31 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Script to train IRL agent with PPO + feature-buffer IRL."""
+"""Script to train IRL agent with PPO + feature-buffer IRL.
+
+This file is the entry point. The heavy lifting is split across sibling
+modules in this directory:
+
+- ``_train_config.py``  — config dataclasses + YAML/CLI parsers + run-config dumping
+- ``_train_expert_data.py`` — HDF5/.pt expert loaders + subset/holdout helpers + ``_install_expert_episodes``
+- ``_train_video.py``   — ``VideoSetup`` + ``setup_video_recording`` + ``copy_final_videos`` + ``rename_iteration_files``
+
+This file owns:
+- ``RuntimeDeps`` (the Isaac/rsl_rl handle, populated only after ``SimulationApp`` exists)
+- ``_load_app_launcher_cls`` / ``_load_runtime_deps`` — lazy Isaac/rsl_rl loading
+- Argparse setup
+- Wiring builders (actor/critic, feature map, success_fn, BC, PPO+adapter, wandb cfg)
+- ``main()`` — orchestrates setup, training, cleanup
+"""
 
 from __future__ import annotations
 
 import argparse
 import os
-import re
-import shutil
 import sys
-from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
-from datetime import datetime
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Any, Callable
 
 # Load .env for WANDB_API_KEY before any wandb imports
 _env_path = Path(__file__).resolve().parents[2] / ".env"
@@ -22,13 +35,13 @@ if _env_path.exists():
     from dotenv import load_dotenv
     load_dotenv(_env_path)
 
-from collections.abc import Iterator
-from typing import Any, Callable, TypeVar
-
 import torch
-import yaml
-from einops import rearrange
 
+# Make sibling files importable both when this script is run as
+# ``python scripts/irl/train_irl.py`` and when tests load it via importlib.
+_THIS_DIR = Path(__file__).resolve().parent
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
 REPO_SRC = Path(__file__).resolve().parents[2] / "src"
 if str(REPO_SRC) not in sys.path:
     sys.path.insert(0, str(REPO_SRC))
@@ -48,6 +61,29 @@ from utils.runtime_context import RuntimeContext
 from storage.feature_storage import FeatureBufCfg
 from storage.obs_action_storage import ObsActionBufCfg, ObsActionBuffer
 
+from _train_config import (
+    ActorCriticCfg,
+    EnvCfg,
+    PpoAlgoCfg,
+    TrainCfg,
+    _dump_run_configs,
+    load_train_cfg,
+)
+from _train_expert_data import (
+    _install_expert_episodes,
+    _split_holdout_episodes,
+    _subset_episodes,
+    load_expert_success_rate,
+    load_feature_episodes,
+    load_obs_action_episodes,
+)
+from _train_video import (
+    VideoSetup,
+    copy_final_videos,
+    rename_iteration_files,
+    setup_video_recording,
+)
+
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -55,80 +91,9 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
-@dataclass(slots=True)
-class ActorCriticCfg:
-    actor_hidden_dims: tuple[int, ...] = (256, 128, 64)
-    critic_hidden_dims: tuple[int, ...] = (256, 128, 64)
-    activation: str = "elu"
-    init_noise_std: float = 1.0
-    noise_std_type: str = "scalar"
-    state_dependent_std: bool = False
-    actor_obs_normalization: bool = False
-    critic_obs_normalization: bool = False
-
-
-@dataclass(slots=True)
-class PpoAlgoCfg:
-    learning_rate: float = 1.0e-4
-    gamma: float = 0.98
-    lam: float = 0.95
-    num_learning_epochs: int = 5
-    num_mini_batches: int = 4
-    schedule: str = "adaptive"
-    entropy_coef: float = 0.006
-    desired_kl: float = 0.01
-    max_grad_norm: float = 1.0
-    value_loss_coef: float = 1.0
-    use_clipped_value_loss: bool = True
-    clip_param: float = 0.2
-    normalize_advantage_per_mini_batch: bool = False
-    rnd_cfg: dict | None = None
-    symmetry_cfg: dict | None = None
-
-
-@dataclass(slots=True)
-class EnvCfg:
-    name: str | None = None
-    device: str = "cuda:0"
-    num_envs: int | None = None
-    success_threshold: float = 0.08
-    """Object-to-goal distance (m) below which a Lift step counts as success.
-    Centralized here so train_irl.py and the recording script agree without
-    requiring a CLI flag every run."""
-    add_success_bonus: bool = True
-    """If True, inject a `success_bonus` reward term (binary object_reached_goal)
-    into the env's RewardsCfg before gym.make. The term is exposed as an IRL
-    feature (auto-registered in ManagerBasedFeatureCfg.force_include_terms);
-    its env-reward contribution is controlled by `success_bonus_weight`."""
-    success_bonus_weight: float = 0.0
-    """Weight of the injected success_bonus term in the env reward signal.
-    Defaults to 0.0 so the term is feature-only (IRL still learns its weight
-    via the reward model). Set > 0 to also contribute to the env reward."""
-
-
-@dataclass(slots=True)
-class TrainCfg:
-    experiment_name: str = "default_experiment"
-    run_name: str = ""
-    logger: str = "wandb"
-    wandb_project: str = "isaaclab"
-
-    resume: bool = False
-    load_run: str = ".*"
-    load_checkpoint: str = "model_.*.pt"
-
-    seed: int = 42
-    max_iterations: int = 1500
-    device: str = "cuda:0"
-    env: EnvCfg = field(default_factory=EnvCfg)
-
-    feature_map: ManagerBasedFeatureCfg = field(default_factory=ManagerBasedFeatureCfg)
-    irl: IRLCfg = field(default_factory=IRLCfg)
-    runner: IrlRunnerCfg = field(default_factory=IrlRunnerCfg)
-    reward: RewardModelCfg = field(default_factory=lambda: RewardModelCfg(num_features=1))
-    actor_critic: ActorCriticCfg = field(default_factory=ActorCriticCfg)
-    rl_algorithm: PpoAlgoCfg = field(default_factory=PpoAlgoCfg)
-    bc: BCCfg = field(default_factory=BCCfg)
+# ---------------------------------------------------------------------------
+# Runtime deps (must be populated AFTER SimulationApp creation)
+# ---------------------------------------------------------------------------
 
 
 @dataclass(slots=True)
@@ -144,508 +109,39 @@ class RuntimeDeps:
     resolve_obs_groups: Callable[..., Any]
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+def _load_app_launcher_cls() -> Any:
+    from isaaclab.app import AppLauncher
+
+    return AppLauncher
 
 
-def _task_slug(task_name: str) -> str:
-    slug = str(task_name).lower()
-    for token in ("isaac-", "-v0", "-v1", "-v2"):
-        slug = slug.replace(token, "")
-    return slug.replace("-", "_")
+def _load_runtime_deps(app_launcher_cls: Any) -> RuntimeDeps:
+    import gymnasium as gym
 
+    import isaaclab_tasks  # noqa: F401
+    from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
+    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
+    from rsl_rl.algorithms import PPO
+    from rsl_rl.models import MLPModel
+    from rsl_rl.storage import RolloutStorage
+    from rsl_rl.utils import resolve_obs_groups
 
-def _to_tuple_ints(value: Any, default: tuple[int, ...]) -> tuple[int, ...]:
-    if value is None:
-        return default
-    if isinstance(value, (tuple, list)):
-        return tuple(int(item) for item in value)
-    raise TypeError(f"Expected sequence of ints, got {type(value)!r}.")
-
-
-def _to_mapping(payload: Any, *, section_name: str) -> dict[str, Any]:
-    if payload is None:
-        return {}
-    if not isinstance(payload, dict):
-        raise TypeError(f"Config section '{section_name}' must be a mapping, got {type(payload)!r}.")
-    return payload
-
-
-def _read_yaml(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as file_handle:
-        payload = yaml.safe_load(file_handle) or {}
-    if not isinstance(payload, dict):
-        raise TypeError(f"YAML at {path} must contain a top-level mapping.")
-    return payload
-
-
-def _load_train_payload(task_name: str, config_dir: Path) -> dict[str, Any]:
-    experiment_path = config_dir / "experiment.yaml"
-    if not experiment_path.exists():
-        raise FileNotFoundError(f"Missing experiment config: {experiment_path}")
-
-    return _read_yaml(experiment_path)
-
-
-def _parse_torch_dtype(value: Any, default: torch.dtype) -> torch.dtype:
-    if value is None:
-        return default
-    if isinstance(value, torch.dtype):
-        return value
-    if isinstance(value, str):
-        lookup = {
-            "float16": torch.float16,
-            "float32": torch.float32,
-            "float64": torch.float64,
-            "bfloat16": torch.bfloat16,
-        }
-        if value not in lookup:
-            raise ValueError(f"Unsupported dtype '{value}'. Expected one of: {', '.join(sorted(lookup.keys()))}.")
-        return lookup[value]
-    raise TypeError(f"`store_dtype` must be str or torch.dtype, got {type(value)!r}.")
-
-
-def _parse_feature_buffer_cfg(section: dict[str, Any], default_cfg: FeatureBufCfg) -> FeatureBufCfg:
-    stale_key = "store_discounted_feature_returns"
-    if stale_key in section:
-        raise ValueError(
-            f"`runner.*_buffer.{stale_key}` is no longer supported. "
-            "FeatureTrajectoryBuffer always stores episode features."
-        )
-
-    return FeatureBufCfg(
-        capacity_steps=int(section.get("capacity_steps", default_cfg.capacity_steps)),
-        store_device=str(section.get("store_device", default_cfg.store_device)),
-        store_dtype=_parse_torch_dtype(section.get("store_dtype"), default_cfg.store_dtype),
-        min_ep_len=int(section.get("min_ep_len", default_cfg.min_ep_len)),
-        sample_weighted_by_length=bool(section.get("sample_weighted_by_length", default_cfg.sample_weighted_by_length)),
+    return RuntimeDeps(
+        AppLauncher=app_launcher_cls,
+        gym=gym,
+        parse_env_cfg=parse_env_cfg,
+        get_checkpoint_path=get_checkpoint_path,
+        RslRlVecEnvWrapper=RslRlVecEnvWrapper,
+        PPO=PPO,
+        MLPModel=MLPModel,
+        RolloutStorage=RolloutStorage,
+        resolve_obs_groups=resolve_obs_groups,
     )
 
 
-def _parse_runner_cfg(section: dict[str, Any]) -> IrlRunnerCfg:
-    stale_key_messages = {
-        "reward_update_interval": "Use `runner.reward_updates_per_cycle` instead.",
-        "bc_eval_interval": "Use `runner.validation_interval` instead.",
-        "num_steps_per_env_rl": "Use `runner.steps_per_env_per_cycle` instead.",
-        "policy_updates_per_cycle": "Use `runner.rl_updates_per_cycle` instead.",
-    }
-    for stale_key, hint in stale_key_messages.items():
-        if stale_key in section:
-            raise ValueError(f"`runner.{stale_key}` is no longer supported. {hint}")
-
-    defaults = IrlRunnerCfg()
-    imitator_buffer = _parse_feature_buffer_cfg(
-        _to_mapping(section.get("imitator_buffer"), section_name="runner.imitator_buffer"),
-        defaults.imitator_buffer,
-    )
-    expert_buffer = _parse_feature_buffer_cfg(
-        _to_mapping(section.get("expert_buffer"), section_name="runner.expert_buffer"),
-        defaults.expert_buffer,
-    )
-
-    steps_per_env_per_cycle = int(section.get("steps_per_env_per_cycle", defaults.steps_per_env_per_cycle))
-    if steps_per_env_per_cycle <= 0:
-        raise ValueError(
-            "`runner.steps_per_env_per_cycle` must be > 0, "
-            f"got {steps_per_env_per_cycle}."
-        )
-    save_interval = int(section.get("save_interval", defaults.save_interval))
-    if save_interval <= 0:
-        raise ValueError(f"`runner.save_interval` must be > 0, got {save_interval}.")
-    rl_updates_per_cycle = int(section.get("rl_updates_per_cycle", defaults.rl_updates_per_cycle))
-    if rl_updates_per_cycle <= 0:
-        raise ValueError(
-            "`runner.rl_updates_per_cycle` must be > 0, "
-            f"got {rl_updates_per_cycle}."
-        )
-    reward_updates_per_cycle = int(section.get("reward_updates_per_cycle", defaults.reward_updates_per_cycle))
-    if reward_updates_per_cycle <= 0:
-        raise ValueError(
-            "`runner.reward_updates_per_cycle` must be > 0, "
-            f"got {reward_updates_per_cycle}."
-        )
-    expert_num_envs = int(section.get("expert_num_envs", defaults.expert_num_envs))
-    if expert_num_envs <= 0:
-        raise ValueError(f"`runner.expert_num_envs` must be > 0, got {expert_num_envs}.")
-
-    validation_interval = int(section.get("validation_interval", defaults.validation_interval))
-    if validation_interval < 0:
-        raise ValueError(f"`runner.validation_interval` must be >= 0, got {validation_interval}.")
-    validation_steps_per_env_raw = section.get("validation_steps_per_env", defaults.validation_steps_per_env)
-    validation_steps_per_env = None if validation_steps_per_env_raw is None else int(validation_steps_per_env_raw)
-    if validation_steps_per_env is not None and validation_steps_per_env < 0:
-        raise ValueError(
-            "`runner.validation_steps_per_env` must be >= 0 or null, "
-            f"got {validation_steps_per_env}."
-        )
-
-    imitator_rollout_steps_raw = section.get(
-        "imitator_rollout_steps_per_env", defaults.imitator_rollout_steps_per_env
-    )
-    imitator_rollout_steps_per_env = None if imitator_rollout_steps_raw is None else int(imitator_rollout_steps_raw)
-    if imitator_rollout_steps_per_env is not None and imitator_rollout_steps_per_env <= 0:
-        raise ValueError(
-            "`runner.imitator_rollout_steps_per_env` must be > 0 or null, "
-            f"got {imitator_rollout_steps_per_env}."
-        )
-
-    return IrlRunnerCfg(
-        steps_per_env_per_cycle=steps_per_env_per_cycle,
-        save_interval=save_interval,
-        rl_updates_per_cycle=rl_updates_per_cycle,
-        reward_updates_per_cycle=reward_updates_per_cycle,
-        use_learned_reward=bool(section.get("use_learned_reward", defaults.use_learned_reward)),
-        imitator_buffer=imitator_buffer,
-        expert_buffer=expert_buffer,
-        expert_num_envs=expert_num_envs,
-        validation_interval=validation_interval,
-        validation_steps_per_env=validation_steps_per_env,
-        imitator_rollout_steps_per_env=imitator_rollout_steps_per_env,
-    )
-
-
-def _parse_irl_cfg(section: dict[str, Any]) -> IRLCfg:
-    stale_key = "reward_gradient_mode"
-    if stale_key in section:
-        raise ValueError(
-            "`irl.reward_gradient_mode` has been removed. "
-            "Use `irl.discount_gamma` and `irl.normalize_returns_by_episode_length`."
-        )
-    stale_key = "use_learned_reward"
-    if stale_key in section:
-        raise ValueError(
-            "`irl.use_learned_reward` is no longer supported. "
-            "Use `runner.use_learned_reward` instead."
-        )
-
-    defaults = IRLCfg()
-    reward_lr = section.get("reward_learning_rate", defaults.reward_learning_rate)
-    discount_gamma_raw = section.get("discount_gamma", defaults.discount_gamma)
-    discount_gamma = float(discount_gamma_raw) if discount_gamma_raw is not None else None
-    if discount_gamma is not None and not (0.0 < discount_gamma <= 1.0):
-        raise ValueError(f"`irl.discount_gamma` must be in (0, 1], got {discount_gamma}.")
-
-    expert_num_trajectories_raw = section.get("expert_num_trajectories")
-    expert_num_trajectories = (
-        int(expert_num_trajectories_raw) if expert_num_trajectories_raw is not None else None
-    )
-    if expert_num_trajectories is not None and expert_num_trajectories <= 0:
-        raise ValueError(
-            f"`irl.expert_num_trajectories` must be > 0 when set, got {expert_num_trajectories}."
-        )
-
-    return IRLCfg(
-        expert_data_path=str(section.get("expert_data_path", defaults.expert_data_path)),
-        expert_num_trajectories=expert_num_trajectories,
-        expert_subset_strategy=str(
-            section.get("expert_subset_strategy", defaults.expert_subset_strategy)
-        ),
-        batch_size=int(section.get("batch_size", defaults.batch_size)),
-        num_learning_epochs=int(section.get("num_learning_epochs", defaults.num_learning_epochs)),
-        weight_decay=float(section.get("weight_decay", defaults.weight_decay)),
-        max_grad_norm=float(section.get("max_grad_norm", defaults.max_grad_norm)),
-        reward_loss_coef=float(section.get("reward_loss_coef", defaults.reward_loss_coef)),
-        reward_learning_rate=(float(reward_lr) if reward_lr is not None else None),
-        discount_gamma=discount_gamma,
-        normalize_returns_by_episode_length=bool(
-            section.get(
-                "normalize_returns_by_episode_length",
-                defaults.normalize_returns_by_episode_length,
-            )
-        ),
-    )
-
-
-def _parse_feature_map_cfg(section: dict[str, Any]) -> ManagerBasedFeatureCfg:
-    ignored_terms = section.get("ignored_reward_terms", [])
-    if ignored_terms is None:
-        ignored_terms = []
-    if not isinstance(ignored_terms, (list, tuple, set)):
-        raise TypeError("`feature_map.ignored_reward_terms` must be a sequence of term names.")
-    forced_terms = section.get("force_include_terms", [])
-    if forced_terms is None:
-        forced_terms = []
-    if not isinstance(forced_terms, (list, tuple, set)):
-        raise TypeError("`feature_map.force_include_terms` must be a sequence of term names.")
-    return ManagerBasedFeatureCfg(
-        ignored_reward_terms=set(str(item) for item in ignored_terms),
-        force_include_terms=set(str(item) for item in forced_terms),
-    )
-
-
-def _parse_actor_critic_cfg(section: dict[str, Any]) -> ActorCriticCfg:
-    defaults = ActorCriticCfg()
-    return ActorCriticCfg(
-        actor_hidden_dims=_to_tuple_ints(section.get("actor_hidden_dims"), defaults.actor_hidden_dims),
-        critic_hidden_dims=_to_tuple_ints(section.get("critic_hidden_dims"), defaults.critic_hidden_dims),
-        activation=str(section.get("activation", defaults.activation)),
-        init_noise_std=float(section.get("init_noise_std", defaults.init_noise_std)),
-        noise_std_type=str(section.get("noise_std_type", defaults.noise_std_type)),
-        state_dependent_std=bool(section.get("state_dependent_std", defaults.state_dependent_std)),
-        actor_obs_normalization=bool(section.get("actor_obs_normalization", defaults.actor_obs_normalization)),
-        critic_obs_normalization=bool(section.get("critic_obs_normalization", defaults.critic_obs_normalization)),
-    )
-
-
-def _parse_ppo_cfg(section: dict[str, Any]) -> PpoAlgoCfg:
-    defaults = PpoAlgoCfg()
-    return PpoAlgoCfg(
-        learning_rate=float(section.get("learning_rate", defaults.learning_rate)),
-        gamma=float(section.get("gamma", defaults.gamma)),
-        lam=float(section.get("lam", defaults.lam)),
-        num_learning_epochs=int(section.get("num_learning_epochs", defaults.num_learning_epochs)),
-        num_mini_batches=int(section.get("num_mini_batches", defaults.num_mini_batches)),
-        schedule=str(section.get("schedule", defaults.schedule)),
-        entropy_coef=float(section.get("entropy_coef", defaults.entropy_coef)),
-        desired_kl=float(section.get("desired_kl", defaults.desired_kl)),
-        max_grad_norm=float(section.get("max_grad_norm", defaults.max_grad_norm)),
-        value_loss_coef=float(section.get("value_loss_coef", defaults.value_loss_coef)),
-        use_clipped_value_loss=bool(section.get("use_clipped_value_loss", defaults.use_clipped_value_loss)),
-        clip_param=float(section.get("clip_param", defaults.clip_param)),
-        normalize_advantage_per_mini_batch=bool(
-            section.get("normalize_advantage_per_mini_batch", defaults.normalize_advantage_per_mini_batch)
-        ),
-        rnd_cfg=section.get("rnd_cfg", defaults.rnd_cfg),
-        symmetry_cfg=section.get("symmetry_cfg", defaults.symmetry_cfg),
-    )
-
-
-def _parse_bc_cfg(section: dict[str, Any]) -> BCCfg:
-    defaults = BCCfg()
-    alpha = float(section.get("alpha", defaults.alpha))
-    if not (0.0 <= alpha <= 1.0):
-        raise ValueError(f"`bc.alpha` must be in [0, 1], got {alpha}.")
-    loss_type = str(section.get("loss_type", defaults.loss_type))
-    if loss_type not in {"nll", "mse"}:
-        raise ValueError(
-            f"`bc.loss_type` must be 'nll' or 'mse', got {loss_type!r}."
-        )
-    batch_size = int(section.get("batch_size", defaults.batch_size))
-    if batch_size <= 0:
-        raise ValueError(f"`bc.batch_size` must be > 0, got {batch_size}.")
-    val_fraction = float(section.get("val_fraction", defaults.val_fraction))
-    if not (0.0 <= val_fraction < 1.0):
-        raise ValueError(f"`bc.val_fraction` must be in [0, 1), got {val_fraction}.")
-    return BCCfg(
-        alpha=alpha, loss_type=loss_type, batch_size=batch_size, val_fraction=val_fraction
-    )
-
-
-def _parse_reward_cfg(section: dict[str, Any]) -> RewardModelCfg:
-    if "reward_hidden_dims" in section or "reward_is_linear" in section:
-        raise ValueError(
-            "Reward config keys `reward_hidden_dims` and `reward_is_linear` are no longer supported. "
-            "Use `hidden_dims` and `is_linear` under `reward:`."
-        )
-
-    reward_type = str(section.get("type", "dense"))
-    if reward_type not in {"dense", "linear"}:
-        raise ValueError(
-            f"Unsupported reward type '{reward_type}'. Expected 'dense' or 'linear'."
-        )
-
-    defaults = RewardModelCfg(num_features=1)
-    if reward_type == "linear":
-        is_linear = True
-    else:
-        is_linear = bool(section.get("is_linear", defaults.is_linear))
-    linear_projection = str(section.get("linear_projection", defaults.linear_projection))
-    if not is_linear and linear_projection != "none":
-        raise ValueError(
-            "`linear_projection` is only valid when `is_linear` is True. "
-            f"Got is_linear={is_linear}, linear_projection={linear_projection!r}."
-        )
-    return RewardModelCfg(
-        num_features=int(section.get("num_features", defaults.num_features)),
-        hidden_dims=_to_tuple_ints(section.get("hidden_dims"), defaults.hidden_dims),
-        is_linear=is_linear,
-        activation=str(section.get("activation", defaults.activation)),
-        regularization=str(section.get("regularization", defaults.regularization)),
-        regularization_strength=float(section.get("regularization_strength", defaults.regularization_strength)),
-        elastic_alpha=float(section.get("elastic_alpha", defaults.elastic_alpha)),
-        linear_projection=linear_projection,
-        linear_projection_radius=float(section.get("linear_projection_radius", defaults.linear_projection_radius)),
-    )
-
-
-def load_train_cfg(
-    *,
-    task_name: str,
-    args_cli: argparse.Namespace,
-    config_dir: Path | None = None,
-) -> TrainCfg:
-    config_root = config_dir or (_repo_root() / "configs" / "franka_lift")
-    payload = _load_train_payload(task_name=task_name, config_dir=config_root)
-
-    env_section = _to_mapping(payload.get("env"), section_name="env")
-    resolved_task_name = str(task_name or env_section.get("name") or "")
-    if resolved_task_name == "":
-        raise ValueError("Task name is required. Provide `--task` or set `env.name` in train config.")
-
-    default_experiment_name = _task_slug(resolved_task_name)
-    env_defaults = EnvCfg()
-    cfg = TrainCfg(
-        experiment_name=str(payload.get("experiment_name", default_experiment_name)),
-        run_name=str(payload.get("run_name", "")),
-        logger=str(payload.get("logger", "wandb")),
-        seed=int(payload.get("seed", 42)),
-        max_iterations=int(payload.get("max_iterations", 1500)),
-        device=str(env_section.get("device", "cuda:0")),
-        env=EnvCfg(
-            name=resolved_task_name,
-            device=str(env_section.get("device", "cuda:0")),
-            num_envs=(int(env_section["num_envs"]) if env_section.get("num_envs") is not None else None),
-            success_threshold=float(env_section.get("success_threshold", env_defaults.success_threshold)),
-            add_success_bonus=bool(env_section.get("add_success_bonus", env_defaults.add_success_bonus)),
-            success_bonus_weight=float(env_section.get("success_bonus_weight", env_defaults.success_bonus_weight)),
-        ),
-    )
-
-    cfg.feature_map = _parse_feature_map_cfg(_to_mapping(payload.get("feature_map"), section_name="feature_map"))
-    cfg.irl = _parse_irl_cfg(_to_mapping(payload.get("irl"), section_name="irl"))
-    cfg.runner = _parse_runner_cfg(_to_mapping(payload.get("runner"), section_name="runner"))
-    cfg.reward = _parse_reward_cfg(_to_mapping(payload.get("reward"), section_name="reward"))
-    cfg.actor_critic = _parse_actor_critic_cfg(_to_mapping(payload.get("policy"), section_name="policy"))
-    cfg.rl_algorithm = _parse_ppo_cfg(_to_mapping(payload.get("algo"), section_name="algo"))
-    cfg.bc = _parse_bc_cfg(_to_mapping(payload.get("bc"), section_name="bc"))
-
-    # CLI overrides
-    if getattr(args_cli, "seed", None) is not None:
-        cfg.seed = int(args_cli.seed)
-    if getattr(args_cli, "max_iterations", None) is not None:
-        cfg.max_iterations = int(args_cli.max_iterations)
-    if int(cfg.max_iterations) <= 0:
-        raise ValueError(
-            f"`max_iterations` must be > 0, got {int(cfg.max_iterations)}. "
-            "Set a positive value in configs/franka_lift/experiment.yaml or pass --max_iterations."
-        )
-
-    cli_device = getattr(args_cli, "device", None)
-    if cli_device is not None:
-        cfg.device = str(cli_device)
-        cfg.env.device = str(cli_device)
-
-    cli_num_envs = getattr(args_cli, "num_envs", None)
-    if cli_num_envs is not None:
-        cfg.env.num_envs = int(cli_num_envs)
-
-    cli_success_threshold = getattr(args_cli, "success_threshold", None)
-    if cli_success_threshold is not None:
-        cli_success_threshold = float(cli_success_threshold)
-        if cli_success_threshold <= 0.0:
-            raise ValueError(f"`--success_threshold` must be > 0, got {cli_success_threshold}.")
-        cfg.env.success_threshold = cli_success_threshold
-
-    cli_add_success_bonus = getattr(args_cli, "add_success_bonus", None)
-    if cli_add_success_bonus is not None:
-        cfg.env.add_success_bonus = bool(cli_add_success_bonus)
-
-    cli_success_bonus_weight = getattr(args_cli, "success_bonus_weight", None)
-    if cli_success_bonus_weight is not None:
-        cfg.env.success_bonus_weight = float(cli_success_bonus_weight)
-
-    if getattr(args_cli, "resume", None) is not None:
-        cfg.resume = bool(args_cli.resume)
-    if getattr(args_cli, "load_run", None) is not None:
-        cfg.load_run = str(args_cli.load_run)
-    if getattr(args_cli, "checkpoint", None) is not None:
-        cfg.load_checkpoint = str(args_cli.checkpoint)
-    if getattr(args_cli, "run_name", None) is not None:
-        cfg.run_name = str(args_cli.run_name)
-    if getattr(args_cli, "experiment_name", None) is not None:
-        cfg.experiment_name = str(args_cli.experiment_name)
-    if getattr(args_cli, "logger", None) is not None:
-        cfg.logger = str(args_cli.logger)
-    if cfg.logger not in {"wandb", "noop"}:
-        raise ValueError(f"`logger` must be 'wandb' or 'noop', got {cfg.logger!r}.")
-
-    log_project_name = getattr(args_cli, "log_project_name", None)
-    if cfg.logger == "wandb" and log_project_name:
-        cfg.wandb_project = str(log_project_name)
-
-    expert_data_path = getattr(args_cli, "expert_data_path", None)
-    if expert_data_path:
-        cfg.irl = replace(cfg.irl, expert_data_path=str(expert_data_path))
-    expert_num_trajectories = getattr(args_cli, "expert_num_trajectories", None)
-    if expert_num_trajectories is not None:
-        if expert_num_trajectories <= 0:
-            raise ValueError(
-                f"`--expert_num_trajectories` must be > 0, got {expert_num_trajectories}."
-            )
-        cfg.irl = replace(cfg.irl, expert_num_trajectories=expert_num_trajectories)
-    expert_subset_strategy = getattr(args_cli, "expert_subset_strategy", None)
-    if expert_subset_strategy is not None:
-        cfg.irl = replace(cfg.irl, expert_subset_strategy=str(expert_subset_strategy))
-    irl_discount_gamma = getattr(args_cli, "irl_discount_gamma", None)
-    if irl_discount_gamma is not None:
-        irl_discount_gamma = float(irl_discount_gamma)
-        if not (0.0 < irl_discount_gamma <= 1.0):
-            raise ValueError(f"`--irl_discount_gamma` must be in (0, 1], got {irl_discount_gamma}.")
-        cfg.irl = replace(cfg.irl, discount_gamma=irl_discount_gamma)
-
-    use_learned_reward = getattr(args_cli, "use_learned_reward", None)
-    if use_learned_reward is not None:
-        cfg.runner = replace(cfg.runner, use_learned_reward=bool(use_learned_reward))
-
-    bc_alpha = getattr(args_cli, "bc_alpha", None)
-    if bc_alpha is not None:
-        bc_alpha = float(bc_alpha)
-        if not (0.0 <= bc_alpha <= 1.0):
-            raise ValueError(f"`--bc_alpha` must be in [0, 1], got {bc_alpha}.")
-        cfg.bc = replace(cfg.bc, alpha=bc_alpha)
-    bc_loss_type = getattr(args_cli, "bc_loss_type", None)
-    if bc_loss_type is not None:
-        cfg.bc = replace(cfg.bc, loss_type=str(bc_loss_type))
-
-    learning_rate = getattr(args_cli, "learning_rate", None)
-    if learning_rate is not None:
-        learning_rate = float(learning_rate)
-        if learning_rate <= 0.0:
-            raise ValueError(f"`--learning_rate` must be > 0, got {learning_rate}.")
-        cfg.rl_algorithm = replace(cfg.rl_algorithm, learning_rate=learning_rate)
-
-    reward_learning_rate = getattr(args_cli, "reward_learning_rate", None)
-    if reward_learning_rate is not None:
-        reward_learning_rate = float(reward_learning_rate)
-        if reward_learning_rate <= 0.0:
-            raise ValueError(f"`--reward_learning_rate` must be > 0, got {reward_learning_rate}.")
-        cfg.irl = replace(cfg.irl, reward_learning_rate=reward_learning_rate)
-
-    reward_regularization_strength = getattr(args_cli, "reward_regularization_strength", None)
-    if reward_regularization_strength is not None:
-        reward_regularization_strength = float(reward_regularization_strength)
-        if reward_regularization_strength < 0.0:
-            raise ValueError(
-                f"`--reward_regularization_strength` must be >= 0, got {reward_regularization_strength}."
-            )
-        cfg.reward = replace(cfg.reward, regularization_strength=reward_regularization_strength)
-
-    reward_updates_per_cycle = getattr(args_cli, "reward_updates_per_cycle", None)
-    if reward_updates_per_cycle is not None:
-        reward_updates_per_cycle = int(reward_updates_per_cycle)
-        if reward_updates_per_cycle < 1:
-            raise ValueError(
-                f"`--reward_updates_per_cycle` must be >= 1, got {reward_updates_per_cycle}."
-            )
-        cfg.runner = replace(cfg.runner, reward_updates_per_cycle=reward_updates_per_cycle)
-
-    rl_updates_per_cycle = getattr(args_cli, "rl_updates_per_cycle", None)
-    if rl_updates_per_cycle is not None:
-        rl_updates_per_cycle = int(rl_updates_per_cycle)
-        if rl_updates_per_cycle < 1:
-            raise ValueError(
-                f"`--rl_updates_per_cycle` must be >= 1, got {rl_updates_per_cycle}."
-            )
-        cfg.runner = replace(cfg.runner, rl_updates_per_cycle=rl_updates_per_cycle)
-
-    validation_interval = getattr(args_cli, "validation_interval", None)
-    if validation_interval is not None:
-        validation_interval = int(validation_interval)
-        if validation_interval < 0:
-            raise ValueError(f"`--validation_interval` must be >= 0, got {validation_interval}.")
-        cfg.runner = replace(cfg.runner, validation_interval=validation_interval)
-
-    return cfg
+# ---------------------------------------------------------------------------
+# Wiring builders (actor/critic, feature map, success_fn, log dir, BC, RL alg, wandb cfg)
+# ---------------------------------------------------------------------------
 
 
 def _build_actor_critic(
@@ -726,9 +222,13 @@ def _build_success_fn(
     logging must never break training.
     """
     try:
-        from isaaclab_tasks.manager_based.manipulation.lift.mdp import object_reached_goal
+        from isaaclab_tasks.manager_based.manipulation.lift.mdp import (
+            object_reached_goal,
+        )
     except Exception as exc:
-        print(f"[WARN] No success metric for task {task_name!r} (object_reached_goal unavailable): {exc}")
+        print(
+            f"[WARN] No success metric for task {task_name!r} (object_reached_goal unavailable): {exc}"
+        )
         return None
 
     def success_fn(env: Any) -> torch.Tensor:
@@ -737,422 +237,36 @@ def _build_success_fn(
     try:
         probe = success_fn(probe_env)
         if not isinstance(probe, torch.Tensor):
-            raise TypeError(f"object_reached_goal returned {type(probe)}, expected Tensor.")
+            raise TypeError(
+                f"object_reached_goal returned {type(probe)}, expected Tensor."
+            )
     except Exception as exc:
-        print(f"[WARN] Disabling success metric for task {task_name!r} (probe failed): {exc}")
+        print(
+            f"[WARN] Disabling success metric for task {task_name!r} (probe failed): {exc}"
+        )
         return None
 
     print(f"[INFO] Success metric enabled: object within {threshold} m of goal pose.")
     return success_fn
 
 
-def _feature_dim_from_feature_map(feature_map: Callable[[Any], torch.Tensor], env: Any) -> int:
+def _feature_dim_from_feature_map(
+    feature_map: Callable[[Any], torch.Tensor], env: Any
+) -> int:
     with torch.no_grad():
         features = feature_map(env)
     if not isinstance(features, torch.Tensor):
         features = torch.as_tensor(features)
     if features.ndim != 2:
-        raise ValueError(f"Feature map must return shape [N, D], got {tuple(features.shape)}")
+        raise ValueError(
+            f"Feature map must return shape [N, D], got {tuple(features.shape)}"
+        )
     return int(features.shape[1])
 
 
-def _torch_load_payload(path: str) -> Any:
-    try:
-        return torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-    except TypeError:
-        pass
-    except Exception:
-        pass
-    return torch.load(path, map_location="cpu")
-
-
-def _tensor_to_feature_episodes(payload: torch.Tensor) -> list[torch.Tensor]:
-    if payload.ndim == 2:
-        return [payload]
-    if payload.ndim == 3:
-        return [payload[i] for i in range(payload.shape[0])]
-    raise ValueError(
-        f"Expected tensor payload with shape [T, D] or [E, T, D], got {tuple(payload.shape)}"
-    )
-
-
-def _extract_feature_episodes_from_torch_payload(payload: Any) -> list[torch.Tensor]:
-    if isinstance(payload, dict):
-        keys = ("episodes", "features", "expert_episodes")
-        selected_key = next((key for key in keys if key in payload), None)
-        if selected_key is None:
-            raise ValueError(
-                "Torch payload must contain one of keys: 'episodes', 'features', 'expert_episodes'."
-            )
-        payload = payload[selected_key]
-
-    if isinstance(payload, torch.Tensor):
-        return _tensor_to_feature_episodes(payload)
-
-    if not isinstance(payload, (list, tuple)):
-        raise TypeError(f"Expected list/tuple/tensor feature payload, got {type(payload)!r}")
-
-    episodes: list[torch.Tensor] = []
-    for episode in payload:
-        episode_tensor = episode if isinstance(episode, torch.Tensor) else torch.as_tensor(episode)
-        episodes.extend(_tensor_to_feature_episodes(episode_tensor))
-    return episodes
-
-
-def _iter_hdf5_demos(path: str, *, payload_hint: str) -> Iterator[tuple[str, Any]]:
-    """Yield ``(demo_key, demo_group)`` for each demo under ``data/`` in
-    sorted order.
-
-    Raises a clear error if ``data/`` is missing or any demo entry isn't a
-    group. ``payload_hint`` is folded into the error message so the caller
-    can describe what each demo should contain (e.g. ``"features/<name>"``).
-    """
-    try:
-        import h5py
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            "Loading .h5/.hdf5 expert data requires `h5py`. Install it in your environment."
-        ) from exc
-
-    with h5py.File(path, "r") as file_handle:
-        data_group = file_handle.get("data", None)
-        if data_group is None or not hasattr(data_group, "keys"):
-            raise ValueError(
-                f"HDF5 payload must contain demos under 'data/demo_*/{payload_hint}'."
-            )
-        for demo_key in sorted(data_group.keys()):
-            demo_group = data_group[demo_key]
-            if not hasattr(demo_group, "keys"):
-                raise ValueError(f"Demo '{demo_key}' must be a group.")
-            yield str(demo_key), demo_group
-
-
-def _extract_feature_episodes_from_hdf5(
-    path: str,
-    expected_feature_names: list[str] | None = None,
-) -> list[torch.Tensor]:
-    def _episode_from_named_features(feature_group: Any, *, demo_key: str) -> torch.Tensor:
-        if not hasattr(feature_group, "keys"):
-            raise ValueError(
-                f"Demo '{demo_key}' uses legacy feature format. Expected group 'features/<feature_name>'. "
-                "Regenerate demos with the simplified recorder."
-            )
-
-        available_feature_names = [str(name) for name in feature_group.keys()]
-        if len(available_feature_names) == 0:
-            raise ValueError(f"Demo '{demo_key}' has empty 'features' group.")
-
-        if expected_feature_names is None:
-            # Preserve the HDF5 group order. Demo files written by
-            # RobomimicDataCollector use track_order=True, so this matches the
-            # reward-manager feature order used online.
-            feature_names = available_feature_names
-        else:
-            expected_names = [str(name) for name in expected_feature_names]
-            available_set = set(available_feature_names)
-            expected_set = set(expected_names)
-            if available_set != expected_set:
-                missing = sorted(expected_set - available_set)
-                extra = sorted(available_set - expected_set)
-                raise ValueError(
-                    f"Demo '{demo_key}' feature-name mismatch: missing={missing}, extra={extra}. "
-                    "Regenerate demos with the current feature map, or pass matching ignored/forced terms."
-                )
-            feature_names = expected_names
-
-        columns: list[torch.Tensor] = []
-        expected_steps: int | None = None
-        for feature_name in feature_names:
-            feature_node = feature_group[feature_name]
-            if hasattr(feature_node, "keys"):
-                raise ValueError(
-                    f"Demo '{demo_key}' feature '{feature_name}' must be a dataset of shape [T] or [T,1]."
-                )
-
-            values = torch.as_tensor(feature_node[...])
-            if values.ndim == 2 and int(values.shape[1]) == 1:
-                values = rearrange(values, "t 1 -> t")
-            elif values.ndim != 1:
-                raise ValueError(
-                    f"Demo '{demo_key}' feature '{feature_name}' must have shape [T] or [T,1], "
-                    f"got {tuple(values.shape)}."
-                )
-
-            num_steps = int(values.shape[0])
-            if expected_steps is None:
-                if num_steps <= 0:
-                    raise ValueError(f"Demo '{demo_key}' has empty feature sequence '{feature_name}'.")
-                expected_steps = num_steps
-            elif num_steps != expected_steps:
-                raise ValueError(
-                    f"Demo '{demo_key}' feature length mismatch: expected {expected_steps}, "
-                    f"feature '{feature_name}' has length {num_steps}."
-                )
-
-            columns.append(rearrange(values, "t -> t 1"))
-
-        return torch.cat(columns, dim=1)
-
-    episodes: list[torch.Tensor] = []
-    for demo_key, demo_group in _iter_hdf5_demos(path, payload_hint="features/<feature_name>"):
-        if "features" not in demo_group:
-            raise ValueError(f"Demo '{demo_key}' is missing required group 'features'.")
-        episodes.append(_episode_from_named_features(demo_group["features"], demo_key=demo_key))
-
-    if len(episodes) == 0:
-        raise ValueError("No demos found under 'data/*' in HDF5 payload.")
-
-    return episodes
-
-
-def _validate_feature_episodes(
-    episodes: list[torch.Tensor],
-    expected_feature_dim: int,
-) -> list[torch.Tensor]:
-    if len(episodes) == 0:
-        raise ValueError("No expert feature episodes found.")
-
-    validated: list[torch.Tensor] = []
-    for episode_idx, episode in enumerate(episodes):
-        episode_tensor = episode if isinstance(episode, torch.Tensor) else torch.as_tensor(episode)
-        if episode_tensor.ndim != 2:
-            raise ValueError(
-                f"Episode {episode_idx} must have shape [T, D], got {tuple(episode_tensor.shape)}"
-            )
-        if episode_tensor.shape[0] <= 0:
-            raise ValueError(f"Episode {episode_idx} is empty. Expected at least one timestep.")
-        if int(episode_tensor.shape[1]) != int(expected_feature_dim):
-            raise ValueError(
-                f"Episode {episode_idx} feature dim mismatch: "
-                f"expected {expected_feature_dim}, got {int(episode_tensor.shape[1])}."
-            )
-        validated.append(episode_tensor)
-
-    return validated
-
-
-def load_feature_episodes(
-    path: str,
-    expected_feature_dim: int,
-    expected_feature_names: list[str] | None = None,
-) -> list[torch.Tensor]:
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Expert data path does not exist: {path}")
-    if expected_feature_names is not None and len(expected_feature_names) != int(expected_feature_dim):
-        raise ValueError(
-            f"Expected {expected_feature_dim} feature names, got {len(expected_feature_names)}."
-        )
-
-    ext = os.path.splitext(path)[1].lower()
-    if ext in {".h5", ".hdf5"}:
-        episodes = _extract_feature_episodes_from_hdf5(
-            path, expected_feature_names=expected_feature_names
-        )
-    elif ext in {".pt", ".pth"}:
-        payload = _torch_load_payload(path)
-        episodes = _extract_feature_episodes_from_torch_payload(payload)
-    else:
-        raise ValueError(
-            f"Unsupported expert data extension '{ext}'. Expected one of: .pt, .pth, .h5, .hdf5"
-        )
-
-    return _validate_feature_episodes(episodes, expected_feature_dim=expected_feature_dim)
-
-
-def load_expert_success_rate(path: str) -> float | None:
-    """Mean any-time success over expert demos.
-
-    Reads the per-step ``success`` dataset stored per demo at recording time
-    (``data/demo_*/success`` of shape ``[T]``); a demo counts as a success if it
-    reached the goal at any step. Returns None when the file carries no success
-    info — e.g. demos recorded before the success metric existed, or non-HDF5
-    payloads — so the caller can disable the expert-success gap gracefully.
-    """
-    ext = os.path.splitext(path)[1].lower()
-    if ext not in {".h5", ".hdf5"}:
-        return None
-
-    per_demo_success: list[float] = []
-    for _demo_key, demo_group in _iter_hdf5_demos(path, payload_hint="success"):
-        if "success" not in demo_group:
-            continue
-        values = torch.as_tensor(demo_group["success"][...]).reshape(-1)
-        if values.numel() == 0:
-            continue
-        per_demo_success.append(float((values > 0.5).any().item()))
-
-    if not per_demo_success:
-        return None
-    return sum(per_demo_success) / len(per_demo_success)
-
-
-def _extract_obs_action_episodes_from_hdf5(
-    path: str,
-) -> list[tuple[dict[str, Any], torch.Tensor]]:
-    """Load (obs_dict, actions[T, A]) per demo from an HDF5 file written by
-    :class:`collectors.RobomimicDataCollector`.
-
-    Expects:
-      - ``data/demo_<id>/obs/<group>/<leaf>`` datasets of shape ``[T, ...]``
-        (recursively nested groups under ``obs`` become nested dicts).
-      - ``data/demo_<id>/actions`` dataset of shape ``[T, A]``.
-
-    Returns one ``(obs_dict, actions)`` tuple per demo. Demos are validated
-    for matching ``T`` across all leaves and actions.
-    """
-    def _walk_obs_group(group: Any, demo_key: str) -> dict[str, Any]:
-        out: dict[str, Any] = {}
-        for child_key in sorted(group.keys()):
-            child = group[child_key]
-            if hasattr(child, "keys"):
-                out[str(child_key)] = _walk_obs_group(child, demo_key=demo_key)
-            else:
-                tensor = torch.as_tensor(child[...])
-                if tensor.ndim < 1:
-                    raise ValueError(
-                        f"Demo '{demo_key}' obs leaf '{child_key}' must have shape "
-                        f"[T, ...], got scalar."
-                    )
-                out[str(child_key)] = tensor
-        return out
-
-    def _collect_leaf_lengths(obs: dict[str, Any], out: list[int]) -> None:
-        for value in obs.values():
-            if isinstance(value, dict):
-                _collect_leaf_lengths(value, out)
-            else:
-                out.append(int(value.shape[0]))
-
-    episodes: list[tuple[dict[str, Any], torch.Tensor]] = []
-    for demo_key, demo_group in _iter_hdf5_demos(path, payload_hint="{obs,actions}"):
-        if "obs" not in demo_group:
-            raise ValueError(f"Demo '{demo_key}' is missing required group 'obs'.")
-        if "actions" not in demo_group:
-            raise ValueError(f"Demo '{demo_key}' is missing required dataset 'actions'.")
-
-        obs_dict = _walk_obs_group(demo_group["obs"], demo_key=demo_key)
-        actions_tensor = torch.as_tensor(demo_group["actions"][...])
-        if actions_tensor.ndim != 2:
-            raise ValueError(
-                f"Demo '{demo_key}' actions must have shape [T, A], "
-                f"got {tuple(actions_tensor.shape)}."
-            )
-
-        lengths: list[int] = []
-        _collect_leaf_lengths(obs_dict, lengths)
-        t_actions = int(actions_tensor.shape[0])
-        if any(length != t_actions for length in lengths):
-            raise ValueError(
-                f"Demo '{demo_key}' has mismatched T across obs leaves and actions: "
-                f"actions T={t_actions}, obs leaf Ts={lengths}."
-            )
-
-        episodes.append((obs_dict, actions_tensor))
-
-    if len(episodes) == 0:
-        raise ValueError("No demos with (obs, actions) found in HDF5 payload.")
-
-    return episodes
-
-
-def load_obs_action_episodes(
-    path: str,
-) -> list[tuple[dict[str, Any], torch.Tensor]]:
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Expert data path does not exist: {path}")
-    ext = os.path.splitext(path)[1].lower()
-    if ext not in {".h5", ".hdf5"}:
-        raise ValueError(
-            f"Unsupported expert data extension '{ext}' for BC loading. "
-            "Only .h5/.hdf5 (written by RobomimicDataCollector) is supported."
-        )
-    return _extract_obs_action_episodes_from_hdf5(path)
-
-
-_EpisodeT = TypeVar("_EpisodeT")
-
-
-def _subset_episodes(
-    episodes: list[_EpisodeT],
-    max_num: int,
-    strategy: str,
-    seed: int,
-) -> list[_EpisodeT]:
-    """Return up to ``max_num`` episodes. ``strategy``: 'first' | 'random'."""
-    if len(episodes) <= max_num:
-        return episodes
-    if strategy == "first":
-        return episodes[:max_num]
-    if strategy == "random":
-        rng = torch.Generator().manual_seed(seed)
-        indices = torch.randperm(len(episodes), generator=rng)[:max_num].tolist()
-        return [episodes[i] for i in indices]
-    raise ValueError(
-        f"Unknown expert_subset_strategy '{strategy}'. Expected 'first' or 'random'."
-    )
-
-
-def _split_holdout_episodes(
-    episodes: list[_EpisodeT],
-    val_fraction: float,
-    seed: int,
-) -> tuple[list[_EpisodeT], list[_EpisodeT]]:
-    """Split episodes into ``(train, val)`` by a held-out *episode* fraction.
-
-    The split is at the episode level (not per-transition) so no trajectory
-    leaks across train/val. ``val_fraction`` is rounded down but always leaves
-    at least one episode in each side when the split is requested and possible.
-    """
-    n = len(episodes)
-    if val_fraction <= 0.0 or n < 2:
-        return episodes, []
-    n_val = max(1, min(n - 1, int(n * val_fraction)))
-    rng = torch.Generator().manual_seed(seed)
-    perm = torch.randperm(n, generator=rng).tolist()
-    val_idx = set(perm[:n_val])
-    val = [episodes[i] for i in range(n) if i in val_idx]
-    train = [episodes[i] for i in range(n) if i not in val_idx]
-    return train, val
-
-
-def _install_expert_episodes(
-    irl_alg: FeatureRewardLearner,
-    expert_data_path: str,
-    *,
-    expected_feature_dim: int,
-    expected_feature_names: list[str] | None = None,
-    max_num_trajectories: int | None = None,
-    subset_strategy: str = "first",
-    seed: int = 42,
-) -> None:
-    """Load expert feature episodes from disk and add them to ``irl_alg``.
-
-    The reward learner's expert storage must already be initialized with
-    ``num_envs == 1`` (the runner does this during construction).
-    """
-    if irl_alg.expert_storage is None:
-        raise RuntimeError("Reward learner expert storage is not initialized.")
-    expert_ctx = getattr(irl_alg.expert_storage, "ctx", None)
-    if expert_ctx is None or int(expert_ctx.num_envs) != 1:
-        raise ValueError(
-            "Expert loader requires reward learner expert storage with num_envs == 1, "
-            f"got {None if expert_ctx is None else int(expert_ctx.num_envs)}."
-        )
-
-    episodes = load_feature_episodes(
-        os.path.abspath(expert_data_path),
-        expected_feature_dim=expected_feature_dim,
-        expected_feature_names=expected_feature_names,
-    )
-    total = len(episodes)
-    if max_num_trajectories is not None:
-        episodes = _subset_episodes(episodes, max_num_trajectories, subset_strategy, seed)
-        print(f"[INFO] Expert subset: {len(episodes)}/{total} trajectories (strategy={subset_strategy})")
-    for episode in episodes:
-        irl_alg.add_expert_episode(episode)
-
-
 def _build_log_dir(experiment_name: str, run_name: str) -> tuple[str, str]:
+    from datetime import datetime
+
     log_root_path = os.path.abspath(os.path.join("logs", "irl", experiment_name))
     log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     if run_name:
@@ -1162,228 +276,200 @@ def _build_log_dir(experiment_name: str, run_name: str) -> tuple[str, str]:
     return log_root_path, log_dir
 
 
-def _to_serializable(value: Any) -> Any:
-    if is_dataclass(value):
-        return {
-            str(field_def.name): _to_serializable(getattr(value, field_def.name))
-            for field_def in fields(value)
-        }
-
-    if isinstance(value, dict):
-        return {str(key): _to_serializable(item) for key, item in value.items()}
-
-    if isinstance(value, (list, tuple, set)):
-        return [_to_serializable(item) for item in value]
-
-    if isinstance(value, torch.dtype):
-        return str(value)
-
-    if isinstance(value, Path):
-        return str(value)
-
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-
-    return str(value)
-
-def _dump_yaml(path: str, payload: Any) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as file_handle:
-        yaml.safe_dump(_to_serializable(payload), file_handle, sort_keys=False)
-
-
-def _is_scalar_like(value: Any) -> bool:
-    return isinstance(value, (str, int, float, bool)) or value is None
-
-
-def _try_get_nested_attr(root: Any, attr_path: tuple[str, ...]) -> Any | None:
-    current = root
-    for attr_name in attr_path:
-        if not hasattr(current, attr_name):
-            return None
-        current = getattr(current, attr_name)
-    if _is_scalar_like(current):
-        return current
-    return None
-
-
-def _extract_ground_truth_reward_weights(env: Any) -> dict[str, float]:
-    """Extract reward term weights from env's reward_manager (ground truth params)."""
-    try:
-        unwrapped = getattr(env, "unwrapped", env)
-        reward_manager = getattr(unwrapped, "reward_manager", None)
-        if reward_manager is None:
-            return {}
-        term_names = getattr(reward_manager, "_term_names", [])
-        term_cfgs = getattr(reward_manager, "_term_cfgs", [])
-        if len(term_names) != len(term_cfgs):
-            return {}
-        return {str(name): float(getattr(cfg, "weight", 0.0)) for name, cfg in zip(term_names, term_cfgs)}
-    except Exception:
-        return {}
-
-
-def _summarize_env_cfg(env_cfg: Any, train_cfg: TrainCfg) -> dict[str, Any]:
-    summary: dict[str, Any] = {
-        "cfg_type": f"{type(env_cfg).__module__}.{type(env_cfg).__name__}",
-        "task_name": str(train_cfg.env.name),
-        "train_device": str(train_cfg.env.device),
-        "train_num_envs": train_cfg.env.num_envs,
-    }
-
-    for key_name, attr_path in (
-        ("sim_device", ("sim", "device")),
-        ("scene_num_envs", ("scene", "num_envs")),
-        ("seed", ("seed",)),
-        ("decimation", ("decimation",)),
-        ("episode_length_s", ("episode_length_s",)),
-    ):
-        value = _try_get_nested_attr(env_cfg, attr_path)
-        if value is not None:
-            summary[key_name] = value
-
-    return summary
-
-
-def _dump_run_configs(
-    log_dir: str,
-    env_cfg: Any,
-    train_cfg: TrainCfg,
-    env: Any | None = None,
-) -> None:
-    serializable_train_cfg = _to_serializable(train_cfg)
-    params_dir = os.path.join(log_dir, "params")
-    env_summary = _summarize_env_cfg(env_cfg, train_cfg)
-    experiment_cfg = {**serializable_train_cfg, "env": env_summary}
-    _dump_yaml(os.path.join(params_dir, "experiment.yaml"), experiment_cfg)
-    if env is not None:
-        ground_truth = _extract_ground_truth_reward_weights(env)
-        if ground_truth:
-            _dump_yaml(os.path.join(params_dir, "ground_truth_reward_weights.yaml"), ground_truth)
-            weights_str = "  ".join(f"{k}={v:.4f}" for k, v in ground_truth.items())
-            print(f"[INFO] Ground truth reward weights: {weights_str}")
-
-
-def _latest_mp4_in(video_dir: str) -> str | None:
-    """Highest-numbered ``*-iter-K.mp4`` (or ``*-step-N.mp4``) in ``video_dir``."""
-    if not os.path.isdir(video_dir):
-        return None
-    mp4s = [f for f in os.listdir(video_dir) if f.endswith(".mp4")]
-    if not mp4s:
-        return None
-    pat = re.compile(r"-(?:iter|step)-(\d+)\.mp4$")
-    latest = max(mp4s, key=lambda name: (int(pat.search(name).group(1)) if pat.search(name) else -1, name))
-    return os.path.join(video_dir, latest)
-
-
-def _build_video_step_trigger(
-    *,
-    video_final_only: bool,
-    video_interval_iterations: int | None,
-    video_interval: int,
-    max_iterations: int,
-    steps_per_iter: int,
-    train_video_dir: str,
-) -> tuple[Callable[[int], bool], str | None, int | None]:
-    """Build the gym ``RecordVideo.step_trigger`` for the requested mode.
-
-    Returns ``(step_trigger, rename_dir, steps_per_iter)`` where the last two
-    are non-None only for the iteration-aligned modes (final-only and
-    interval-by-iterations). For those modes, the caller post-processes
-    ``rename_dir`` to rewrite ``*-step-N.mp4`` filenames to ``*-iter-K.mp4``.
-    The pure-step interval mode returns ``(trigger, None, None)``.
-    """
-    if video_final_only:
-        # Trigger fires at the start of the last iteration so the clip captures
-        # the final rollout. `video_length` may exceed `steps_per_iter`; gym's
-        # RecordVideo keeps recording across env.step() calls.
-        final_trigger_step = max(0, (max_iterations - 1) * steps_per_iter)
-        return (lambda step_idx: step_idx == final_trigger_step), train_video_dir, steps_per_iter
-
-    if video_interval_iterations is not None:
-        if video_interval_iterations <= 0:
-            raise ValueError(
-                f"`--video_interval_iterations` must be > 0, got {video_interval_iterations}."
-            )
-        interval_steps = video_interval_iterations * steps_per_iter
-        return (lambda step_idx: step_idx % interval_steps == 0), train_video_dir, steps_per_iter
-
-    if video_interval <= 0:
-        raise ValueError(f"`--video_interval` must be > 0, got {video_interval}.")
-    return (lambda step_idx: step_idx % video_interval == 0), None, None
-
-
-def _rename_video_files_to_iteration_index(video_dir: str, steps_per_iteration: int) -> None:
-    if steps_per_iteration <= 0:
-        raise ValueError(f"`steps_per_iteration` must be > 0, got {steps_per_iteration}.")
-    if not os.path.isdir(video_dir):
-        return
-
-    step_name_pattern = re.compile(r"^(?P<prefix>.+)-step-(?P<step>\d+)(?P<ext>\.mp4)$")
-    for file_name in sorted(os.listdir(video_dir)):
-        match = step_name_pattern.match(file_name)
-        if match is None:
-            continue
-
-        step_idx = int(match.group("step"))
-        iter_idx = step_idx // steps_per_iteration
-        new_name = f"{match.group('prefix')}-iter-{iter_idx}{match.group('ext')}"
-
-        source_path = os.path.join(video_dir, file_name)
-        target_path = os.path.join(video_dir, new_name)
-        if source_path == target_path:
-            continue
-        os.replace(source_path, target_path)
-
-
 def _get_initial_obs(
     env: Any,
     resolve_obs_groups_fn: Callable[..., dict[str, list[str]]],
 ) -> tuple[Any, dict[str, list[str]]]:
     obs = env.get_observations()
     if not hasattr(obs, "keys"):
-        raise TypeError("RslRlVecEnvWrapper.get_observations() must return TensorDict-like observations.")
+        raise TypeError(
+            "RslRlVecEnvWrapper.get_observations() must return TensorDict-like observations."
+        )
     obs_groups = resolve_obs_groups_fn(obs, {}, default_sets=["actor", "critic"])
     return obs, obs_groups
 
 
-def _load_app_launcher_cls() -> Any:
-    from isaaclab.app import AppLauncher
+def _load_expert_success_rate_with_logging(expert_data_path: str) -> float | None:
+    """Read the expert success rate from demos, logging the outcome."""
+    try:
+        rate = load_expert_success_rate(os.path.abspath(expert_data_path))
+    except Exception as exc:
+        print(f"[WARN] Could not read expert success rate from demos: {exc}")
+        return None
+    if rate is None:
+        print("[INFO] No expert success info in demos; expert-success gap disabled.")
+    else:
+        print(f"[INFO] Expert success rate (from demos): {rate:.4f}")
+    return rate
 
-    return AppLauncher
 
+def _build_bc_alg(
+    train_cfg: TrainCfg,
+    *,
+    runtime_ctx: RuntimeContext,
+) -> BC | None:
+    """Construct the BC loss provider from expert (obs, action) demos.
 
-def _load_runtime_deps(app_launcher_cls: Any) -> RuntimeDeps:
+    Returns ``None`` when BC is disabled (``bc.alpha == 0``). Otherwise loads
+    demos, applies the optional trajectory subset, splits a validation hold-out,
+    and wraps the train/val buffers in a :class:`BC` instance.
+    """
+    if train_cfg.bc.alpha <= 0.0:
+        return None
 
-    import gymnasium as gym
+    obs_action_episodes = load_obs_action_episodes(train_cfg.irl.expert_data_path)
+    if train_cfg.irl.expert_num_trajectories is not None:
+        total = len(obs_action_episodes)
+        obs_action_episodes = _subset_episodes(
+            obs_action_episodes,
+            int(train_cfg.irl.expert_num_trajectories),
+            train_cfg.irl.expert_subset_strategy,
+            train_cfg.seed,
+        )
+        print(
+            f"[INFO] BC expert subset: {len(obs_action_episodes)}/{total} "
+            f"trajectories (strategy={train_cfg.irl.expert_subset_strategy})"
+        )
 
-    import isaaclab_tasks  # noqa: F401
-    from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
-    from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
-    from rsl_rl.algorithms import PPO
-    from rsl_rl.models import MLPModel
-    from rsl_rl.storage import RolloutStorage
-    from rsl_rl.utils import resolve_obs_groups
+    train_episodes, val_episodes = _split_holdout_episodes(
+        obs_action_episodes, train_cfg.bc.val_fraction, train_cfg.seed
+    )
+    buf_cfg = ObsActionBufCfg(store_device="cpu", store_dtype=torch.float32)
+    train_storage = ObsActionBuffer(cfg=buf_cfg, ctx=runtime_ctx)
+    train_storage.load_episodes(train_episodes)
 
-    return RuntimeDeps(
-        AppLauncher=app_launcher_cls,
-        gym=gym,
-        parse_env_cfg=parse_env_cfg,
-        get_checkpoint_path=get_checkpoint_path,
-        RslRlVecEnvWrapper=RslRlVecEnvWrapper,
-        PPO=PPO,
-        MLPModel=MLPModel,
-        RolloutStorage=RolloutStorage,
-        resolve_obs_groups=resolve_obs_groups,
+    val_storage: ObsActionBuffer | None = None
+    if val_episodes:
+        val_storage = ObsActionBuffer(cfg=buf_cfg, ctx=runtime_ctx)
+        val_storage.load_episodes(val_episodes)
+
+    val_suffix = (
+        f", {len(val_episodes)} val episodes ({len(val_storage)} pairs)"
+        if val_storage is not None
+        else " (no validation split)"
+    )
+    print(
+        f"[INFO] BC dataset: {len(train_episodes)} train episodes "
+        f"({len(train_storage)} pairs){val_suffix}."
+    )
+    return BC(
+        cfg=train_cfg.bc,
+        storage=train_storage,
+        val_storage=val_storage,
+        device=train_cfg.device,
     )
 
 
-def _build_arg_parser(app_launcher_cls: Any) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train an IRL agent with PPO + feature-buffer IRL.")
+def _build_rl_alg(
+    *,
+    actor: Any,
+    critic: Any,
+    obs: Any,
+    env: Any,
+    train_cfg: TrainCfg,
+    bc_alg: BC | None,
+    runtime_deps: RuntimeDeps,
+) -> RslRlPpoAdapter:
+    """Build the rsl_rl PPO (optionally with BC) and wrap it in the adapter."""
+    rollout_storage = runtime_deps.RolloutStorage(
+        "rl",
+        int(env.num_envs),
+        int(train_cfg.runner.steps_per_env_per_cycle),
+        obs,
+        [int(env.num_actions)],
+        train_cfg.device,
+    )
+    ppo_kwargs = asdict(train_cfg.rl_algorithm)
+    if bc_alg is None:
+        ppo_alg = runtime_deps.PPO(
+            actor=actor,
+            critic=critic,
+            storage=rollout_storage,
+            device=train_cfg.device,
+            **ppo_kwargs,
+        )
+    else:
+        ppo_cls = make_ppo_with_bc_cls(runtime_deps.PPO)
+        ppo_alg = ppo_cls(
+            actor=actor,
+            critic=critic,
+            storage=rollout_storage,
+            device=train_cfg.device,
+            bc_alg=bc_alg,
+            **ppo_kwargs,
+        )
+    return RslRlPpoAdapter(ppo_alg, bc_alg=bc_alg)
 
-    parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
-    parser.add_argument("--video_length", type=int, default=1500, help="Length of recorded videos (steps).")
-    parser.add_argument("--video_interval", type=int, default=2000, help="Interval between recordings (steps).")
+
+def _build_wandb_config(
+    train_cfg: TrainCfg, *, num_envs: int
+) -> tuple[dict[str, Any], list[str]]:
+    """Assemble the wandb run config + tags from a parsed TrainCfg."""
+    config = {
+        "task": str(train_cfg.env.name),
+        "num_envs": int(num_envs),
+        "seed": int(train_cfg.seed),
+        "max_iterations": int(train_cfg.max_iterations),
+        "bc/alpha": float(train_cfg.bc.alpha),
+        "bc/loss_type": str(train_cfg.bc.loss_type),
+        "bc/batch_size": int(train_cfg.bc.batch_size),
+        "bc/val_fraction": float(train_cfg.bc.val_fraction),
+        "irl/expert_data_path": str(train_cfg.irl.expert_data_path),
+        "irl/expert_num_trajectories": train_cfg.irl.expert_num_trajectories,
+        "irl/discount_gamma": train_cfg.irl.discount_gamma,
+        "irl/reward_learning_rate": train_cfg.irl.reward_learning_rate,
+        "irl/batch_size": int(train_cfg.irl.batch_size),
+        "irl/num_learning_epochs": int(train_cfg.irl.num_learning_epochs),
+        "runner/use_learned_reward": bool(train_cfg.runner.use_learned_reward),
+        "runner/reward_updates_per_cycle": int(
+            train_cfg.runner.reward_updates_per_cycle
+        ),
+        "runner/rl_updates_per_cycle": int(train_cfg.runner.rl_updates_per_cycle),
+        "ppo/learning_rate": float(train_cfg.rl_algorithm.learning_rate),
+        "ppo/gamma": float(train_cfg.rl_algorithm.gamma),
+        "ppo/lam": float(train_cfg.rl_algorithm.lam),
+        "reward/type": "linear" if train_cfg.reward.is_linear else "dense",
+        "reward/regularization": str(train_cfg.reward.regularization),
+        "reward/regularization_strength": float(
+            train_cfg.reward.regularization_strength
+        ),
+    }
+    tags = [
+        f"alpha={train_cfg.bc.alpha}",
+        f"seed={train_cfg.seed}",
+        f"loss={train_cfg.bc.loss_type}",
+    ]
+    return config, tags
+
+
+# ---------------------------------------------------------------------------
+# Argparse
+# ---------------------------------------------------------------------------
+
+
+def _build_arg_parser(app_launcher_cls: Any) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Train an IRL agent with PPO + feature-buffer IRL."
+    )
+
+    parser.add_argument(
+        "--video",
+        action="store_true",
+        default=False,
+        help="Record videos during training.",
+    )
+    parser.add_argument(
+        "--video_length",
+        type=int,
+        default=1500,
+        help="Length of recorded videos (steps).",
+    )
+    parser.add_argument(
+        "--video_interval",
+        type=int,
+        default=2000,
+        help="Interval between recordings (steps).",
+    )
     parser.add_argument(
         "--video_interval_iterations",
         type=int,
@@ -1403,9 +489,15 @@ def _build_arg_parser(app_launcher_cls: Any) -> argparse.ArgumentParser:
         help="Disable fabric and use USD I/O operations.",
     )
     parser.add_argument("--task", type=str, default=None, help="Task name.")
-    parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
-    parser.add_argument("--seed", type=int, default=None, help="Environment / training seed.")
-    parser.add_argument("--max_iterations", type=int, default=None, help="Training iterations.")
+    parser.add_argument(
+        "--num_envs", type=int, default=None, help="Number of environments to simulate."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=None, help="Environment / training seed."
+    )
+    parser.add_argument(
+        "--max_iterations", type=int, default=None, help="Training iterations."
+    )
     parser.add_argument(
         "--irl_discount_gamma",
         type=float,
@@ -1516,11 +608,22 @@ def _build_arg_parser(app_launcher_cls: Any) -> argparse.ArgumentParser:
         "success-bonus term. 0 = feature-only (recommended); >0 also adds to env reward.",
     )
 
-    parser.add_argument("--experiment_name", type=str, default=None, help="Experiment name for logging.")
+    parser.add_argument(
+        "--experiment_name", type=str, default=None, help="Experiment name for logging."
+    )
     parser.add_argument("--run_name", type=str, default=None, help="Run name suffix.")
-    parser.add_argument("--resume", action="store_true", default=None, help="Resume from a previous checkpoint.")
-    parser.add_argument("--load_run", type=str, default=None, help="Run folder to resume from.")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint file to resume from.")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=None,
+        help="Resume from a previous checkpoint.",
+    )
+    parser.add_argument(
+        "--load_run", type=str, default=None, help="Run folder to resume from."
+    )
+    parser.add_argument(
+        "--checkpoint", type=str, default=None, help="Checkpoint file to resume from."
+    )
     parser.add_argument(
         "--logger",
         type=str,
@@ -1537,6 +640,11 @@ def _build_arg_parser(app_launcher_cls: Any) -> argparse.ArgumentParser:
 
     app_launcher_cls.add_app_launcher_args(parser)
     return parser
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None:
@@ -1556,10 +664,7 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
     env = None
     runner: IrlRunner | None = None
     log_dir: str | None = None
-    video_dir_for_iteration_names: str | None = None
-    video_steps_per_iteration: int | None = None
-    record_video_wrapper: Any = None
-    train_video_dir: str | None = None
+    video = VideoSetup()
     run_crashed = False
 
     if runtime_deps is None:
@@ -1603,7 +708,9 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
                     f"feature-only={train_cfg.env.success_bonus_weight == 0.0})."
                 )
             else:
-                print("[WARN] add_success_bonus=True but env_cfg has no `rewards` section; skipped.")
+                print(
+                    "[WARN] add_success_bonus=True but env_cfg has no `rewards` section; skipped."
+                )
 
         log_root_path, log_dir = _build_log_dir(
             experiment_name=train_cfg.experiment_name,
@@ -1616,43 +723,14 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
             render_mode="rgb_array" if args_cli.video else None,
         )
 
-        if args_cli.video:
-            train_video_dir = os.path.join(log_dir, "videos", "train")
-            if args_cli.video_final_only:
-                # Final clip(s) are produced by an explicit post-training rollout
-                # (see runner.record_final_rollouts), not by an in-training
-                # trigger. Install a never-firing trigger and disable auto-stop
-                # (video_length=0) so recording boundaries are fully manual.
-                env = runtime_deps.gym.wrappers.RecordVideo(
-                    env,
-                    video_folder=train_video_dir,
-                    step_trigger=lambda step_idx: False,
-                    video_length=0,
-                    disable_logger=True,
-                )
-                record_video_wrapper = env
-            else:
-                step_trigger, video_dir_for_iteration_names, video_steps_per_iteration = (
-                    _build_video_step_trigger(
-                        video_final_only=False,
-                        video_interval_iterations=(
-                            int(args_cli.video_interval_iterations)
-                            if args_cli.video_interval_iterations is not None
-                            else None
-                        ),
-                        video_interval=int(args_cli.video_interval),
-                        max_iterations=int(train_cfg.max_iterations),
-                        steps_per_iter=int(train_cfg.runner.steps_per_env_per_cycle),
-                        train_video_dir=train_video_dir,
-                    )
-                )
-                env = runtime_deps.gym.wrappers.RecordVideo(
-                    env,
-                    video_folder=train_video_dir,
-                    step_trigger=step_trigger,
-                    video_length=args_cli.video_length,
-                    disable_logger=True,
-                )
+        env, video = setup_video_recording(
+            env,
+            args_cli=args_cli,
+            log_dir=log_dir,
+            max_iterations=int(train_cfg.max_iterations),
+            steps_per_env_per_cycle=int(train_cfg.runner.steps_per_env_per_cycle),
+            gym_wrappers=runtime_deps.gym.wrappers,
+        )
 
         env = runtime_deps.RslRlVecEnvWrapper(env)
         if hasattr(env, "seed"):
@@ -1695,132 +773,29 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
             probe_env=env,
         )
 
-        bc_alg: BC | None = None
-        if train_cfg.bc.alpha > 0.0:
-            if not train_cfg.irl.expert_data_path:
-                raise ValueError(
-                    "`bc.alpha > 0` requires `irl.expert_data_path` to point at an "
-                    "HDF5 file with (obs, actions) demos."
-                )
-            obs_action_episodes = load_obs_action_episodes(train_cfg.irl.expert_data_path)
-            if train_cfg.irl.expert_num_trajectories is not None:
-                total = len(obs_action_episodes)
-                obs_action_episodes = _subset_episodes(
-                    obs_action_episodes,
-                    int(train_cfg.irl.expert_num_trajectories),
-                    train_cfg.irl.expert_subset_strategy,
-                    train_cfg.seed,
-                )
-                print(
-                    f"[INFO] BC expert subset: {len(obs_action_episodes)}/{total} "
-                    f"trajectories (strategy={train_cfg.irl.expert_subset_strategy})"
-                )
-            train_episodes, val_episodes = _split_holdout_episodes(
-                obs_action_episodes, train_cfg.bc.val_fraction, train_cfg.seed
-            )
-            obs_action_storage = ObsActionBuffer(
-                cfg=ObsActionBufCfg(store_device="cpu", store_dtype=torch.float32),
-                ctx=runtime_ctx,
-            )
-            obs_action_storage.load_episodes(train_episodes)
-            val_storage: ObsActionBuffer | None = None
-            if val_episodes:
-                val_storage = ObsActionBuffer(
-                    cfg=ObsActionBufCfg(store_device="cpu", store_dtype=torch.float32),
-                    ctx=runtime_ctx,
-                )
-                val_storage.load_episodes(val_episodes)
-            print(
-                f"[INFO] BC dataset: {len(train_episodes)} train episodes "
-                f"({len(obs_action_storage)} pairs)"
-                + (
-                    f", {len(val_episodes)} val episodes ({len(val_storage)} pairs)"
-                    if val_storage is not None
-                    else " (no validation split)"
-                )
-                + "."
-            )
-            bc_alg = BC(
-                cfg=train_cfg.bc,
-                storage=obs_action_storage,
-                val_storage=val_storage,
-                device=train_cfg.device,
-            )
-
-        rollout_storage = runtime_deps.RolloutStorage(
-            "rl",
-            int(env.num_envs),
-            int(train_cfg.runner.steps_per_env_per_cycle),
-            obs,
-            [int(env.num_actions)],
-            train_cfg.device,
+        bc_alg = _build_bc_alg(train_cfg, runtime_ctx=runtime_ctx)
+        rl_alg = _build_rl_alg(
+            actor=actor,
+            critic=critic,
+            obs=obs,
+            env=env,
+            train_cfg=train_cfg,
+            bc_alg=bc_alg,
+            runtime_deps=runtime_deps,
         )
-        ppo_kwargs = asdict(train_cfg.rl_algorithm)
-        if bc_alg is not None:
-            ppo_cls = make_ppo_with_bc_cls(runtime_deps.PPO)
-            ppo_alg = ppo_cls(
-                actor=actor,
-                critic=critic,
-                storage=rollout_storage,
-                device=train_cfg.device,
-                bc_alg=bc_alg,
-                **ppo_kwargs,
-            )
-        else:
-            ppo_alg = runtime_deps.PPO(
-                actor=actor,
-                critic=critic,
-                storage=rollout_storage,
-                device=train_cfg.device,
-                **ppo_kwargs,
-            )
-        rl_alg = RslRlPpoAdapter(ppo_alg, bc_alg=bc_alg)
         reward_cfg = replace(train_cfg.reward, num_features=runtime_ctx.feature_dim)
-        reward_model_cls = LinearFeatureRewardModel if reward_cfg.is_linear else DenseFeatureRewardModel
+        reward_model_cls = (
+            LinearFeatureRewardModel
+            if reward_cfg.is_linear
+            else DenseFeatureRewardModel
+        )
         reward_model = reward_model_cls(reward_cfg).to(train_cfg.device)
-        expert_success_rate: float | None = None
-        if train_cfg.irl.expert_data_path:
-            try:
-                expert_success_rate = load_expert_success_rate(
-                    os.path.abspath(train_cfg.irl.expert_data_path)
-                )
-            except Exception as exc:
-                print(f"[WARN] Could not read expert success rate from demos: {exc}")
-                expert_success_rate = None
-            if expert_success_rate is not None:
-                print(f"[INFO] Expert success rate (from demos): {expert_success_rate:.4f}")
-            else:
-                print("[INFO] No expert success info in demos; expert-success gap disabled.")
-        wandb_config = {
-            "task": str(train_cfg.env.name),
-            "num_envs": int(env.num_envs),
-            "seed": int(train_cfg.seed),
-            "max_iterations": int(train_cfg.max_iterations),
-            "bc/alpha": float(train_cfg.bc.alpha),
-            "bc/loss_type": str(train_cfg.bc.loss_type),
-            "bc/batch_size": int(train_cfg.bc.batch_size),
-            "bc/val_fraction": float(train_cfg.bc.val_fraction),
-            "irl/expert_data_path": str(train_cfg.irl.expert_data_path),
-            "irl/expert_num_trajectories": train_cfg.irl.expert_num_trajectories,
-            "irl/discount_gamma": train_cfg.irl.discount_gamma,
-            "irl/reward_learning_rate": train_cfg.irl.reward_learning_rate,
-            "irl/batch_size": int(train_cfg.irl.batch_size),
-            "irl/num_learning_epochs": int(train_cfg.irl.num_learning_epochs),
-            "runner/use_learned_reward": bool(train_cfg.runner.use_learned_reward),
-            "ppo/learning_rate": float(train_cfg.rl_algorithm.learning_rate),
-            "ppo/gamma": float(train_cfg.rl_algorithm.gamma),
-            "ppo/lam": float(train_cfg.rl_algorithm.lam),
-            "reward/type": "linear" if train_cfg.reward.is_linear else "dense",
-            "reward/regularization": str(train_cfg.reward.regularization),
-            "reward/regularization_strength": float(train_cfg.reward.regularization_strength),
-            "runner/reward_updates_per_cycle": int(train_cfg.runner.reward_updates_per_cycle),
-            "runner/rl_updates_per_cycle": int(train_cfg.runner.rl_updates_per_cycle),
-        }
-        wandb_tags = [
-            f"alpha={train_cfg.bc.alpha}",
-            f"seed={train_cfg.seed}",
-            f"loss={train_cfg.bc.loss_type}",
-        ]
+        expert_success_rate = _load_expert_success_rate_with_logging(
+            train_cfg.irl.expert_data_path
+        )
+        wandb_config, wandb_tags = _build_wandb_config(
+            train_cfg, num_envs=int(env.num_envs)
+        )
 
         if train_cfg.runner.use_learned_reward:
             print("[INFO] IRL mode: agent trains against the learned reward model.")
@@ -1863,16 +838,15 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
             device=train_cfg.device,
             metric_logger=metric_logger,
         )
-        if train_cfg.irl.expert_data_path:
-            _install_expert_episodes(
-                irl_alg,
-                train_cfg.irl.expert_data_path,
-                expected_feature_dim=runtime_ctx.feature_dim,
-                expected_feature_names=feature_names,
-                max_num_trajectories=train_cfg.irl.expert_num_trajectories,
-                subset_strategy=train_cfg.irl.expert_subset_strategy,
-                seed=train_cfg.seed,
-            )
+        _install_expert_episodes(
+            irl_alg,
+            train_cfg.irl.expert_data_path,
+            expected_feature_dim=runtime_ctx.feature_dim,
+            expected_feature_names=feature_names,
+            max_num_trajectories=train_cfg.irl.expert_num_trajectories,
+            subset_strategy=train_cfg.irl.expert_subset_strategy,
+            seed=train_cfg.seed,
+        )
         if train_cfg.resume:
             resume_path = runtime_deps.get_checkpoint_path(
                 log_root_path,
@@ -1880,17 +854,23 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
                 train_cfg.load_checkpoint,
             )
             runner.load(resume_path, load_optimizer=True)
-        _dump_run_configs(log_dir=log_dir, env_cfg=env_cfg, train_cfg=train_cfg, env=env)
+        _dump_run_configs(
+            log_dir=log_dir, env_cfg=env_cfg, train_cfg=train_cfg, env=env
+        )
         runner.learn(
             num_learning_iterations=int(train_cfg.max_iterations),
             init_at_random_ep_len=True,
         )
-        if args_cli.video and args_cli.video_final_only and record_video_wrapper is not None:
+        if (
+            args_cli.video
+            and args_cli.video_final_only
+            and video.record_video_wrapper is not None
+        ):
             # Explicit post-training rollout drives the final clip(s); reliable
             # even in BC-only mode where the env isn't stepped during training.
             try:
                 runner.record_final_rollouts(
-                    recorder=record_video_wrapper,
+                    recorder=video.record_video_wrapper,
                     video_length=int(args_cli.video_length),
                 )
             except Exception as exc:
@@ -1901,6 +881,7 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
         # explicitly so silent crashes show up in the sweep logs.
         run_crashed = True
         import traceback
+
         print("[ERROR] train_irl.py crashed:", flush=True)
         traceback.print_exc()
         sys.stderr.flush()
@@ -1912,40 +893,21 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
                 env.close()
             except Exception as exc:
                 print(f"[WARN] Failed to close environment cleanly: {exc}")
-        if video_dir_for_iteration_names is not None and video_steps_per_iteration is not None:
+        if (
+            video.video_dir_for_iteration_names is not None
+            and video.video_steps_per_iteration is not None
+        ):
             try:
-                _rename_video_files_to_iteration_index(
-                    video_dir=video_dir_for_iteration_names,
-                    steps_per_iteration=video_steps_per_iteration,
+                rename_iteration_files(
+                    video_dir=video.video_dir_for_iteration_names,
+                    steps_per_iteration=video.video_steps_per_iteration,
                 )
             except Exception as exc:
-                print(f"[WARN] Failed to rename video files with iteration indices: {exc}")
-        if args_cli.video and log_dir is not None and train_video_dir is not None:
-            videos_dir = os.path.join(log_dir, "videos")
-            if args_cli.video_final_only:
-                # Explicit dual-clip mode: deterministic + stochastic, named at
-                # the source by runner.record_final_rollouts.
-                for mode_name in ("inference", "stochastic"):
-                    source = os.path.join(train_video_dir, f"final_{mode_name}.mp4")
-                    if not os.path.isfile(source):
-                        continue
-                    final_path = os.path.join(videos_dir, f"final_{mode_name}.mp4")
-                    try:
-                        shutil.copy2(source, final_path)
-                        print(f"[INFO] Copied final {mode_name} rollout video to {final_path}")
-                    except Exception as exc:
-                        print(f"[WARN] Failed to copy final {mode_name} video locally: {exc}")
-                        continue
-            else:
-                # Interval modes: copy the latest trigger-produced clip.
-                try:
-                    latest_mp4 = _latest_mp4_in(train_video_dir)
-                    if latest_mp4 is not None:
-                        final_path = os.path.join(videos_dir, "final.mp4")
-                        shutil.copy2(latest_mp4, final_path)
-                        print(f"[INFO] Copied final rollout video to {final_path}")
-                except Exception as exc:
-                    print(f"[WARN] Failed to copy final video locally: {exc}")
+                print(
+                    f"[WARN] Failed to rename video files with iteration indices: {exc}"
+                )
+        if log_dir is not None:
+            copy_final_videos(args_cli, log_dir=log_dir, video=video)
         if runner is not None:
             # Explicit finalize: SimulationApp.close() below calls os._exit(0),
             # which skips wandb's atexit hook and leaves the run marked as

@@ -13,7 +13,7 @@ pytest.importorskip("torch")
 
 def _load_train_irl_module():
     root = Path(__file__).resolve().parents[1]
-    module_path = root / "scripts" / "irl" / "train_irl.py"
+    module_path = root / "scripts" / "irl" / "_train_config.py"
     module_name = "train_irl_module_config_parser"
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
@@ -101,7 +101,20 @@ def test_load_train_cfg_loads_env_from_experiment_yaml(tmp_path: Path):
     assert cfg.env.num_envs == 8
 
 
-def test_load_train_cfg_rejects_stale_runner_key(tmp_path: Path):
+@pytest.mark.parametrize(
+    "runner_payload, error_match",
+    [
+        ({"reward_update_interval": 5}, "reward_update_interval"),
+        ({"bc_eval_interval": 5}, "bc_eval_interval"),
+        (
+            {"imitator_buffer": {"store_discounted_feature_returns": False}},
+            "store_discounted_feature_returns",
+        ),
+    ],
+)
+def test_load_train_cfg_rejects_stale_runner_keys(
+    tmp_path: Path, runner_payload: dict, error_match: str
+):
     module = _load_train_irl_module()
     config_dir = tmp_path / "configs"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -111,33 +124,13 @@ def test_load_train_cfg_rejects_stale_runner_key(tmp_path: Path):
         "seed": 1,
         "max_iterations": 10,
         "env": {"device": "cpu"},
-        "runner": {"reward_update_interval": 5},
+        "runner": runner_payload,
     }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
+    (config_dir / "experiment.yaml").write_text(
+        yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8"
+    )
 
-    with pytest.raises(ValueError, match="reward_update_interval"):
-        module.load_train_cfg(
-            task_name="Isaac-Unit-Test-v0",
-            args_cli=_args(task="Isaac-Unit-Test-v0"),
-            config_dir=config_dir,
-        )
-
-
-def test_load_train_cfg_rejects_stale_bc_eval_interval_key(tmp_path: Path):
-    module = _load_train_irl_module()
-    config_dir = tmp_path / "configs"
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    train_payload = {
-        "experiment_name": "tmp",
-        "seed": 1,
-        "max_iterations": 10,
-        "env": {"device": "cpu"},
-        "runner": {"bc_eval_interval": 5},
-    }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="bc_eval_interval"):
+    with pytest.raises(ValueError, match=error_match):
         module.load_train_cfg(
             task_name="Isaac-Unit-Test-v0",
             args_cli=_args(task="Isaac-Unit-Test-v0"),
@@ -160,7 +153,9 @@ def test_load_train_cfg_parses_runner_validation_settings(tmp_path: Path):
             "validation_steps_per_env": 40,
         },
     }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
+    (config_dir / "experiment.yaml").write_text(
+        yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8"
+    )
 
     cfg = module.load_train_cfg(
         task_name="Isaac-Unit-Test-v0",
@@ -183,7 +178,9 @@ def test_load_train_cfg_parses_bc_val_fraction(tmp_path: Path):
         "env": {"device": "cpu"},
         "bc": {"alpha": 0.5, "val_fraction": 0.2},
     }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
+    (config_dir / "experiment.yaml").write_text(
+        yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8"
+    )
 
     cfg = module.load_train_cfg(
         task_name="Isaac-Unit-Test-v0",
@@ -205,7 +202,9 @@ def test_load_train_cfg_rejects_invalid_bc_val_fraction(tmp_path: Path):
         "env": {"device": "cpu"},
         "bc": {"alpha": 0.5, "val_fraction": 1.0},
     }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
+    (config_dir / "experiment.yaml").write_text(
+        yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8"
+    )
 
     with pytest.raises(ValueError, match="val_fraction"):
         module.load_train_cfg(
@@ -238,33 +237,11 @@ def test_load_train_cfg_rejects_negative_runner_validation_settings(
         "env": {"device": "cpu"},
         "runner": runner_payload,
     }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
+    (config_dir / "experiment.yaml").write_text(
+        yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8"
+    )
 
     with pytest.raises(ValueError, match=error_match):
-        module.load_train_cfg(
-            task_name="Isaac-Unit-Test-v0",
-            args_cli=_args(task="Isaac-Unit-Test-v0"),
-            config_dir=config_dir,
-        )
-
-
-def test_load_train_cfg_rejects_stale_buffer_key(tmp_path: Path):
-    module = _load_train_irl_module()
-    config_dir = tmp_path / "configs"
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    train_payload = {
-        "experiment_name": "tmp",
-        "seed": 1,
-        "max_iterations": 10,
-        "env": {"device": "cpu"},
-        "runner": {
-            "imitator_buffer": {"store_discounted_feature_returns": False},
-        },
-    }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="store_discounted_feature_returns"):
         module.load_train_cfg(
             task_name="Isaac-Unit-Test-v0",
             args_cli=_args(task="Isaac-Unit-Test-v0"),
@@ -288,7 +265,9 @@ def test_load_train_cfg_rejects_stale_reward_alias_keys(tmp_path: Path):
             "reward_is_linear": False,
         },
     }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
+    (config_dir / "experiment.yaml").write_text(
+        yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8"
+    )
 
     with pytest.raises(ValueError, match="reward_hidden_dims"):
         module.load_train_cfg(
@@ -310,7 +289,9 @@ def test_load_train_cfg_rejects_removed_reward_gradient_mode_key(tmp_path: Path)
         "env": {"device": "cpu"},
         "irl": {"reward_gradient_mode": "invalid"},
     }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
+    (config_dir / "experiment.yaml").write_text(
+        yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8"
+    )
 
     with pytest.raises(ValueError, match="removed"):
         module.load_train_cfg(
@@ -332,7 +313,9 @@ def test_load_train_cfg_rejects_invalid_irl_discount_gamma_value(tmp_path: Path)
         "env": {"device": "cpu"},
         "irl": {"discount_gamma": 1.5},
     }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
+    (config_dir / "experiment.yaml").write_text(
+        yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8"
+    )
 
     with pytest.raises(ValueError, match="discount_gamma"):
         module.load_train_cfg(
@@ -403,7 +386,9 @@ def test_load_train_cfg_parses_reward_regularization_and_projection(tmp_path: Pa
         "runner": {},
         "feature_map": {},
     }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
+    (config_dir / "experiment.yaml").write_text(
+        yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8"
+    )
 
     cfg = module.load_train_cfg(
         task_name="Isaac-Lift-Cube-Franka-v0",
@@ -436,7 +421,9 @@ def test_load_train_cfg_rejects_linear_projection_when_not_linear(tmp_path: Path
         "runner": {},
         "feature_map": {},
     }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
+    (config_dir / "experiment.yaml").write_text(
+        yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8"
+    )
 
     with pytest.raises(ValueError, match="linear_projection"):
         module.load_train_cfg(
@@ -467,7 +454,9 @@ def test_load_train_cfg_type_linear_implies_is_linear(tmp_path: Path):
         "runner": {},
         "feature_map": {},
     }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
+    (config_dir / "experiment.yaml").write_text(
+        yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8"
+    )
 
     cfg = module.load_train_cfg(
         task_name="Isaac-Lift-Cube-Franka-v0",
@@ -478,7 +467,9 @@ def test_load_train_cfg_type_linear_implies_is_linear(tmp_path: Path):
     assert cfg.reward.regularization == "none"
 
 
-def test_load_train_cfg_parses_expert_num_trajectories_and_subset_strategy(tmp_path: Path):
+def test_load_train_cfg_parses_expert_num_trajectories_and_subset_strategy(
+    tmp_path: Path,
+):
     module = _load_train_irl_module()
     config_dir = tmp_path / "configs"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -498,7 +489,9 @@ def test_load_train_cfg_parses_expert_num_trajectories_and_subset_strategy(tmp_p
         "runner": {},
         "feature_map": {},
     }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
+    (config_dir / "experiment.yaml").write_text(
+        yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8"
+    )
 
     cfg = module.load_train_cfg(
         task_name="Isaac-Lift-Cube-Franka-v0",
@@ -526,7 +519,9 @@ def test_load_train_cfg_rejects_non_positive_expert_num_trajectories(tmp_path: P
         "runner": {},
         "feature_map": {},
     }
-    (config_dir / "experiment.yaml").write_text(yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8")
+    (config_dir / "experiment.yaml").write_text(
+        yaml.safe_dump(train_payload, sort_keys=False), encoding="utf-8"
+    )
 
     with pytest.raises(ValueError, match="expert_num_trajectories"):
         module.load_train_cfg(

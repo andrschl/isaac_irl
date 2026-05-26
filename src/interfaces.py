@@ -23,7 +23,7 @@ class PolicyMode(str, Enum):
     instead and is not represented here.
     """
 
-    TRAIN = "train"          # stochastic sampling
+    TRAIN = "train"  # stochastic sampling
     INFERENCE = "inference"  # deterministic
 
 
@@ -105,7 +105,9 @@ class RlAlgorithm(Protocol):
     def save_state(self) -> dict[str, Any]:
         """Return checkpoint payload for this algorithm."""
 
-    def load_state(self, checkpoint: dict[str, Any], *, load_optimizer: bool = True) -> None:
+    def load_state(
+        self, checkpoint: dict[str, Any], *, load_optimizer: bool = True
+    ) -> None:
         """Load checkpoint payload for this algorithm."""
 
 
@@ -150,10 +152,14 @@ class IrlAlgorithm(Protocol):
     def update(self) -> dict[str, float]:
         """Run one reward update and return scalar metrics."""
 
-    def per_feature_return_mean(self, feats: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def per_feature_return_mean(
+        self, feats: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
         """Per-feature mean discounted returns. Shapes: feats [B, T, D], mask [B, T] -> [D]."""
 
-    def sample_expert_feature_return_mean(self, device: torch.device | str) -> torch.Tensor | None:
+    def sample_expert_feature_return_mean(
+        self, device: torch.device | str
+    ) -> torch.Tensor | None:
         """Sample expert episodes and return per-feature mean returns [D]."""
 
     def train_metrics(self) -> dict[str, float]:
@@ -168,5 +174,7 @@ class IrlAlgorithm(Protocol):
     def save_state(self) -> dict[str, Any]:
         """Return checkpoint payload for this reward learner."""
 
-    def load_state(self, checkpoint: dict[str, Any], *, load_optimizer: bool = True) -> None:
+    def load_state(
+        self, checkpoint: dict[str, Any], *, load_optimizer: bool = True
+    ) -> None:
         """Load checkpoint payload for this reward learner."""

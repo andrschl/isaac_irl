@@ -25,7 +25,9 @@ class IrlRunnerCfg:
     use_learned_reward: bool = True
 
     imitator_buffer: FeatureBufCfg = field(default_factory=FeatureBufCfg)
-    expert_buffer: FeatureBufCfg = field(default_factory=lambda: FeatureBufCfg(min_ep_len=1))
+    expert_buffer: FeatureBufCfg = field(
+        default_factory=lambda: FeatureBufCfg(min_ep_len=1)
+    )
     expert_num_envs: int = 1
 
     # Length of the dedicated full-trajectory imitator rollout used to refresh
@@ -88,7 +90,9 @@ class IrlRunner:
         if runtime_ctx is None:
             probe_features = self._as_feature_tensor(self.feature_map(self.env))
             if probe_features.ndim != 2:
-                raise ValueError(f"Feature map must return shape [N, D], got {tuple(probe_features.shape)}.")
+                raise ValueError(
+                    f"Feature map must return shape [N, D], got {tuple(probe_features.shape)}."
+                )
             runtime_ctx = RuntimeContext(
                 num_envs=int(self.env.num_envs),
                 feature_dim=int(probe_features.shape[1]),
@@ -97,13 +101,17 @@ class IrlRunner:
         self._runtime_ctx = runtime_ctx
 
         feature_names = self.irl_alg.feature_names
-        if feature_names is not None and len(feature_names) != int(runtime_ctx.feature_dim):
+        if feature_names is not None and len(feature_names) != int(
+            runtime_ctx.feature_dim
+        ):
             raise ValueError(
                 f"irl_alg.feature_names length ({len(feature_names)}) must equal "
                 f"runtime_ctx.feature_dim ({int(runtime_ctx.feature_dim)})."
             )
 
-        self.irl_alg.init_imitator_storage(runtime_ctx=runtime_ctx, cfg=self.cfg.imitator_buffer)
+        self.irl_alg.init_imitator_storage(
+            runtime_ctx=runtime_ctx, cfg=self.cfg.imitator_buffer
+        )
         self.irl_alg.init_expert_storage(
             runtime_ctx=runtime_ctx,
             cfg=self.cfg.expert_buffer,
@@ -113,23 +121,39 @@ class IrlRunner:
     def _validate_cfg(self) -> None:
         cfg = self.cfg
         if cfg.steps_per_env_per_cycle <= 0:
-            raise ValueError(f"`steps_per_env_per_cycle` must be > 0, got {cfg.steps_per_env_per_cycle}.")
+            raise ValueError(
+                f"`steps_per_env_per_cycle` must be > 0, got {cfg.steps_per_env_per_cycle}."
+            )
         if cfg.save_interval <= 0:
             raise ValueError(f"`save_interval` must be > 0, got {cfg.save_interval}.")
         if cfg.rl_updates_per_cycle <= 0:
-            raise ValueError(f"`rl_updates_per_cycle` must be > 0, got {cfg.rl_updates_per_cycle}.")
+            raise ValueError(
+                f"`rl_updates_per_cycle` must be > 0, got {cfg.rl_updates_per_cycle}."
+            )
         if cfg.reward_updates_per_cycle <= 0:
-            raise ValueError(f"`reward_updates_per_cycle` must be > 0, got {cfg.reward_updates_per_cycle}.")
+            raise ValueError(
+                f"`reward_updates_per_cycle` must be > 0, got {cfg.reward_updates_per_cycle}."
+            )
         if cfg.expert_num_envs <= 0:
-            raise ValueError(f"`expert_num_envs` must be > 0, got {cfg.expert_num_envs}.")
-        if cfg.imitator_rollout_steps_per_env is not None and int(cfg.imitator_rollout_steps_per_env) <= 0:
+            raise ValueError(
+                f"`expert_num_envs` must be > 0, got {cfg.expert_num_envs}."
+            )
+        if (
+            cfg.imitator_rollout_steps_per_env is not None
+            and int(cfg.imitator_rollout_steps_per_env) <= 0
+        ):
             raise ValueError(
                 "`imitator_rollout_steps_per_env` must be > 0 or None, "
                 f"got {cfg.imitator_rollout_steps_per_env}."
             )
         if cfg.validation_interval < 0:
-            raise ValueError(f"`validation_interval` must be >= 0, got {cfg.validation_interval}.")
-        if cfg.validation_steps_per_env is not None and int(cfg.validation_steps_per_env) < 0:
+            raise ValueError(
+                f"`validation_interval` must be >= 0, got {cfg.validation_interval}."
+            )
+        if (
+            cfg.validation_steps_per_env is not None
+            and int(cfg.validation_steps_per_env) < 0
+        ):
             raise ValueError(
                 f"`validation_steps_per_env` must be >= 0 or None, got {cfg.validation_steps_per_env}."
             )
@@ -163,24 +187,37 @@ class IrlRunner:
     def _step_features(self) -> torch.Tensor:
         features = self._as_feature_tensor(self.feature_map(self.env))
         if features.ndim != 2:
-            raise ValueError(f"Expected feature_map(env) shape [N, D], got {tuple(features.shape)}.")
-        expected_shape = (int(self._runtime_ctx.num_envs), int(self._runtime_ctx.feature_dim))
+            raise ValueError(
+                f"Expected feature_map(env) shape [N, D], got {tuple(features.shape)}."
+            )
+        expected_shape = (
+            int(self._runtime_ctx.num_envs),
+            int(self._runtime_ctx.feature_dim),
+        )
         if tuple(features.shape) != expected_shape:
             raise ValueError(
                 f"Expected feature_map(env) shape {expected_shape}, got {tuple(features.shape)}."
             )
         return features
 
-    def _rl_rewards(self, env_rewards: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
+    def _rl_rewards(
+        self, env_rewards: torch.Tensor, features: torch.Tensor
+    ) -> torch.Tensor:
         if not self.cfg.use_learned_reward:
             return env_rewards
         with torch.no_grad():
             learned_rewards = self.irl_alg.reward_model(features)
-        learned_rewards = self._ensure_per_env_rewards(learned_rewards, num_envs=int(env_rewards.shape[0]))
-        return learned_rewards.detach().to(device=env_rewards.device, dtype=env_rewards.dtype)
+        learned_rewards = self._ensure_per_env_rewards(
+            learned_rewards, num_envs=int(env_rewards.shape[0])
+        )
+        return learned_rewards.detach().to(
+            device=env_rewards.device, dtype=env_rewards.dtype
+        )
 
     @staticmethod
-    def _ensure_per_env_rewards(rewards: torch.Tensor, *, num_envs: int) -> torch.Tensor:
+    def _ensure_per_env_rewards(
+        rewards: torch.Tensor, *, num_envs: int
+    ) -> torch.Tensor:
         if not isinstance(rewards, torch.Tensor):
             rewards = torch.as_tensor(rewards)
         if rewards.ndim == 2 and rewards.shape[-1] == 1:
@@ -214,17 +251,25 @@ class IrlRunner:
             for _ in range(num_steps_per_env):
                 obs_before = obs
                 actions = action_fn(obs_before)
-                obs_next, env_rewards, dones, extras = self.env.step(actions.to(self.env.device))
+                obs_next, env_rewards, dones, extras = self.env.step(
+                    actions.to(self.env.device)
+                )
                 obs_next = self._obs_to_device(obs_next)
                 env_rewards = env_rewards.to(self.device)
                 done_vec = self._as_done_vector(dones)
 
                 features: torch.Tensor | None = None
-                if (observe_rl and self.cfg.use_learned_reward) or feature_sink is not None:
+                if (
+                    observe_rl and self.cfg.use_learned_reward
+                ) or feature_sink is not None:
                     features = self._step_features()
 
                 if observe_rl:
-                    rewards = env_rewards if features is None else self._rl_rewards(env_rewards, features)
+                    rewards = (
+                        env_rewards
+                        if features is None
+                        else self._rl_rewards(env_rewards, features)
+                    )
                     self.rl_alg.observe(
                         EnvTransition(
                             obs=obs_before,
@@ -256,7 +301,9 @@ class IrlRunner:
         done_vec = dones.to(device=self.device).reshape(-1).to(torch.bool)
         expected_shape = (int(self._runtime_ctx.num_envs),)
         if tuple(done_vec.shape) != expected_shape:
-            raise ValueError(f"Expected dones shape {expected_shape}, got {tuple(dones.shape)}.")
+            raise ValueError(
+                f"Expected dones shape {expected_shape}, got {tuple(dones.shape)}."
+            )
         return done_vec
 
     def _collect_rl_rollout(self, obs: Any) -> Any:
@@ -325,9 +372,13 @@ class IrlRunner:
         self.metric_logger.log(payload, step=self.global_timestep)
 
     @staticmethod
-    def _scalar_payload(prefix: str, names: list[str], values: torch.Tensor) -> dict[str, float]:
+    def _scalar_payload(
+        prefix: str, names: list[str], values: torch.Tensor
+    ) -> dict[str, float]:
         """Build a ``{prefix/name: float(value)}`` dict from a [D] tensor."""
-        return {f"{prefix}/{name}": float(values[i].item()) for i, name in enumerate(names)}
+        return {
+            f"{prefix}/{name}": float(values[i].item()) for i, name in enumerate(names)
+        }
 
     def _log_iteration(self) -> None:
         payload: dict[str, float] = {}
@@ -346,7 +397,10 @@ class IrlRunner:
 
     def _should_validate(self, learning_iteration: int) -> bool:
         validation_steps = self._resolved_validation_steps()
-        return validation_steps > 0 and learning_iteration % int(self.cfg.validation_interval) == 0
+        return (
+            validation_steps > 0
+            and learning_iteration % int(self.cfg.validation_interval) == 0
+        )
 
     def _feature_names(self, feature_dim: int) -> list[str]:
         feature_names = self.irl_alg.feature_names
@@ -354,7 +408,9 @@ class IrlRunner:
             return list(feature_names)
         return [f"feat_{feature_idx}" for feature_idx in range(feature_dim)]
 
-    def _make_success_accumulator(self) -> tuple[torch.Tensor | None, StepCallback | None]:
+    def _make_success_accumulator(
+        self,
+    ) -> tuple[torch.Tensor | None, StepCallback | None]:
         """Build a per-env any-time success accumulator for validation rollouts.
 
         Returns ``(None, None)`` when no ``success_fn`` was configured. Otherwise
@@ -364,11 +420,15 @@ class IrlRunner:
         if self.success_fn is None:
             return None, None
         success_fn = self.success_fn
-        ever_success = torch.zeros(self._runtime_ctx.num_envs, dtype=torch.bool, device=self.device)
+        ever_success = torch.zeros(
+            self._runtime_ctx.num_envs, dtype=torch.bool, device=self.device
+        )
 
         def _accumulate() -> None:
-            step_success = torch.as_tensor(success_fn(self.env)).reshape(-1).to(
-                device=ever_success.device, dtype=torch.bool
+            step_success = (
+                torch.as_tensor(success_fn(self.env))
+                .reshape(-1)
+                .to(device=ever_success.device, dtype=torch.bool)
             )
             ever_success[step_success] = True
 
@@ -402,10 +462,14 @@ class IrlRunner:
         )
         scratch.finalize_in_progress_episodes()
 
-        success_rate = None if ever_success is None else float(ever_success.float().mean().item())
+        success_rate = (
+            None if ever_success is None else float(ever_success.float().mean().item())
+        )
         if len(scratch) == 0:
             return obs, None, success_rate
-        feats, mask, _ = scratch.sample_episodes(batch_size=int(self.irl_alg.batch_size), device=self.device)
+        feats, mask, _ = scratch.sample_episodes(
+            batch_size=int(self.irl_alg.batch_size), device=self.device
+        )
         return obs, self.irl_alg.per_feature_return_mean(feats, mask), success_rate
 
     def _run_validation(self, obs: Any, iteration: int) -> Any:
@@ -443,7 +507,9 @@ class IrlRunner:
         self._log(metrics)
         self.console_reporter.validation_summary(iteration=iteration, metrics=metrics)
 
-    def _log_validation_expert(self, iteration: int) -> tuple[torch.Tensor | None, list[str]]:
+    def _log_validation_expert(
+        self, iteration: int
+    ) -> tuple[torch.Tensor | None, list[str]]:
         expert_mean = self.irl_alg.sample_expert_feature_return_mean(self.device)
         if expert_mean is None:
             return None, []
@@ -476,7 +542,9 @@ class IrlRunner:
         feature_names: list[str],
     ) -> Any:
         obs, imitator_mean, success_rate = self._imitator_feature_expectations(
-            obs, mode=mode, num_steps_per_env=num_steps_per_env,
+            obs,
+            mode=mode,
+            num_steps_per_env=num_steps_per_env,
         )
 
         summary: dict[str, float] = {}
@@ -489,13 +557,19 @@ class IrlRunner:
                 )
 
         if imitator_mean is not None:
-            imitator_mean = imitator_mean.to(device=expert_mean.device, dtype=expert_mean.dtype)
+            imitator_mean = imitator_mean.to(
+                device=expert_mean.device, dtype=expert_mean.dtype
+            )
             gap_mean = expert_mean - imitator_mean
-            summary[f"Validation/{mode_name}/feature_exp_diff_norm"] = float(gap_mean.norm().item())
+            summary[f"Validation/{mode_name}/feature_exp_diff_norm"] = float(
+                gap_mean.norm().item()
+            )
 
             imitator_prefix = f"ValidationFeatures/{mode_name}/imitator"
             gap_prefix = f"ValidationFeatures/{mode_name}/gap"
-            imitator_payload = self._scalar_payload(imitator_prefix, feature_names, imitator_mean)
+            imitator_payload = self._scalar_payload(
+                imitator_prefix, feature_names, imitator_mean
+            )
             gap_payload = self._scalar_payload(gap_prefix, feature_names, gap_mean)
             self._log({**imitator_payload, **gap_payload})
             self.console_reporter.validation_features(
@@ -564,10 +638,16 @@ class IrlRunner:
         self.rl_alg.eval_mode()
         self.irl_alg.eval_mode()
 
-    def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
+    def learn(
+        self, num_learning_iterations: int, init_at_random_ep_len: bool = False
+    ) -> None:
         self.metric_logger.start()
 
-        if init_at_random_ep_len and hasattr(self.env, "episode_length_buf") and hasattr(self.env, "max_episode_length"):
+        if (
+            init_at_random_ep_len
+            and hasattr(self.env, "episode_length_buf")
+            and hasattr(self.env, "max_episode_length")
+        ):
             self.env.episode_length_buf = torch.randint_like(
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
             )
@@ -578,10 +658,12 @@ class IrlRunner:
         start_iter = self.current_learning_iteration
         self.console_reporter.start(int(num_learning_iterations))
         for it in range(start_iter, start_iter + int(num_learning_iterations)):
+            # RL and reward updates:
             obs = self._run_rl_updates(obs)
             obs = self._collect_imitator_trajectories(obs)
             self._run_reward_updates()
 
+            # Logging
             self.current_learning_iteration = it + 1
             self._log_iteration()
             self.console_reporter.iteration_summary(
@@ -590,12 +672,17 @@ class IrlRunner:
                 reward_metrics=self._last_reward_metrics,
             )
 
+            # Validation
             if self._should_validate(it + 1):
                 obs = self._run_validation(obs, it)
             self._maybe_save_checkpoint(it)
 
         if self.log_dir is not None:
-            self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
+            self.save(
+                os.path.join(
+                    self.log_dir, f"model_{self.current_learning_iteration}.pt"
+                )
+            )
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)

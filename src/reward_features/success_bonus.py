@@ -35,7 +35,9 @@ def success_bonus_reward(
     """
     if object_reached_goal is None:
         return torch.zeros(int(env.num_envs), device=env.device, dtype=torch.float32)
-    return object_reached_goal(env, command_name=command_name, threshold=threshold).to(torch.float32)
+    return object_reached_goal(env, command_name=command_name, threshold=threshold).to(
+        torch.float32
+    )
 
 
 def add_success_bonus_term(

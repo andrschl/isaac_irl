@@ -17,10 +17,16 @@ import cli_args as cli_args  # isort: skip
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Collect synthetic demos with an RSL-RL policy.")
-    parser.add_argument("--num_envs", type=int, default=1000, help="Number of environments to simulate.")
+    parser = argparse.ArgumentParser(
+        description="Collect synthetic demos with an RSL-RL policy."
+    )
+    parser.add_argument(
+        "--num_envs", type=int, default=1000, help="Number of environments to simulate."
+    )
     parser.add_argument("--task", type=str, default=None, help="Task name.")
-    parser.add_argument("--num_demos", type=int, default=1000, help="Number of episodes to collect.")
+    parser.add_argument(
+        "--num_demos", type=int, default=1000, help="Number of episodes to collect."
+    )
     parser.add_argument(
         "--demo_length",
         type=int,
@@ -40,7 +46,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Recorded clip length in steps. Defaults to 250 (~5 s at 50 Hz), matching the "
         "training-side final-video default.",
     )
-    parser.add_argument("--feature_key", type=str, default="features", help="Dataset key used for features.")
+    parser.add_argument(
+        "--feature_key",
+        type=str,
+        default="features",
+        help="Dataset key used for features.",
+    )
     parser.add_argument(
         "--success_threshold",
         type=float,
@@ -141,7 +152,9 @@ def _as_obs_mapping(obs: Any) -> Any:
         return obs
     if isinstance(obs, torch.Tensor):
         return {"policy": obs}
-    raise TypeError(f"Expected observations to be mapping-like or tensor, got {type(obs)!r}.")
+    raise TypeError(
+        f"Expected observations to be mapping-like or tensor, got {type(obs)!r}."
+    )
 
 
 def _try_set_demo_length(env: Any, demo_length: int) -> None:
@@ -183,12 +196,13 @@ def _resolve_demo_length(env: Any, demo_length_override: int | None) -> int:
         return env_demo_length
 
     raise ValueError(
-        "Could not infer env max episode length. "
-        "Pass --demo_length explicitly."
+        "Could not infer env max episode length. Pass --demo_length explicitly."
     )
 
 
-def _step_env(env: Any, actions: torch.Tensor) -> tuple[Any, torch.Tensor, torch.Tensor]:
+def _step_env(
+    env: Any, actions: torch.Tensor
+) -> tuple[Any, torch.Tensor, torch.Tensor]:
     """Normalize env.step output to (obs, rewards[N], dones[N])."""
     out = env.step(actions)
     if not isinstance(out, tuple):
@@ -200,9 +214,13 @@ def _step_env(env: Any, actions: torch.Tensor) -> tuple[Any, torch.Tensor, torch
         obs, rewards, terminated, truncated, _ = out
         dones = torch.as_tensor(terminated) | torch.as_tensor(truncated)
     else:
-        raise ValueError(f"Expected env.step(...) to return 4 or 5 values, got {len(out)}.")
+        raise ValueError(
+            f"Expected env.step(...) to return 4 or 5 values, got {len(out)}."
+        )
 
-    rewards_tensor = rewards if isinstance(rewards, torch.Tensor) else torch.as_tensor(rewards)
+    rewards_tensor = (
+        rewards if isinstance(rewards, torch.Tensor) else torch.as_tensor(rewards)
+    )
     dones_tensor = dones if isinstance(dones, torch.Tensor) else torch.as_tensor(dones)
     return obs, rewards_tensor, dones_tensor.to(torch.bool)
 
@@ -214,9 +232,13 @@ def _build_success_fn(task_name: str, threshold: float) -> Any:
     Best-effort: recording must never break if success can't be computed.
     """
     try:
-        from isaaclab_tasks.manager_based.manipulation.lift.mdp import object_reached_goal
+        from isaaclab_tasks.manager_based.manipulation.lift.mdp import (
+            object_reached_goal,
+        )
     except Exception as exc:
-        print(f"[WARN] No success metric for task {task_name!r} (object_reached_goal unavailable): {exc}")
+        print(
+            f"[WARN] No success metric for task {task_name!r} (object_reached_goal unavailable): {exc}"
+        )
         return None
 
     def success_fn(env: Any) -> torch.Tensor:
@@ -244,7 +266,9 @@ def main() -> None:
             f"--feature_key must be 'features' for IRL compatibility, got '{args_cli.feature_key}'."
         )
 
-    env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
+    env_cfg = parse_env_cfg(
+        args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs
+    )
 
     if args_cli.add_success_bonus:
         added = add_success_bonus_term(
@@ -258,20 +282,30 @@ def main() -> None:
                 f"(weight={args_cli.success_bonus_weight}, threshold={args_cli.success_threshold} m)."
             )
         else:
-            print("[WARN] --add_success_bonus set but env_cfg has no `rewards` section; skipped.")
+            print(
+                "[WARN] --add_success_bonus set but env_cfg has no `rewards` section; skipped."
+            )
 
     agent_cfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
     # Migrate legacy `policy=RslRlPpoActorCriticCfg(...)` to the new-style
     # `actor`/`critic` blocks required by rsl-rl >= 4.0. Without this,
     # `PPO.construct_algorithm` raises `KeyError: 'class_name'`.
-    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, _importlib_metadata.version("rsl-rl-lib"))
+    agent_cfg = handle_deprecated_rsl_rl_cfg(
+        agent_cfg, _importlib_metadata.version("rsl-rl-lib")
+    )
 
-    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    env = gym.make(
+        args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None
+    )
     max_demo_length = _resolve_demo_length(env, args_cli.demo_length)
 
-    log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
+    log_root_path = os.path.abspath(
+        os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
+    )
     demo_dir = os.path.abspath(os.path.join("logs", "demos", agent_cfg.experiment_name))
-    resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+    resume_path = get_checkpoint_path(
+        log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint
+    )
 
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
     print(f"[INFO] Loading model checkpoint from: {resume_path}")
@@ -279,7 +313,11 @@ def main() -> None:
     print(f"[INFO] Effective demo length: {max_demo_length} steps.")
 
     if args_cli.video:
-        video_length = int(args_cli.video_length) if args_cli.video_length is not None else max_demo_length
+        video_length = (
+            int(args_cli.video_length)
+            if args_cli.video_length is not None
+            else max_demo_length
+        )
         video_length = max(1, video_length)
         video_kwargs = {
             "video_folder": os.path.join(demo_dir, "videos"),
@@ -295,7 +333,9 @@ def main() -> None:
     env = RslRlVecEnvWrapper(env)
 
     print("[INFO] Initializing RSL-RL runner...")
-    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    runner = OnPolicyRunner(
+        env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device
+    )
     print("[INFO] Loading checkpoint...")
     runner.load(resume_path)
     print("[INFO] Checkpoint loaded.")
@@ -310,12 +350,20 @@ def main() -> None:
     )
     collector.reset()
 
-    ignored_terms = {term.strip() for term in args_cli.ignored_reward_terms.split(",") if term.strip()}
-    forced_feature_terms: set[str] = {"success_bonus"} if args_cli.add_success_bonus else set()
+    ignored_terms = {
+        term.strip()
+        for term in args_cli.ignored_reward_terms.split(",")
+        if term.strip()
+    }
+    forced_feature_terms: set[str] = (
+        {"success_bonus"} if args_cli.add_success_bonus else set()
+    )
 
     success_fn = _build_success_fn(args_cli.task, float(args_cli.success_threshold))
     if success_fn is not None:
-        print(f"[INFO] Recording per-step success (object within {args_cli.success_threshold} m of goal).")
+        print(
+            f"[INFO] Recording per-step success (object within {args_cli.success_threshold} m of goal)."
+        )
 
     policy_obs = _get_policy_observations(env)
     obs_map = _as_obs_mapping(policy_obs)
@@ -362,8 +410,13 @@ def main() -> None:
 
                 if done_env_ids.numel() > 0:
                     collected_episodes += int(done_env_ids.numel())
-                    if collected_episodes % max(1, int(args_cli.demo_log_interval)) == 0:
-                        print(f"[INFO] Collected {collected_episodes}/{args_cli.num_demos} demos.")
+                    if (
+                        collected_episodes % max(1, int(args_cli.demo_log_interval))
+                        == 0
+                    ):
+                        print(
+                            f"[INFO] Collected {collected_episodes}/{args_cli.num_demos} demos."
+                        )
 
                 loop_steps += 1
                 if loop_steps % max(1, int(args_cli.status_interval_steps)) == 0:

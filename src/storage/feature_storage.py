@@ -44,7 +44,7 @@ class FeatureTrajectoryBuffer:
         self._cur: list[list[torch.Tensor]] = [[] for _ in range(ctx.num_envs)]
 
         # Completed episodes and their lengths.
-        self._eps: deque[torch.Tensor] = deque()   # each episode: [T, D]
+        self._eps: deque[torch.Tensor] = deque()  # each episode: [T, D]
         self._lengths: deque[int] = deque()
 
         self._steps_stored = 0
@@ -124,7 +124,9 @@ class FeatureTrajectoryBuffer:
 
         t_steps = int(feats.shape[0])
         for t in range(t_steps):
-            done = torch.tensor([t == t_steps - 1], dtype=torch.bool, device=feats.device)
+            done = torch.tensor(
+                [t == t_steps - 1], dtype=torch.bool, device=feats.device
+            )
             self.add_step(feats[t : t + 1], done)
 
     def _finalize(self, env_i: int) -> None:
@@ -157,7 +159,9 @@ class FeatureTrajectoryBuffer:
         if self.cfg.sample_weighted_by_length:
             lens = torch.tensor(list(self._lengths), dtype=torch.float32)
             probs = lens / lens.sum()
-            return torch.multinomial(probs, num_samples=batch_size, replacement=True).tolist()
+            return torch.multinomial(
+                probs, num_samples=batch_size, replacement=True
+            ).tolist()
 
         return torch.randint(0, len(self._eps), (batch_size,)).tolist()
 
@@ -197,7 +201,9 @@ class FeatureTrajectoryBuffer:
             discounted_feature_returns [B, D]
             lengths                    [B]
         """
-        feats, mask, lengths = self.sample_episodes(batch_size=batch_size, device=device)
+        feats, mask, lengths = self.sample_episodes(
+            batch_size=batch_size, device=device
+        )
         z_ret = self.discounted_feature_returns(feats, mask, self.gamma)
         return z_ret, lengths
 
@@ -215,11 +221,12 @@ class FeatureTrajectoryBuffer:
         return einsum(feats, mask.to(dtype=feats.dtype), powers, "b t d, b t, t -> b d")
 
     @staticmethod
-    def discounted_returns(r: torch.Tensor, mask: torch.Tensor, gamma: float) -> torch.Tensor:
+    def discounted_returns(
+        r: torch.Tensor, mask: torch.Tensor, gamma: float
+    ) -> torch.Tensor:
         """
         r: [B,T], mask: [B,T] -> returns [B]
         """
         _, t = r.shape
         powers = gamma ** torch.arange(t, device=r.device, dtype=r.dtype)
         return einsum(r, mask.to(dtype=r.dtype), powers, "b t, b t, t -> b")
-

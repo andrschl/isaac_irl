@@ -30,6 +30,7 @@ class RewardModelCfg:
     Linear model: linear_projection, linear_projection_radius.
     Both: regularization, regularization_strength, elastic_alpha.
     """
+
     num_features: int
     hidden_dims: tuple[int, ...] = (256, 256, 256)
     is_linear: bool = False
@@ -76,7 +77,9 @@ class _FeatureRewardModelBase(BaseRewardModel):
         # Stateless reward model
         del dones
 
-    def forward(self, feats: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self, feats: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Alias for compatibility with code calling ``reward(feats, mask)``."""
         return self.get_reward_from_features(feats, mask)
 
@@ -98,7 +101,9 @@ class _FeatureRewardModelBase(BaseRewardModel):
             feats = torch.as_tensor(feats)
 
         if feats.ndim not in (2, 3):
-            raise ValueError(f"`feats` must be [N,D] or [B,T,D], got {tuple(feats.shape)}")
+            raise ValueError(
+                f"`feats` must be [N,D] or [B,T,D], got {tuple(feats.shape)}"
+            )
 
         if feats.shape[-1] != int(self.cfg.num_features):
             raise ValueError(
@@ -115,7 +120,9 @@ class _FeatureRewardModelBase(BaseRewardModel):
             batch_size, traj_len, _ = feats.shape
             flat_feats = rearrange(feats, "b t d -> (b t) d")
             flat_rewards = self.reward(flat_feats)
-            rewards = rearrange(flat_rewards, "(b t) 1 -> b t", b=batch_size, t=traj_len)
+            rewards = rearrange(
+                flat_rewards, "(b t) 1 -> b t", b=batch_size, t=traj_len
+            )
 
         if mask is not None:
             if not isinstance(mask, torch.Tensor):
@@ -142,7 +149,10 @@ class _FeatureRewardModelBase(BaseRewardModel):
     def apply_proximal_step(self) -> None:
         """Apply L1 or elastic net proximal operator to all parameters."""
         cfg = self.cfg
-        if cfg.regularization not in ("l1", "elastic") or cfg.regularization_strength <= 0:
+        if (
+            cfg.regularization not in ("l1", "elastic")
+            or cfg.regularization_strength <= 0
+        ):
             return
         strength = float(cfg.regularization_strength)
         if cfg.regularization == "l1":
@@ -157,6 +167,7 @@ class _FeatureRewardModelBase(BaseRewardModel):
                     param.data.copy_(soft_threshold(param.data, lam1))
                 else:
                     param.data.copy_(elastic_net_proximal(param.data, lam1, lam2))
+
 
 class DenseFeatureRewardModel(_FeatureRewardModelBase):
     """Dense MLP reward model over features.
@@ -177,11 +188,15 @@ class DenseFeatureRewardModel(_FeatureRewardModelBase):
         super().__init__(cfg)
         hidden_dims = tuple(int(hidden_dim) for hidden_dim in cfg.hidden_dims)
         if len(hidden_dims) == 0:
-            raise ValueError("`hidden_dims` must be non-empty for DenseFeatureRewardModel.")
+            raise ValueError(
+                "`hidden_dims` must be non-empty for DenseFeatureRewardModel."
+            )
         self.reward = self._build_reward_network(cfg, hidden_dims)
 
     @staticmethod
-    def _build_reward_network(cfg: RewardModelCfg, hidden_dims: tuple[int, ...]) -> nn.Sequential:
+    def _build_reward_network(
+        cfg: RewardModelCfg, hidden_dims: tuple[int, ...]
+    ) -> nn.Sequential:
         layers: list[nn.Module] = []
         in_dim = cfg.num_features
         act = get_activation(cfg.activation)
@@ -232,8 +247,12 @@ class LinearFeatureRewardModel(_FeatureRewardModelBase):
         feats = feats.to(device=model_device, dtype=model_dtype)
         mask = mask.to(device=model_device, dtype=torch.bool)
         time_steps = feats.shape[1]
-        powers = gamma ** torch.arange(time_steps, device=feats.device, dtype=feats.dtype)
-        discounted_feats = torch.einsum("btd,bt,t->bd", feats, mask.to(dtype=feats.dtype), powers)
+        powers = gamma ** torch.arange(
+            time_steps, device=feats.device, dtype=feats.dtype
+        )
+        discounted_feats = torch.einsum(
+            "btd,bt,t->bd", feats, mask.to(dtype=feats.dtype), powers
+        )
         returns = self.get_reward_from_features(discounted_feats)  # [B]
         if not isinstance(returns, torch.Tensor):
             returns = torch.as_tensor(returns, device=model_device, dtype=model_dtype)

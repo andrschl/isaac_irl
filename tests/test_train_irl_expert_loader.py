@@ -16,7 +16,7 @@ if str(_root) not in sys.path:
 
 def _load_train_irl_module():
     root = Path(__file__).resolve().parents[1]
-    module_path = root / "scripts" / "irl" / "train_irl.py"
+    module_path = root / "scripts" / "irl" / "_train_expert_data.py"
     module_name = "train_irl_module_expert_loader"
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
@@ -203,8 +203,12 @@ def test_install_expert_episodes_with_max_num_trajectories_loads_subset(tmp_path
     from storage.feature_storage import FeatureBufCfg
     from utils.runtime_context import RuntimeContext
 
-    reward_model = LinearFeatureRewardModel(RewardModelCfg(num_features=2, is_linear=True))
-    irl_alg = FeatureRewardLearner(reward=reward_model, gamma=0.99, cfg=IRLCfg(batch_size=2))
+    reward_model = LinearFeatureRewardModel(
+        RewardModelCfg(num_features=2, is_linear=True)
+    )
+    irl_alg = FeatureRewardLearner(
+        reward=reward_model, gamma=0.99, cfg=IRLCfg(batch_size=2)
+    )
     irl_alg.init_expert_storage(
         runtime_ctx=RuntimeContext(num_envs=1, feature_dim=2),
         cfg=FeatureBufCfg(min_ep_len=1),

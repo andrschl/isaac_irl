@@ -34,7 +34,9 @@ class RslRlPpoAdapter:
     def act(self, obs: Any, *, mode: PolicyMode) -> torch.Tensor:
         actor = getattr(self._rl_alg, "actor", None)
         if actor is None:
-            raise AttributeError("RslRlPpoAdapter requires `rl_alg.actor` for pure policy actions.")
+            raise AttributeError(
+                "RslRlPpoAdapter requires `rl_alg.actor` for pure policy actions."
+            )
         if mode is PolicyMode.TRAIN:
             return actor(obs, stochastic_output=True)
         if mode is PolicyMode.INFERENCE:
@@ -55,7 +57,9 @@ class RslRlPpoAdapter:
         self._rl_alg.compute_returns(last_obs)
 
     def update(self) -> dict[str, float]:
-        result = self._rl_alg.bc_only_update() if self._is_bc_only else self._rl_alg.update()
+        result = (
+            self._rl_alg.bc_only_update() if self._is_bc_only else self._rl_alg.update()
+        )
 
         metrics: dict[str, float] = {}
         if isinstance(result, dict):
@@ -94,7 +98,9 @@ class RslRlPpoAdapter:
     def save_state(self) -> dict[str, Any]:
         return dict(self._rl_alg.save())
 
-    def load_state(self, checkpoint: dict[str, Any], *, load_optimizer: bool = True) -> None:
+    def load_state(
+        self, checkpoint: dict[str, Any], *, load_optimizer: bool = True
+    ) -> None:
         load_cfg = {
             "actor": True,
             "critic": True,

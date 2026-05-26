@@ -60,7 +60,9 @@ def _install_recording_import_stubs(monkeypatch) -> dict[str, Any]:
 
     isaaclab_tasks_module = types.ModuleType("isaaclab_tasks")
     isaaclab_tasks_utils_module = types.ModuleType("isaaclab_tasks.utils")
-    isaaclab_tasks_utils_module.get_checkpoint_path = lambda *args, **kwargs: "unused.pt"
+    isaaclab_tasks_utils_module.get_checkpoint_path = lambda *args, **kwargs: (
+        "unused.pt"
+    )
     isaaclab_tasks_utils_module.parse_env_cfg = lambda *args, **kwargs: {}
     isaaclab_tasks_module.utils = isaaclab_tasks_utils_module
 
@@ -70,7 +72,9 @@ def _install_recording_import_stubs(monkeypatch) -> dict[str, Any]:
     collectors_module.RobomimicDataCollector = object
 
     reward_features_module = types.ModuleType("reward_features")
-    reward_features_manager_based_module = types.ModuleType("reward_features.manager_based")
+    reward_features_manager_based_module = types.ModuleType(
+        "reward_features.manager_based"
+    )
 
     def _manager_based_reward_feature_dict(
         *, env, ignored_reward_terms=(), device=None, force_include_terms=()
@@ -88,7 +92,9 @@ def _install_recording_import_stubs(monkeypatch) -> dict[str, Any]:
             "term_b": torch.zeros(2, dtype=torch.float32),
         }
 
-    reward_features_manager_based_module.manager_based_reward_feature_dict = _manager_based_reward_feature_dict
+    reward_features_manager_based_module.manager_based_reward_feature_dict = (
+        _manager_based_reward_feature_dict
+    )
     reward_features_module.manager_based = reward_features_manager_based_module
 
     monkeypatch.setitem(sys.modules, "cli_args", cli_args_module)
@@ -101,11 +107,17 @@ def _install_recording_import_stubs(monkeypatch) -> dict[str, Any]:
     monkeypatch.setitem(sys.modules, "isaaclab_rl", isaaclab_rl_module)
     monkeypatch.setitem(sys.modules, "isaaclab_rl.rsl_rl", isaaclab_rl_rsl_rl_module)
     monkeypatch.setitem(sys.modules, "isaaclab_tasks", isaaclab_tasks_module)
-    monkeypatch.setitem(sys.modules, "isaaclab_tasks.utils", isaaclab_tasks_utils_module)
+    monkeypatch.setitem(
+        sys.modules, "isaaclab_tasks.utils", isaaclab_tasks_utils_module
+    )
     monkeypatch.setitem(sys.modules, "gymnasium", gymnasium_module)
     monkeypatch.setitem(sys.modules, "collectors", collectors_module)
     monkeypatch.setitem(sys.modules, "reward_features", reward_features_module)
-    monkeypatch.setitem(sys.modules, "reward_features.manager_based", reward_features_manager_based_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "reward_features.manager_based",
+        reward_features_manager_based_module,
+    )
     return state
 
 
@@ -168,7 +180,13 @@ def test_step_env_parses_4tuple_and_5tuple(monkeypatch):
     class _Env5:
         def step(self, actions):
             del actions
-            return torch.zeros(2, 3), torch.ones(2), torch.tensor([True, False]), torch.tensor([False, True]), {}
+            return (
+                torch.zeros(2, 3),
+                torch.ones(2),
+                torch.tensor([True, False]),
+                torch.tensor([False, True]),
+                {},
+            )
 
     _, r4, d4 = module._step_env(_Env4(), torch.zeros(2, 1))
     assert tuple(r4.shape) == (2,)
@@ -182,7 +200,9 @@ def test_step_env_parses_4tuple_and_5tuple(monkeypatch):
 
 def test_import_rejects_custom_feature_type_fast(monkeypatch):
     with pytest.raises(NotImplementedError, match="custom is not implemented"):
-        _load_recording_module(monkeypatch, ["record_synthetic_demos.py", "--feature_type", "custom"])
+        _load_recording_module(
+            monkeypatch, ["record_synthetic_demos.py", "--feature_type", "custom"]
+        )
 
 
 def test_main_rejects_non_default_feature_key(monkeypatch):

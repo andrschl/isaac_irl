@@ -33,7 +33,9 @@ class _DummyEnv:
     def step(self, actions: torch.Tensor):
         self.step_calls += 1
         self.last_actions.append(actions.detach().clone())
-        obs_next = torch.full((self.num_envs, self.obs_dim), float(self.step_calls), dtype=torch.float32)
+        obs_next = torch.full(
+            (self.num_envs, self.obs_dim), float(self.step_calls), dtype=torch.float32
+        )
         env_rewards = torch.zeros(self.num_envs, dtype=torch.float32)
         dones = torch.zeros(self.num_envs, dtype=torch.bool)
         extras: dict[str, Any] = {}
@@ -102,10 +104,14 @@ class _DummyRlAlg:
         self.collect_action_calls += 1
         return torch.zeros((_obs_batch_size(obs), self.action_dim), dtype=torch.float32)
 
-    def act(self, obs: torch.Tensor | dict[str, Any], *, mode: PolicyMode) -> torch.Tensor:
+    def act(
+        self, obs: torch.Tensor | dict[str, Any], *, mode: PolicyMode
+    ) -> torch.Tensor:
         self.act_modes.append(mode)
         value = {PolicyMode.TRAIN: 1.0, PolicyMode.INFERENCE: 2.0}[mode]
-        return torch.full((_obs_batch_size(obs), self.action_dim), value, dtype=torch.float32)
+        return torch.full(
+            (_obs_batch_size(obs), self.action_dim), value, dtype=torch.float32
+        )
 
     def observe(self, transition: EnvTransition) -> None:
         self.transitions.append(transition)
@@ -133,7 +139,9 @@ class _DummyRlAlg:
     def save_state(self) -> dict[str, Any]:
         return {"rl_alg_weight": torch.tensor([3.0])}
 
-    def load_state(self, checkpoint: dict[str, Any], *, load_optimizer: bool = True) -> None:
+    def load_state(
+        self, checkpoint: dict[str, Any], *, load_optimizer: bool = True
+    ) -> None:
         del load_optimizer
         self.loaded_state = checkpoint
 
@@ -154,11 +162,19 @@ class _DummyIrlAlg:
         self.update_calls = 0
         self.loaded_state: dict[str, Any] | None = None
 
-    def init_expert_storage(self, runtime_ctx: RuntimeContext, *, cfg: FeatureBufCfg | None = None, num_envs: int = 1) -> None:
+    def init_expert_storage(
+        self,
+        runtime_ctx: RuntimeContext,
+        *,
+        cfg: FeatureBufCfg | None = None,
+        num_envs: int = 1,
+    ) -> None:
         del runtime_ctx, cfg, num_envs
         self.expert_storage = object()
 
-    def init_imitator_storage(self, runtime_ctx: RuntimeContext, *, cfg: FeatureBufCfg | None = None) -> None:
+    def init_imitator_storage(
+        self, runtime_ctx: RuntimeContext, *, cfg: FeatureBufCfg | None = None
+    ) -> None:
         del runtime_ctx, cfg
         self.imitator_storage = object()
 
@@ -179,11 +195,15 @@ class _DummyIrlAlg:
         self.update_calls += 1
         return {"IRL/reward_loss": 0.1, "IRL/feature_exp_diff_norm": 1.0}
 
-    def per_feature_return_mean(self, feats: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def per_feature_return_mean(
+        self, feats: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
         del mask
         return feats.mean(dim=(0, 1))
 
-    def sample_expert_feature_return_mean(self, device: torch.device | str) -> torch.Tensor | None:
+    def sample_expert_feature_return_mean(
+        self, device: torch.device | str
+    ) -> torch.Tensor | None:
         return torch.ones(2, dtype=torch.float32, device=device)
 
     def train_metrics(self) -> dict[str, float]:
@@ -198,7 +218,9 @@ class _DummyIrlAlg:
     def save_state(self) -> dict[str, Any]:
         return {"reward_weight": torch.tensor([4.0])}
 
-    def load_state(self, checkpoint: dict[str, Any], *, load_optimizer: bool = True) -> None:
+    def load_state(
+        self, checkpoint: dict[str, Any], *, load_optimizer: bool = True
+    ) -> None:
         del load_optimizer
         self.loaded_state = checkpoint
 
@@ -231,7 +253,9 @@ def _runner_cfg() -> IrlRunnerCfg:
 
 
 def _feature_map(env: _DummyEnv) -> torch.Tensor:
-    step_feature = torch.full((env.num_envs,), float(env.step_calls), dtype=torch.float32)
+    step_feature = torch.full(
+        (env.num_envs,), float(env.step_calls), dtype=torch.float32
+    )
     env_idx_feature = torch.arange(env.num_envs, dtype=torch.float32)
     return torch.stack((step_feature, env_idx_feature), dim=1)
 
@@ -272,7 +296,11 @@ def test_runner_separates_rl_transitions_from_reward_feature_steps():
     assert rl_alg.update_calls == runner.cfg.rl_updates_per_cycle
     assert len(irl_alg.feature_steps) == 3
     assert irl_alg.update_calls == runner.cfg.reward_updates_per_cycle
-    assert env.step_calls == runner.cfg.steps_per_env_per_cycle + runner.cfg.imitator_rollout_steps_per_env
+    assert (
+        env.step_calls
+        == runner.cfg.steps_per_env_per_cycle
+        + runner.cfg.imitator_rollout_steps_per_env
+    )
 
 
 def test_runner_passes_learned_rewards_from_post_step_features_to_rl_alg():
@@ -292,7 +320,9 @@ def test_runner_can_train_rl_alg_on_env_rewards_without_calling_reward_model_for
 
     runner.learn(num_learning_iterations=1, init_at_random_ep_len=False)
 
-    assert torch.allclose(rl_alg.transitions[0].rewards, rl_alg.transitions[0].env_rewards)
+    assert torch.allclose(
+        rl_alg.transitions[0].rewards, rl_alg.transitions[0].env_rewards
+    )
     assert irl_alg.reward_model.forward_calls == 0
 
 
@@ -325,7 +355,9 @@ def test_runner_handles_nested_observation_trees_and_done_vectors():
 
 
 def test_validation_uses_scratch_features_and_does_not_mutate_training_buffers():
-    runner, _, rl_alg, irl_alg, logger = _make_runner(use_learned_reward=True, validation_interval=1)
+    runner, _, rl_alg, irl_alg, logger = _make_runner(
+        use_learned_reward=True, validation_interval=1
+    )
     obs = runner._get_obs().to(runner.device)
 
     runner._run_validation(obs, iteration=0)
@@ -335,7 +367,12 @@ def test_validation_uses_scratch_features_and_does_not_mutate_training_buffers()
     assert irl_alg.update_calls == 0
     # Validation must never hit the side-effectful collection path.
     assert rl_alg.collect_action_calls == 0
-    assert rl_alg.act_modes == [PolicyMode.TRAIN, PolicyMode.TRAIN, PolicyMode.INFERENCE, PolicyMode.INFERENCE]
+    assert rl_alg.act_modes == [
+        PolicyMode.TRAIN,
+        PolicyMode.TRAIN,
+        PolicyMode.INFERENCE,
+        PolicyMode.INFERENCE,
+    ]
     emitted = {key for _, payload in logger.calls for key in payload}
     assert "ValidationFeatures/expert/step" in emitted
     assert "ValidationFeatures/stochastic/imitator/step" in emitted
@@ -384,7 +421,9 @@ class _DummyActor(nn.Module):
     def out_features(self) -> int:
         return int(self.mean.out_features)
 
-    def forward(self, obs: torch.Tensor, stochastic_output: bool = False) -> torch.Tensor:
+    def forward(
+        self, obs: torch.Tensor, stochastic_output: bool = False
+    ) -> torch.Tensor:
         self.call_modes.append(bool(stochastic_output))
         return self.mean(obs) + (1.0 if stochastic_output else 0.0)
 

@@ -71,8 +71,12 @@ def test_collector_writes_nested_mapping_payload_per_env(tmp_path: Path):
         "obs",
         {
             "policy": {
-                "joint_pos": torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32),
-                "joint_vel": torch.tensor([[5.0, 6.0], [7.0, 8.0]], dtype=torch.float32),
+                "joint_pos": torch.tensor(
+                    [[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32
+                ),
+                "joint_vel": torch.tensor(
+                    [[5.0, 6.0], [7.0, 8.0]], dtype=torch.float32
+                ),
             },
         },
     )
@@ -134,7 +138,9 @@ def test_collector_raises_on_batch_mismatch(tmp_path: Path):
 
     collector.add("obs", torch.tensor([[1.0], [2.0]], dtype=torch.float32))
     with pytest.raises(ValueError, match="Batch mismatch"):
-        collector.add("actions", torch.tensor([[0.1], [0.2], [0.3]], dtype=torch.float32))
+        collector.add(
+            "actions", torch.tensor([[0.1], [0.2], [0.3]], dtype=torch.float32)
+        )
 
 
 def test_collector_raises_on_nested_batch_mismatch_with_leaf_path(tmp_path: Path):
@@ -162,7 +168,9 @@ def test_collector_raises_on_nested_batch_mismatch_with_leaf_path(tmp_path: Path
             "obs",
             {
                 "policy": {
-                    "joint_vel": torch.tensor([[0.1], [0.2], [0.3]], dtype=torch.float32),
+                    "joint_vel": torch.tensor(
+                        [[0.1], [0.2], [0.3]], dtype=torch.float32
+                    ),
                 }
             },
         )

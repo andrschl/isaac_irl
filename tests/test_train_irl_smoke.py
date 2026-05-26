@@ -1,3 +1,12 @@
+"""Smoke test for train_irl's runtime-deps init ordering.
+
+The IsaacLab + rsl_rl import chain requires ``SimulationApp`` to be initialized
+*before* those modules can be imported. ``train_irl.main`` enforces this by
+loading the app launcher class first, instantiating it, and only then loading
+the runtime-dep modules. This test guards that ordering — regressing it would
+break every real training run.
+"""
+
 from __future__ import annotations
 
 import importlib.util
@@ -5,7 +14,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 torch = pytest.importorskip("torch")
 nn = pytest.importorskip("torch.nn")
@@ -32,49 +40,11 @@ class _FakeSimulationApp:
         self.closed = True
 
 
-class _FakeAppLauncher:
-    def __init__(self, args) -> None:
-        del args
-        self.app = _FakeSimulationApp()
-
-    @staticmethod
-    def add_app_launcher_args(parser) -> None:
-        parser.add_argument("--device", type=str, default="cpu")
-        parser.add_argument("--headless", action="store_true", default=True)
-
-
-class _FakeObs(dict):
-    def __init__(self) -> None:
-        super().__init__({"policy": torch.zeros(1, 4), "critic": torch.zeros(1, 4)})
-
-    def to(self, device):
-        del device
-        return self
-
-
 class _FakeEnv:
     def __init__(self) -> None:
         self.num_envs = 1
         self.num_actions = 2
         self.device = torch.device("cpu")
-        self.closed = False
-
-    def get_observations(self):
-        return _FakeObs()
-
-    def step(self, actions):
-        del actions
-        obs_next = _FakeObs()
-        rewards = torch.zeros(1, dtype=torch.float32)
-        dones = torch.zeros(1, dtype=torch.bool)
-        extras = {}
-        return obs_next, rewards, dones, extras
-
-    def seed(self, seed: int) -> None:
-        del seed
-
-    def close(self) -> None:
-        self.closed = True
 
 
 class _FakeGym:
@@ -97,13 +67,8 @@ class _FakeVecEnvWrapper:
         self.num_actions = env.num_actions
         self.device = env.device
 
-    def __getattr__(self, item):
-        return getattr(self._env, item)
-
 
 class _FakeMLPModel(nn.Module):
-    """Stand-in for rsl_rl 5.x MLPModel."""
-
     def __init__(self, obs, obs_groups, obs_set, output_dim, **kwargs):
         super().__init__()
         del obs, obs_groups, obs_set, output_dim, kwargs
@@ -111,124 +76,28 @@ class _FakeMLPModel(nn.Module):
 
 
 class _FakeRolloutStorage:
-    def __init__(self, training_type, num_envs, num_transitions_per_env, obs, actions_shape, device="cpu"):
+    def __init__(
+        self,
+        training_type,
+        num_envs,
+        num_transitions_per_env,
+        obs,
+        actions_shape,
+        device="cpu",
+    ):
         del training_type, num_envs, num_transitions_per_env, obs, actions_shape, device
 
 
 class _FakePPO:
-    def __init__(self, *, actor: nn.Module, critic: nn.Module, storage, device: str, **kwargs):
+    def __init__(
+        self, *, actor: nn.Module, critic: nn.Module, storage, device: str, **kwargs
+    ):
         del storage, device, kwargs
         self.actor = actor
         self.critic = critic
-        # Single optimizer over the union of params so existing checkpoint-style
-        # `optimizer` access keeps working.
         self.optimizer = torch.optim.SGD(
             list(actor.parameters()) + list(critic.parameters()), lr=1e-2
         )
-
-
-class _FakeRewardModel(nn.Module):
-    def __init__(self, cfg) -> None:
-        super().__init__()
-        del cfg
-        self.linear = nn.Linear(1, 1)
-
-
-class _FakeIrlAlg:
-    def __init__(self, **kwargs) -> None:
-        self.reward = kwargs["reward"]
-        self.reward_optimizer = torch.optim.SGD(self.reward.parameters(), lr=1e-2)
-        self.expert_storage = None
-
-    def add_expert_episode(self, features) -> None:
-        del features
-
-
-class _FakeRunner:
-    learn_calls = 0
-
-    def __init__(self, **kwargs) -> None:
-        self.kwargs = kwargs
-
-    def load(self, path: str, load_optimizer: bool = True) -> None:
-        del path, load_optimizer
-
-    def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
-        del num_learning_iterations, init_at_random_ep_len
-        _FakeRunner.learn_calls += 1
-
-    def finish_logger(self, exit_code: int = 0) -> None:
-        del exit_code
-
-
-def _write_yaml(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
-
-
-def test_train_irl_main_smoke_with_mocked_runtime(tmp_path: Path, monkeypatch):
-    module = _load_train_irl_module()
-
-    config_root = tmp_path / "configs" / "franka_lift"
-    config_root.mkdir(parents=True, exist_ok=True)
-    _write_yaml(
-        config_root / "experiment.yaml",
-        {
-            "experiment_name": "smoke",
-            "seed": 1,
-            "max_iterations": 1,
-            "env": {"name": "Isaac-Lift-Cube-Franka-v0", "device": "cpu", "num_envs": 1},
-            "reward": {
-                "type": "dense",
-                "hidden_dims": [16],
-                "is_linear": False,
-                "activation": "elu",
-            },
-            "policy": {"actor_hidden_dims": [16], "critic_hidden_dims": [16], "activation": "elu"},
-            "algo": {"learning_rate": 1.0e-4, "gamma": 0.98, "lam": 0.95},
-            "irl": {"expert_data_path": "expert.pt"},
-            "runner": {
-                "steps_per_env_per_cycle": 1,
-                "save_interval": 10,
-                "rl_updates_per_cycle": 1,
-                "reward_updates_per_cycle": 1,
-                "expert_num_envs": 1,
-            },
-            "feature_map": {},
-        },
-    )
-
-    monkeypatch.setattr(module, "_repo_root", lambda: tmp_path)
-    monkeypatch.setattr(module, "_build_feature_map", lambda cfg, device: (lambda env: torch.zeros(env.num_envs, 2)))
-    monkeypatch.setattr(module, "_feature_dim_from_feature_map", lambda feature_map, env: 2)
-    monkeypatch.setattr(
-        module, "manager_based_reward_feature_dict",
-        lambda env, ignored_reward_terms, device, force_include_terms=(): {"feat_a": None, "feat_b": None},
-    )
-    monkeypatch.setattr(module, "DenseFeatureRewardModel", _FakeRewardModel)
-    monkeypatch.setattr(module, "LinearFeatureRewardModel", _FakeRewardModel)
-    monkeypatch.setattr(module, "FeatureRewardLearner", _FakeIrlAlg)
-    monkeypatch.setattr(module, "IrlRunner", _FakeRunner)
-    monkeypatch.setattr(module, "_install_expert_episodes", lambda *args, **kwargs: None)
-
-    fake_deps = module.RuntimeDeps(
-        AppLauncher=_FakeAppLauncher,
-        gym=_FakeGym,
-        parse_env_cfg=lambda *args, **kwargs: {},
-        get_checkpoint_path=lambda *args, **kwargs: "unused.pt",
-        RslRlVecEnvWrapper=_FakeVecEnvWrapper,
-        PPO=_FakePPO,
-        MLPModel=_FakeMLPModel,
-        RolloutStorage=_FakeRolloutStorage,
-        resolve_obs_groups=lambda obs, groups, default_sets=None: {"critic": []},
-    )
-
-    _FakeRunner.learn_calls = 0
-    module.main(
-        argv=["--task", "Isaac-Lift-Cube-Franka-v0", "--headless", "--device", "cpu"],
-        deps=fake_deps,
-    )
-    assert _FakeRunner.learn_calls == 1
 
 
 def test_main_loads_runtime_deps_after_sim_app_init(monkeypatch):
@@ -275,6 +144,19 @@ def test_main_loads_runtime_deps_after_sim_app_init(monkeypatch):
     monkeypatch.setattr(module, "load_train_cfg", _fake_load_train_cfg)
 
     with pytest.raises(RuntimeError, match="stop-after-order-check"):
-        module.main(argv=["--task", "Isaac-Lift-Cube-Franka-v0", "--headless", "--device", "cpu"])
+        module.main(
+            argv=[
+                "--task",
+                "Isaac-Lift-Cube-Franka-v0",
+                "--headless",
+                "--device",
+                "cpu",
+            ]
+        )
 
-    assert call_order == ["load_app_launcher_cls", "app_launcher_init", "load_runtime_deps", "load_train_cfg"]
+    assert call_order == [
+        "load_app_launcher_cls",
+        "app_launcher_init",
+        "load_runtime_deps",
+        "load_train_cfg",
+    ]

@@ -9,7 +9,9 @@ from typing import Any
 import pytest
 
 
-def _install_fake_wandb(monkeypatch, *, init_should_fail: bool = False) -> dict[str, Any]:
+def _install_fake_wandb(
+    monkeypatch, *, init_should_fail: bool = False
+) -> dict[str, Any]:
     """Install a minimal fake wandb module and return the call-record dict."""
     record: dict[str, Any] = {"init_calls": 0, "finish_calls": 0, "log_calls": []}
 
