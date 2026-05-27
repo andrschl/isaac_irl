@@ -37,7 +37,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from cli_args import build_arg_parser
 
-from adapters import RslRlVecEnvAdapter
+from adapters import RslRlPpoAdapter, RslRlVecEnvAdapter
 from algorithms import IrlAlgorithm
 from algorithms.bc import BC
 from algorithms.ppo_with_bc import make_ppo_with_bc_cls
@@ -55,7 +55,7 @@ from reward_features.manager_based import (
 )
 from reward_features.success_bonus import add_success_bonus_term
 from reward_model import DenseFeatureRewardModel, LinearFeatureRewardModel
-from runner import IrlRunner, NoopMetricLogger, RslRlPpoAdapter, WandbMetricLogger
+from runner import IrlRunner, NoopMetricLogger, WandbMetricLogger
 from utils.runtime_context import RuntimeContext
 from storage.obs_action_storage import ObsActionBufCfg, ObsActionBuffer
 

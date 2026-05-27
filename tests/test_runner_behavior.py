@@ -9,8 +9,9 @@ import pytest
 torch = pytest.importorskip("torch")
 nn = pytest.importorskip("torch.nn")
 
+from adapters import RslRlPpoAdapter
 from interfaces import FeatureStep
-from runner import IrlRunner, IrlRunnerCfg, RslRlPpoAdapter
+from runner import IrlRunner, IrlRunnerCfg
 from runner.loggers import NoopMetricLogger
 from storage.feature_storage import FeatureBufCfg
 from utils.runtime_context import RuntimeContext
