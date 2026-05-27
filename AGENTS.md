@@ -156,3 +156,13 @@ Keep logging/formatting code separate from core learning logic.
 - Small helpers for validation / reshaping
 - `einops` for nontrivial tensor transforms
 - Explicit indexing and shape-safe operations
+
+---
+
+## Module Boundaries
+- **Scripts (`scripts/**`) are thin wiring only**: parse args → build config → build objects → call `runner.learn()` → exit. No business logic. Keep each script under ~200 lines after the wiring helpers it owns; if a script grows past that, extract config, data, or backend-specific helpers into `src/`.
+- **Config lives in `src/config/`**; YAML schema + CLI overrides + dataclasses. Pure Python — no Isaac/Omniverse imports.
+- **Data loading lives in `src/data/`**: expert feature/obs-action loaders and generic episode subsetting. Returns plain tensors / nested dicts; never touches an env.
+- **Env contract** (`step`, `get_observations`, `num_envs`, `action_dim`, `max_episode_length`) appears only in `src/runner/runner.py` and `src/adapters/rsl_rl_*.py`. The IRL algorithm and the reward model never step the env or call `get_observations`.
+- **Core protocol vocabulary**: `action_dim`. `num_actions` is rsl_rl's name and stops at the adapter boundary (`src/adapters/rsl_rl_vec_env.py` translates).
+- **Backend adapters** live under `src/adapters/` (one module per backend object: PPO, VecEnv). The core protocols in `src/interfaces.py` never import from backends.
