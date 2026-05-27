@@ -38,7 +38,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 from cli_args import build_arg_parser
 
 from adapters import RslRlVecEnvAdapter
-from algorithms import FeatureRewardLearner
+from algorithms import IrlAlgorithm
 from algorithms.bc import BC
 from algorithms.ppo_with_bc import make_ppo_with_bc_cls
 from config import ActorCriticCfg, TrainCfg, load_train_cfg
@@ -169,7 +169,7 @@ def _build_success_fn(
 
 
 def _install_expert_episodes(
-    irl_alg: FeatureRewardLearner,
+    irl_alg: IrlAlgorithm,
     expert_data_path: str,
     *,
     expected_feature_dim: int,
@@ -180,16 +180,14 @@ def _install_expert_episodes(
 ) -> None:
     """Load expert feature episodes from disk and add them to ``irl_alg``.
 
-    The reward learner's expert storage must already be initialized with
-    ``num_envs == 1`` (the runner does this during construction).
+    The expert buffer is initialized eagerly by ``IrlAlgorithm.__init__`` with
+    ``expert_num_envs`` envs; this helper appends one episode per demo.
     """
-    if irl_alg.expert_storage is None:
-        raise RuntimeError("Reward learner expert storage is not initialized.")
-    expert_ctx = getattr(irl_alg.expert_storage, "ctx", None)
-    if expert_ctx is None or int(expert_ctx.num_envs) != 1:
+    expert_ctx = irl_alg.expert_storage.ctx
+    if int(expert_ctx.num_envs) != 1:
         raise ValueError(
-            "Expert loader requires reward learner expert storage with num_envs == 1, "
-            f"got {None if expert_ctx is None else int(expert_ctx.num_envs)}."
+            "Expert loader requires IrlAlgorithm.expert_storage with num_envs == 1, "
+            f"got {int(expert_ctx.num_envs)}."
         )
 
     episodes = load_feature_episodes(
@@ -735,12 +733,16 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
                 "(learned reward model fit as diagnostic only)."
             )
 
-        irl_alg = FeatureRewardLearner(
+        irl_alg = IrlAlgorithm(
             reward=reward_model,
+            feature_spec=feature_source.spec,
+            num_envs=int(env.num_envs),
             gamma=float(train_cfg.rl_algorithm.gamma),
             cfg=train_cfg.irl,
             device=train_cfg.device,
-            feature_names=feature_names,
+            imitator_buffer_cfg=train_cfg.runner.imitator_buffer,
+            expert_buffer_cfg=train_cfg.runner.expert_buffer,
+            expert_num_envs=int(train_cfg.runner.expert_num_envs),
             expert_success_rate=expert_success_rate,
         )
         metric_logger = (

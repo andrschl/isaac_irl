@@ -8,9 +8,9 @@ import collectors
 import reward_features
 import storage
 import utils
-from algorithms import FeatureRewardLearner as FeatureRewardLearnerFromPackage
+from algorithms import IrlAlgorithm as IrlAlgorithmFromPackage
 from algorithms import IRLCfg as IRLCfgFromPackage
-from algorithms.irl import FeatureRewardLearner as FeatureRewardLearnerFromModule
+from algorithms.irl import IrlAlgorithm as IrlAlgorithmFromModule
 from algorithms.irl import IRLCfg as IRLCfgFromModule
 from reward_features import ManagerBasedFeatureCfg as FeatureCfgFromPackage
 from reward_features import ManagerBasedRewardFeatureEncoder as FeatureEncoderFromPackage
@@ -33,7 +33,7 @@ from utils.runtime_context import RuntimeContext as RuntimeContextFromModule
 
 
 def test_algorithm_import_surfaces():
-    assert FeatureRewardLearnerFromPackage is FeatureRewardLearnerFromModule
+    assert IrlAlgorithmFromPackage is IrlAlgorithmFromModule
     assert IRLCfgFromPackage is IRLCfgFromModule
 
 
@@ -63,7 +63,7 @@ def test_utils_import_surface():
 
 def test_collectors_package_is_importable_and_advertises_public_api():
     assert "RobomimicDataCollector" in collectors.__all__
-    assert set(algorithms.__all__) == {"BC", "BCCfg", "FeatureRewardLearner", "IRLCfg", "make_ppo_with_bc_cls"}
+    assert set(algorithms.__all__) == {"BC", "BCCfg", "IRLCfg", "IrlAlgorithm", "make_ppo_with_bc_cls"}
     assert set(storage.__all__) == {
         "FeatureBufCfg",
         "FeatureTrajectoryBuffer",

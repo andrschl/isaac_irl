@@ -3,7 +3,8 @@ import pytest
 torch = pytest.importorskip("torch")
 nn = pytest.importorskip("torch.nn")
 
-from algorithms.irl import FeatureRewardLearner, IRLCfg
+from algorithms.irl import IrlAlgorithm, IRLCfg
+from interfaces import FeatureSpec
 from reward_model import LinearFeatureRewardModel, RewardModelCfg
 from reward_model.base import BaseRewardModel
 from utils.runtime_context import RuntimeContext
@@ -182,8 +183,10 @@ def test_irl_eval_expected_return_matches_shared_helper():
     mask = torch.tensor([[True, True, False], [True, True, False]])
     reward_model = NonLinearFeatureReward(feature_dim=2)
 
-    irl = FeatureRewardLearner(
+    irl = IrlAlgorithm(
         reward=reward_model,
+        feature_spec=FeatureSpec(dim=2),
+        num_envs=1,
         gamma=gamma,
         cfg=IRLCfg(batch_size=2),
         device="cpu",
@@ -216,8 +219,10 @@ def test_irl_eval_expected_return_can_disable_length_normalization():
     mask = torch.tensor([[True, True, False], [True, True, False]])
     reward_model = NonLinearFeatureReward(feature_dim=2)
 
-    irl = FeatureRewardLearner(
+    irl = IrlAlgorithm(
         reward=reward_model,
+        feature_spec=FeatureSpec(dim=2),
+        num_envs=1,
         gamma=gamma,
         cfg=IRLCfg(batch_size=2, normalize_returns_by_episode_length=False),
         device="cpu",
@@ -242,10 +247,13 @@ def _make_irl_for_discount_cfg(
     gamma: float,
     discount_gamma: float | None,
     normalize_returns_by_episode_length: bool,
-) -> FeatureRewardLearner:
+) -> IrlAlgorithm:
     reward_model = LinearFeatureReward(weight=torch.tensor([1.0, 0.0], dtype=torch.float32))
-    irl = FeatureRewardLearner(
+    buffer_cfg = FeatureBufCfg(min_ep_len=1, store_dtype=torch.float32)
+    irl = IrlAlgorithm(
         reward=reward_model,
+        feature_spec=FeatureSpec(dim=2),
+        num_envs=1,
         gamma=gamma,
         cfg=IRLCfg(
             batch_size=1,
@@ -256,18 +264,14 @@ def _make_irl_for_discount_cfg(
             normalize_returns_by_episode_length=normalize_returns_by_episode_length,
         ),
         device="cpu",
+        imitator_buffer_cfg=buffer_cfg,
+        expert_buffer_cfg=buffer_cfg,
+        expert_num_envs=1,
     )
-
-    runtime_ctx = RuntimeContext(num_envs=1, feature_dim=2, device="cpu")
-    buffer_cfg = FeatureBufCfg(min_ep_len=1, store_dtype=torch.float32)
-    irl.init_expert_storage(runtime_ctx=runtime_ctx, cfg=buffer_cfg, num_envs=1)
-    irl.init_imitator_storage(runtime_ctx=runtime_ctx, cfg=buffer_cfg)
 
     expert_episode = torch.tensor([[1.0, 1.0], [1.0, 1.0]], dtype=torch.float32)
     imitator_episode = torch.tensor([[2.0, 0.0], [2.0, 0.0]], dtype=torch.float32)
     irl.add_expert_episode(expert_episode)
-    if irl.imitator_storage is None:
-        raise RuntimeError("Imitator storage initialization failed in test.")
     irl.imitator_storage.add_episode(imitator_episode)
     return irl
 
@@ -302,8 +306,10 @@ def test_irl_reward_update_uses_separate_discount_gamma_when_configured():
 
 def test_irl_rejects_invalid_discount_gamma():
     with pytest.raises(ValueError, match="discount_gamma"):
-        _ = FeatureRewardLearner(
+        _ = IrlAlgorithm(
             reward=LinearFeatureReward(weight=torch.tensor([1.0, 0.0], dtype=torch.float32)),
+            feature_spec=FeatureSpec(dim=2),
+            num_envs=1,
             gamma=0.9,
             cfg=IRLCfg(discount_gamma=0.0),
             device="cpu",
@@ -325,8 +331,10 @@ def test_irl_rejects_invalid_discount_gamma():
 )
 def test_irl_rejects_invalid_cfg_values(cfg: IRLCfg, match: str):
     with pytest.raises(ValueError, match=match):
-        _ = FeatureRewardLearner(
+        _ = IrlAlgorithm(
             reward=LinearFeatureReward(weight=torch.tensor([1.0, 0.0], dtype=torch.float32)),
+            feature_spec=FeatureSpec(dim=2),
+            num_envs=1,
             gamma=0.9,
             cfg=cfg,
             device="cpu",

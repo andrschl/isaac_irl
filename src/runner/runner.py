@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 import torch
 
-from interfaces import FeatureStep, RlAlgorithm, IrlAlgorithm
+from interfaces import FeatureStep, RlAlgorithm
 from runner.console_reporter import ConsoleReporter
 from runner.loggers import MetricLogger, NoopMetricLogger
 from storage.feature_storage import FeatureBufCfg, FeatureTrajectoryBuffer
@@ -70,7 +70,7 @@ class IrlRunner:
         env,
         *,
         rl_alg: RlAlgorithm,
-        irl_alg: IrlAlgorithm,
+        irl_alg: Any,
         feature_map: Callable[[Any], torch.Tensor],
         runner_cfg: IrlRunnerCfg,
         success_fn: Callable[[Any], torch.Tensor] | None = None,
@@ -118,13 +118,6 @@ class IrlRunner:
                 f"irl_alg.feature_names length ({len(feature_names)}) must equal "
                 f"runtime_ctx.feature_dim ({int(runtime_ctx.feature_dim)})."
             )
-
-        self.irl_alg.init_imitator_storage(runtime_ctx=runtime_ctx, cfg=self.cfg.imitator_buffer)
-        self.irl_alg.init_expert_storage(
-            runtime_ctx=runtime_ctx,
-            cfg=self.cfg.expert_buffer,
-            num_envs=int(self.cfg.expert_num_envs),
-        )
 
     def _validate_cfg(self) -> None:
         cfg = self.cfg
@@ -260,7 +253,7 @@ class IrlRunner:
             obs,
             num_steps_per_env=self._resolved_imitator_rollout_steps(),
             action_fn=self.rl_alg.actor.act,
-            feature_sink=self.irl_alg.observe,
+            feature_sink=self.irl_alg.add_imitator,
         )
         self.irl_alg.finalize_imitator()
         return obs

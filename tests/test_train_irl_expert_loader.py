@@ -207,17 +207,17 @@ def test_install_expert_episodes_with_max_num_trajectories_loads_subset(tmp_path
         payload_path,
     )
 
-    from algorithms.irl import FeatureRewardLearner, IRLCfg
+    from algorithms.irl import IrlAlgorithm, IRLCfg
+    from interfaces import FeatureSpec
     from reward_model import LinearFeatureRewardModel, RewardModelCfg
-    from storage.feature_storage import FeatureBufCfg
-    from utils.runtime_context import RuntimeContext
 
     reward_model = LinearFeatureRewardModel(RewardModelCfg(num_features=2, is_linear=True))
-    irl_alg = FeatureRewardLearner(reward=reward_model, gamma=0.99, cfg=IRLCfg(batch_size=2))
-    irl_alg.init_expert_storage(
-        runtime_ctx=RuntimeContext(num_envs=1, feature_dim=2),
-        cfg=FeatureBufCfg(min_ep_len=1),
+    irl_alg = IrlAlgorithm(
+        reward=reward_model,
+        feature_spec=FeatureSpec(dim=2),
         num_envs=1,
+        gamma=0.99,
+        cfg=IRLCfg(batch_size=2),
     )
 
     module._install_expert_episodes(

@@ -11,8 +11,6 @@ from typing import Any, Protocol
 
 import torch
 
-from storage.feature_storage import FeatureBufCfg
-from utils.runtime_context import RuntimeContext
 
 
 @dataclass(slots=True)
@@ -147,64 +145,7 @@ class RlAlgorithm(Protocol):
         """Load checkpoint payload for this algorithm."""
 
 
-class IrlAlgorithm(Protocol):
-    """Feature-based reward learner owned by the runner."""
-
-    reward_model: torch.nn.Module
-    gamma: float
-    batch_size: int
-    feature_names: list[str] | None
-    expert_success_rate: float | None
-
-    def init_expert_storage(
-        self,
-        runtime_ctx: RuntimeContext,
-        *,
-        cfg: FeatureBufCfg | None = None,
-        num_envs: int = 1,
-    ) -> None:
-        """Initialize expert feature storage."""
-
-    def init_imitator_storage(
-        self,
-        runtime_ctx: RuntimeContext,
-        *,
-        cfg: FeatureBufCfg | None = None,
-    ) -> None:
-        """Initialize imitator feature storage."""
-
-    def observe(self, step: FeatureStep) -> None:
-        """Store one vectorized feature step."""
-
-    def clear_imitator(self) -> None:
-        """Clear the current imitator feature buffer."""
-
-    def finalize_imitator(self) -> None:
-        """Flush in-progress imitator episodes."""
-
-    def can_update(self) -> bool:
-        """Whether expert and imitator buffers can produce update batches."""
-
-    def update(self) -> dict[str, float]:
-        """Run one reward update and return scalar metrics."""
-
-    def per_feature_return_mean(self, feats: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """Per-feature mean discounted returns. Shapes: feats [B, T, D], mask [B, T] -> [D]."""
-
-    def sample_expert_feature_return_mean(self, device: torch.device | str) -> torch.Tensor | None:
-        """Sample expert episodes and return per-feature mean returns [D]."""
-
-    def train_metrics(self) -> dict[str, float]:
-        """Cheap per-iteration reward metrics."""
-
-    def train_mode(self) -> None:
-        """Put reward model in training mode."""
-
-    def eval_mode(self) -> None:
-        """Put reward model in eval mode."""
-
-    def save_state(self) -> dict[str, Any]:
-        """Return checkpoint payload for this reward learner."""
-
-    def load_state(self, checkpoint: dict[str, Any], *, load_optimizer: bool = True) -> None:
-        """Load checkpoint payload for this reward learner."""
+# Note: there is no IrlAlgorithm Protocol. Only one IRL estimator exists
+# (algorithms.IrlAlgorithm); the runner reaches into it directly as a
+# concrete dependency. Reintroduce a protocol if/when a second estimator
+# lands.

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -10,7 +10,7 @@ from einops import rearrange
 
 from storage.feature_storage import FeatureBufCfg, FeatureTrajectoryBuffer
 from reward_model.base import BaseRewardModel
-from interfaces import FeatureStep
+from interfaces import FeatureSpec, FeatureStep
 from utils.runtime_context import RuntimeContext
 
 
@@ -31,7 +31,7 @@ class IRLCfg:
     normalize_returns_by_episode_length: bool = True
 
 
-class FeatureRewardLearner:
+class IrlAlgorithm:
     """Feature-buffer reward learner.
 
     Owns:
@@ -41,19 +41,24 @@ class FeatureRewardLearner:
       - the optimizer that fits the reward model to the
         ``E[expert returns] - E[imitator returns]`` objective.
 
-    The runner is responsible for rolling out the policy, extracting features,
-    feeding imitator feature steps via :meth:`observe`, populating the expert
-    buffer, and triggering :meth:`update`.
+    Buffers are built at construction; the caller is responsible for rolling
+    out the policy, feeding imitator feature steps via :meth:`add_imitator`,
+    populating the expert buffer via :meth:`add_expert_episode`, and
+    triggering :meth:`update`.
     """
 
     def __init__(
         self,
         reward: BaseRewardModel,
         *,
+        feature_spec: FeatureSpec,
+        num_envs: int,
         gamma: float,
         cfg: IRLCfg | None = None,
         device: str | torch.device = "cpu",
-        feature_names: list[str] | None = None,
+        imitator_buffer_cfg: FeatureBufCfg | None = None,
+        expert_buffer_cfg: FeatureBufCfg | None = None,
+        expert_num_envs: int = 1,
         expert_success_rate: float | None = None,
     ) -> None:
         self.device = torch.device(device)
@@ -61,9 +66,10 @@ class FeatureRewardLearner:
         self._validate_cfg(self.cfg)
 
         self.reward_model = reward.to(self.device)
-        self.expert_storage: FeatureTrajectoryBuffer | None = None
-        self.imitator_storage: FeatureTrajectoryBuffer | None = None
-        self.feature_names = list(feature_names) if feature_names is not None else None
+        self.feature_spec = feature_spec
+        self.feature_names = (
+            list(feature_spec.names) if feature_spec.names is not None else None
+        )
         self.expert_success_rate = (
             float(expert_success_rate) if expert_success_rate is not None else None
         )
@@ -77,6 +83,28 @@ class FeatureRewardLearner:
                 name="cfg.discount_gamma",
             )
         self.normalize_returns_by_episode_length = bool(self.cfg.normalize_returns_by_episode_length)
+
+        if num_envs <= 0:
+            raise ValueError(f"`num_envs` must be > 0, got {num_envs}.")
+        if expert_num_envs <= 0:
+            raise ValueError(f"`expert_num_envs` must be > 0, got {expert_num_envs}.")
+
+        imitator_ctx = RuntimeContext(
+            num_envs=int(num_envs), feature_dim=int(feature_spec.dim), device=str(self.device),
+        )
+        expert_ctx = RuntimeContext(
+            num_envs=int(expert_num_envs), feature_dim=int(feature_spec.dim), device=str(self.device),
+        )
+        self.imitator_storage = FeatureTrajectoryBuffer(
+            cfg=imitator_buffer_cfg or FeatureBufCfg(min_ep_len=1),
+            ctx=imitator_ctx,
+            gamma=self.gamma,
+        )
+        self.expert_storage = FeatureTrajectoryBuffer(
+            cfg=expert_buffer_cfg or FeatureBufCfg(min_ep_len=1, store_device="cpu"),
+            ctx=expert_ctx,
+            gamma=self.gamma,
+        )
 
         lr = 1e-4 if self.cfg.reward_learning_rate is None else float(self.cfg.reward_learning_rate)
 
@@ -120,69 +148,32 @@ class FeatureRewardLearner:
             raise ValueError(f"`{name}` must be in (0, 1], got {gamma}.")
         return float(gamma)
 
-    def init_expert_storage(
-        self,
-        runtime_ctx: RuntimeContext,
-        *,
-        cfg: FeatureBufCfg | None = None,
-        num_envs: int = 1,
-    ) -> None:
-        """Initialize expert feature storage.
-
-        Overrides ``num_envs`` on the runtime context (default 1 for a single
-        expert trajectory stream) while preserving ``feature_dim`` and device.
-        """
-        buf_cfg = cfg or FeatureBufCfg(min_ep_len=1, store_device="cpu")
-        expert_ctx = replace(runtime_ctx, num_envs=int(num_envs))
-        self.expert_storage = FeatureTrajectoryBuffer(cfg=buf_cfg, ctx=expert_ctx, gamma=self.gamma)
-
-    def init_imitator_storage(
-        self,
-        runtime_ctx: RuntimeContext,
-        *,
-        cfg: FeatureBufCfg | None = None,
-    ) -> None:
-        """Initialize imitator feature storage using the runtime context as-is."""
-        buf_cfg = cfg or FeatureBufCfg(min_ep_len=1)
-        self.imitator_storage = FeatureTrajectoryBuffer(cfg=buf_cfg, ctx=runtime_ctx, gamma=self.gamma)
-
-    def observe(self, step: FeatureStep) -> None:
+    def add_imitator(self, step: FeatureStep) -> None:
         """Append one vectorized timestep to the imitator feature buffer.
 
         Shapes:
             step.features: [N, D]
             step.dones:    [N]
         """
-        if self.imitator_storage is None:
-            raise RuntimeError("Imitator storage is not initialized. Call `init_imitator_storage(...)` first.")
         dones = rearrange(step.dones, "... -> (...)").to(torch.bool)
         self.imitator_storage.add_step(z=step.features, done=dones)
 
     def add_expert_episode(self, features: torch.Tensor) -> None:
         """Append one complete expert episode. Shape: ``features [T, D]``. Single-env buffer only."""
-        if self.expert_storage is None:
-            raise RuntimeError("Expert storage is not initialized. Call `init_expert_storage(...)` first.")
         self.expert_storage.add_episode(features)
 
     def clear_imitator(self) -> None:
-        if self.imitator_storage is not None:
-            self.imitator_storage.clear()
+        self.imitator_storage.clear()
 
     def finalize_imitator(self) -> None:
-        if self.imitator_storage is not None:
-            self.imitator_storage.finalize_in_progress_episodes()
+        self.imitator_storage.finalize_in_progress_episodes()
 
     @property
     def batch_size(self) -> int:
         return int(self.cfg.batch_size)
 
     def can_update(self) -> bool:
-        return (
-            self.expert_storage is not None
-            and self.imitator_storage is not None
-            and len(self.expert_storage) > 0
-            and len(self.imitator_storage) > 0
-        )
+        return len(self.expert_storage) > 0 and len(self.imitator_storage) > 0
 
     def per_feature_return_mean(
         self, feats: torch.Tensor, mask: torch.Tensor
@@ -210,7 +201,7 @@ class FeatureRewardLearner:
         device: torch.device | str,
     ) -> torch.Tensor | None:
         """Sample expert episodes and return per-feature mean returns [D]."""
-        if self.expert_storage is None or len(self.expert_storage) == 0:
+        if len(self.expert_storage) == 0:
             return None
         feats, mask, _ = self.expert_storage.sample_episodes(batch_size=self.batch_size, device=device)
         return self.per_feature_return_mean(feats, mask)
@@ -247,10 +238,6 @@ class FeatureRewardLearner:
         ``feature_exp_diff_norm = ||E[mu_E] - E[mu_pi]||`` where ``mu`` are the
         per-feature mean discounted returns averaged across minibatches.
         """
-        if self.expert_storage is None:
-            raise RuntimeError("Expert storage is not initialized.")
-        if self.imitator_storage is None:
-            raise RuntimeError("Imitator storage is not initialized.")
         if len(self.expert_storage) == 0:
             raise RuntimeError("Expert storage is empty.")
         if len(self.imitator_storage) == 0:

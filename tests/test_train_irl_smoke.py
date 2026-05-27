@@ -219,7 +219,7 @@ def test_train_irl_main_smoke_with_mocked_runtime(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(module, "ManagerBasedFeatureSource", _FakeFeatureSource)
     monkeypatch.setattr(module, "DenseFeatureRewardModel", _FakeRewardModel)
     monkeypatch.setattr(module, "LinearFeatureRewardModel", _FakeRewardModel)
-    monkeypatch.setattr(module, "FeatureRewardLearner", _FakeIrlAlg)
+    monkeypatch.setattr(module, "IrlAlgorithm", _FakeIrlAlg)
     monkeypatch.setattr(module, "IrlRunner", _FakeRunner)
     monkeypatch.setattr(module, "_install_expert_episodes", lambda *args, **kwargs: None)
 

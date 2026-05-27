@@ -158,8 +158,11 @@ class _DummyIrlAlg:
         self.batch_size = 4
         self.feature_names = ["step", "env_idx"][:feature_dim]
         self.expert_success_rate = 0.75
-        self.expert_storage = None
-        self.imitator_storage = None
+        # Buffers are eagerly built by the real IrlAlgorithm; the stub
+        # mirrors that with sentinel objects so anything that probes them
+        # sees a non-None value.
+        self.expert_storage = object()
+        self.imitator_storage = object()
         self.has_data = has_data
         self.feature_steps: list[FeatureStep] = []
         self.clear_calls = 0
@@ -167,15 +170,7 @@ class _DummyIrlAlg:
         self.update_calls = 0
         self.loaded_state: dict[str, Any] | None = None
 
-    def init_expert_storage(self, runtime_ctx: RuntimeContext, *, cfg: FeatureBufCfg | None = None, num_envs: int = 1) -> None:
-        del runtime_ctx, cfg, num_envs
-        self.expert_storage = object()
-
-    def init_imitator_storage(self, runtime_ctx: RuntimeContext, *, cfg: FeatureBufCfg | None = None) -> None:
-        del runtime_ctx, cfg
-        self.imitator_storage = object()
-
-    def observe(self, step: FeatureStep) -> None:
+    def add_imitator(self, step: FeatureStep) -> None:
         self.feature_steps.append(step)
 
     def clear_imitator(self) -> None:
