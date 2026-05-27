@@ -7,24 +7,12 @@ Lives at the top level of `src/` so it can be imported by both `runner.*` and
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, Protocol
 
 import torch
 
 from storage.feature_storage import FeatureBufCfg
 from utils.runtime_context import RuntimeContext
-
-
-class PolicyMode(str, Enum):
-    """Pure (side-effect-free) policy action modes.
-
-    Side-effectful training collection goes through ``RlAlgorithm.collect_action``
-    instead and is not represented here.
-    """
-
-    TRAIN = "train"          # stochastic sampling
-    INFERENCE = "inference"  # deterministic
 
 
 @dataclass(slots=True)
@@ -116,23 +104,54 @@ class FeatureSource(Protocol):
     def features(self, ctx: StepContext) -> torch.Tensor: ...
 
 
+class Actor(Protocol):
+    """Action-producing facade over an RL algorithm's policy.
+
+    `act` samples stochastically (training behavior). `act_inference` returns
+    the deterministic mean. The split exists so callers select the mode by
+    method, not by an enum — Backends only need to expose what they support.
+    """
+
+    def act(self, obs: Any) -> torch.Tensor: ...
+    def act_inference(self, obs: Any) -> torch.Tensor: ...
+
+
+class VecEnv(Protocol):
+    """Vectorized env contract mirrored from rsl_rl's `VecEnv`.
+
+    Adapters that bridge to rsl_rl-shaped envs translate `num_actions` ->
+    `action_dim` so the core uses one consistent name.
+    """
+
+    num_envs: int
+    action_dim: int
+    device: torch.device | str
+    max_episode_length: int | torch.Tensor
+
+    def get_observations(self) -> Any: ...
+
+    def step(
+        self, actions: torch.Tensor
+    ) -> tuple[Any, torch.Tensor, torch.Tensor, dict]: ...
+
+
 class RlAlgorithm(Protocol):
     """RL algorithm adapter owned by the runner.
 
-    The action API is split:
-      - ``collect_action`` runs during training collection. Side effects on the
-        algorithm's internal storage (e.g. PPO's pending transition) are allowed.
-      - ``act`` is the pure path used for imitator rollouts, validation, and
-        final-video rollouts. It MUST NOT write to internal storage.
+    `actor` exposes the side-effect-free policy used by validation, imitator
+    rollouts, and final-video rollouts. Side-effectful training collection
+    goes through `collect_action` / `observe` / `end_rollout` — those will
+    move into the adapter in a follow-up commit; for now they live alongside.
     """
 
     collects_rollouts: bool
 
+    @property
+    def actor(self) -> Actor:
+        """Side-effect-free policy facade."""
+
     def collect_action(self, obs: Any) -> torch.Tensor:
         """Return actions [N, A] during training collection."""
-
-    def act(self, obs: Any, *, mode: PolicyMode) -> torch.Tensor:
-        """Return actions [N, A] without side effects."""
 
     def observe(self, transition: EnvTransition) -> None:
         """Store/process one environment transition."""

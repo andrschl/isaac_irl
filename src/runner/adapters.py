@@ -5,7 +5,24 @@ from typing import Any
 import torch
 
 from algorithms.bc import BC
-from interfaces import EnvTransition, PolicyMode
+from interfaces import EnvTransition
+
+
+class _RslRlActor:
+    """Adapt an rsl_rl MLPModel to the core ``Actor`` protocol.
+
+    `act` samples stochastically via the model's distribution head;
+    `act_inference` returns the deterministic mean.
+    """
+
+    def __init__(self, mlp_actor: Any) -> None:
+        self._actor = mlp_actor
+
+    def act(self, obs: Any) -> torch.Tensor:
+        return self._actor(obs, stochastic_output=True)
+
+    def act_inference(self, obs: Any) -> torch.Tensor:
+        return self._actor(obs)
 
 
 class RslRlPpoAdapter:
@@ -15,6 +32,12 @@ class RslRlPpoAdapter:
         self._rl_alg = rl_alg
         self._bc_alg = bc_alg
         self._last_bc_val_loss = float("nan")
+        mlp_actor = getattr(rl_alg, "actor", None)
+        if mlp_actor is None:
+            raise AttributeError(
+                "RslRlPpoAdapter requires `rl_alg.actor` (rsl_rl >= 4.0 MLPModel contract)."
+            )
+        self._actor_facade = _RslRlActor(mlp_actor)
 
     @property
     def _alpha(self) -> float:
@@ -28,18 +51,13 @@ class RslRlPpoAdapter:
     def collects_rollouts(self) -> bool:
         return not self._is_bc_only
 
+    @property
+    def actor(self) -> _RslRlActor:
+        """Side-effect-free policy facade for validation / imitator rollouts."""
+        return self._actor_facade
+
     def collect_action(self, obs: Any) -> torch.Tensor:
         return self._rl_alg.act(obs)
-
-    def act(self, obs: Any, *, mode: PolicyMode) -> torch.Tensor:
-        actor = getattr(self._rl_alg, "actor", None)
-        if actor is None:
-            raise AttributeError("RslRlPpoAdapter requires `rl_alg.actor` for pure policy actions.")
-        if mode is PolicyMode.TRAIN:
-            return actor(obs, stochastic_output=True)
-        if mode is PolicyMode.INFERENCE:
-            return actor(obs)
-        raise ValueError(f"Unsupported policy mode: {mode!r}.")
 
     def observe(self, transition: EnvTransition) -> None:
         self._rl_alg.process_env_step(

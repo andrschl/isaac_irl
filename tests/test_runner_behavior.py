@@ -9,7 +9,7 @@ import pytest
 torch = pytest.importorskip("torch")
 nn = pytest.importorskip("torch.nn")
 
-from interfaces import EnvTransition, FeatureStep, PolicyMode
+from interfaces import EnvTransition, FeatureStep
 from runner import IrlRunner, IrlRunnerCfg, RslRlPpoAdapter
 from runner.loggers import NoopMetricLogger
 from storage.feature_storage import FeatureBufCfg
@@ -83,6 +83,27 @@ class _DummyReward(nn.Module):
         return features @ self.weight
 
 
+class _StubActor:
+    """Minimal Actor stub used by _DummyRlAlg.
+
+    ``act`` records "stochastic"; ``act_inference`` records "inference". The
+    returned tensor's constant value differs per mode so tests can assert on
+    which path was hit.
+    """
+
+    def __init__(self, action_dim: int) -> None:
+        self.action_dim = action_dim
+        self.calls: list[str] = []
+
+    def act(self, obs):
+        self.calls.append("stochastic")
+        return torch.full((_obs_batch_size(obs), self.action_dim), 1.0, dtype=torch.float32)
+
+    def act_inference(self, obs):
+        self.calls.append("inference")
+        return torch.full((_obs_batch_size(obs), self.action_dim), 2.0, dtype=torch.float32)
+
+
 class _DummyRlAlg:
     """Minimal RlAlgorithm stub for runner tests."""
 
@@ -90,7 +111,7 @@ class _DummyRlAlg:
         self.action_dim = action_dim
         self.collects_rollouts = collects
         self.collect_action_calls = 0
-        self.act_modes: list[PolicyMode] = []
+        self.actor = _StubActor(action_dim)
         self.transitions: list[EnvTransition] = []
         self.end_rollout_calls = 0
         self.update_calls = 0
@@ -98,14 +119,14 @@ class _DummyRlAlg:
         self.eval_mode_calls = 0
         self.loaded_state: dict[str, Any] | None = None
 
+    @property
+    def act_modes(self) -> list[str]:
+        """Test-only alias for the actor's call log."""
+        return self.actor.calls
+
     def collect_action(self, obs: torch.Tensor | dict[str, Any]) -> torch.Tensor:
         self.collect_action_calls += 1
         return torch.zeros((_obs_batch_size(obs), self.action_dim), dtype=torch.float32)
-
-    def act(self, obs: torch.Tensor | dict[str, Any], *, mode: PolicyMode) -> torch.Tensor:
-        self.act_modes.append(mode)
-        value = {PolicyMode.TRAIN: 1.0, PolicyMode.INFERENCE: 2.0}[mode]
-        return torch.full((_obs_batch_size(obs), self.action_dim), value, dtype=torch.float32)
 
     def observe(self, transition: EnvTransition) -> None:
         self.transitions.append(transition)
@@ -265,7 +286,7 @@ def test_runner_separates_rl_transitions_from_reward_feature_steps():
     runner.learn(num_learning_iterations=1, init_at_random_ep_len=False)
 
     assert rl_alg.collect_action_calls == 2
-    assert rl_alg.act_modes == [PolicyMode.TRAIN] * 3
+    assert rl_alg.act_modes == ["stochastic"] * 3
     assert len(rl_alg.transitions) == 2
     assert all(not hasattr(transition, "features") for transition in rl_alg.transitions)
     assert rl_alg.end_rollout_calls == 1
@@ -335,7 +356,7 @@ def test_validation_uses_scratch_features_and_does_not_mutate_training_buffers()
     assert irl_alg.update_calls == 0
     # Validation must never hit the side-effectful collection path.
     assert rl_alg.collect_action_calls == 0
-    assert rl_alg.act_modes == [PolicyMode.TRAIN, PolicyMode.TRAIN, PolicyMode.INFERENCE, PolicyMode.INFERENCE]
+    assert rl_alg.act_modes == ["stochastic", "stochastic", "inference", "inference"]
     emitted = {key for _, payload in logger.calls for key in payload}
     assert "ValidationFeatures/expert/step" in emitted
     assert "ValidationFeatures/stochastic/imitator/step" in emitted
@@ -455,8 +476,8 @@ def test_rsl_rl_adapter_collect_vs_pure_action_paths():
     obs = torch.zeros(2, 4)
 
     _ = adapter.collect_action(obs)
-    _ = adapter.act(obs, mode=PolicyMode.TRAIN)
-    _ = adapter.act(obs, mode=PolicyMode.INFERENCE)
+    _ = adapter.actor.act(obs)
+    _ = adapter.actor.act_inference(obs)
     transition = EnvTransition(
         obs=obs,
         actions=torch.zeros(2, 3),
@@ -504,18 +525,18 @@ def test_rsl_rl_adapter_checkpoint_delegates_to_wrapped_algorithm():
     assert ppo.loaded is state
 
 
-def test_adapter_act_train_does_not_invoke_ppo_collect_path():
-    """`act(PolicyMode.TRAIN)` must hit the pure actor path, not PPO.act.
+def test_adapter_actor_act_does_not_invoke_ppo_collect_path():
+    """`adapter.actor.act` must hit the pure actor path, not `ppo.act`.
 
     Regression guard: rsl_rl PPO.act populates a pending Transition object on
     the wrapped algorithm. Calling it during imitator/validation rollouts would
-    silently affect PPO storage state. The adapter must route TRAIN through
-    `actor(obs, stochastic_output=True)` instead.
+    silently affect PPO storage state. The adapter must route stochastic
+    actions through `actor(obs, stochastic_output=True)` instead.
     """
     ppo = _DummyPpo()
     adapter = RslRlPpoAdapter(ppo)
 
-    adapter.act(torch.zeros(2, 4), mode=PolicyMode.TRAIN)
+    adapter.actor.act(torch.zeros(2, 4))
 
     assert ppo.collect_act_calls == 0
     assert ppo.actor.call_modes == [True]

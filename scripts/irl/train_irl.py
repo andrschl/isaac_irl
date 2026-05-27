@@ -37,6 +37,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from cli_args import build_arg_parser
 
+from adapters import RslRlVecEnvAdapter
 from algorithms import FeatureRewardLearner
 from algorithms.bc import BC
 from algorithms.ppo_with_bc import make_ppo_with_bc_cls
@@ -554,13 +555,16 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
         env = runtime_deps.RslRlVecEnvWrapper(env)
         if hasattr(env, "seed"):
             env.seed(int(train_cfg.seed))
+        # Wrap once so the rest of the script sees `env.action_dim`; the
+        # adapter proxies every other attribute to the rsl_rl VecEnv.
+        env = RslRlVecEnvAdapter(env)
 
         obs, obs_groups = _get_initial_obs(env, runtime_deps.resolve_obs_groups)
         obs = obs.to(train_cfg.device)
         actor, critic = _build_actor_critic(
             obs=obs,
             obs_groups=obs_groups,
-            action_dim=int(env.num_actions),
+            action_dim=int(env.action_dim),
             actor_critic_cfg=train_cfg.actor_critic,
             device=train_cfg.device,
             MLPModel=runtime_deps.MLPModel,
@@ -644,7 +648,7 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
             int(env.num_envs),
             int(train_cfg.runner.steps_per_env_per_cycle),
             obs,
-            [int(env.num_actions)],
+            [int(env.action_dim)],
             train_cfg.device,
         )
         ppo_kwargs = asdict(train_cfg.rl_algorithm)

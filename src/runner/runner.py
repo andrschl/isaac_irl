@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 import torch
 
-from interfaces import EnvTransition, FeatureStep, PolicyMode, RlAlgorithm, IrlAlgorithm
+from interfaces import EnvTransition, FeatureStep, RlAlgorithm, IrlAlgorithm
 from runner.console_reporter import ConsoleReporter
 from runner.loggers import MetricLogger, NoopMetricLogger
 from storage.feature_storage import FeatureBufCfg, FeatureTrajectoryBuffer
@@ -295,7 +295,7 @@ class IrlRunner:
         obs = self._rollout(
             obs,
             num_steps_per_env=self._resolved_imitator_rollout_steps(),
-            action_fn=lambda o: self.rl_alg.act(o, mode=PolicyMode.TRAIN),
+            action_fn=self.rl_alg.actor.act,
             observe_rl=False,
             feature_sink=self.irl_alg.observe,
         )
@@ -380,7 +380,7 @@ class IrlRunner:
         self,
         obs: Any,
         *,
-        mode: PolicyMode,
+        action_fn: Callable[[Any], torch.Tensor],
         num_steps_per_env: int,
     ) -> tuple[Any, torch.Tensor | None, float | None]:
         """Roll out the policy (no training) and return (obs, per-feature expectations, success_rate)."""
@@ -397,7 +397,7 @@ class IrlRunner:
         obs = self._rollout(
             obs,
             num_steps_per_env=num_steps_per_env,
-            action_fn=lambda o: self.rl_alg.act(o, mode=mode),
+            action_fn=action_fn,
             observe_rl=False,
             feature_sink=_scratch_sink,
             on_step=on_step,
@@ -421,15 +421,16 @@ class IrlRunner:
             expert_mean, feature_names = self._log_validation_expert(iteration)
             if expert_mean is None:
                 return obs
-            for mode_name, mode in (
-                ("stochastic", PolicyMode.TRAIN),
-                ("inference", PolicyMode.INFERENCE),
+            actor = self.rl_alg.actor
+            for mode_name, action_fn in (
+                ("stochastic", actor.act),
+                ("inference", actor.act_inference),
             ):
                 obs = self._log_validation_mode(
                     obs,
                     iteration=iteration,
                     mode_name=mode_name,
-                    mode=mode,
+                    action_fn=action_fn,
                     num_steps_per_env=num_steps_per_env,
                     expert_mean=expert_mean,
                     feature_names=feature_names,
@@ -472,13 +473,13 @@ class IrlRunner:
         *,
         iteration: int,
         mode_name: str,
-        mode: PolicyMode,
+        action_fn: Callable[[Any], torch.Tensor],
         num_steps_per_env: int,
         expert_mean: torch.Tensor,
         feature_names: list[str],
     ) -> Any:
         obs, imitator_mean, success_rate = self._imitator_feature_expectations(
-            obs, mode=mode, num_steps_per_env=num_steps_per_env,
+            obs, action_fn=action_fn, num_steps_per_env=num_steps_per_env,
         )
 
         summary: dict[str, float] = {}
@@ -534,23 +535,33 @@ class IrlRunner:
         *,
         recorder: Any,
         video_length: int,
-        modes: tuple[tuple[str, PolicyMode], ...] = (
-            ("inference", PolicyMode.INFERENCE),
-            ("stochastic", PolicyMode.TRAIN),
-        ),
+        mode_names: tuple[str, ...] = ("inference", "stochastic"),
     ) -> None:
-        """Drive the ``RecordVideo``-wrapped env for one clip per policy mode."""
+        """Drive the ``RecordVideo``-wrapped env for one clip per policy mode.
+
+        ``mode_names`` selects which Actor methods to use: "inference" -> deterministic,
+        "stochastic" -> sampled. Any other name raises.
+        """
         if video_length <= 0:
             return
+        actor = self.rl_alg.actor
+        method_for_mode = {
+            "inference": actor.act_inference,
+            "stochastic": actor.act,
+        }
         self.eval_mode()
         try:
             obs = self._obs_to_device(self._get_obs())
-            for mode_name, mode in modes:
+            for mode_name in mode_names:
+                if mode_name not in method_for_mode:
+                    raise ValueError(
+                        f"Unknown mode_name {mode_name!r}; expected one of {sorted(method_for_mode)}."
+                    )
                 recorder.start_recording(f"final_{mode_name}")
                 obs = self._rollout(
                     obs,
                     num_steps_per_env=video_length,
-                    action_fn=lambda o, m=mode: self.rl_alg.act(o, mode=m),
+                    action_fn=method_for_mode[mode_name],
                     observe_rl=False,
                 )
                 if getattr(recorder, "recording", False):
