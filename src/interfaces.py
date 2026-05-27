@@ -16,29 +16,6 @@ from utils.runtime_context import RuntimeContext
 
 
 @dataclass(slots=True)
-class EnvTransition:
-    """One vectorized env transition consumed by an RL algorithm.
-
-    Shapes:
-        actions:     [N, A]
-        env_rewards: [N]
-        rewards:     [N]
-        dones:       [N]
-
-    ``rewards`` is the reward the algorithm should learn from. ``env_rewards``
-    is the raw environment reward kept for diagnostics/debugging.
-    """
-
-    obs: Any
-    actions: torch.Tensor
-    env_rewards: torch.Tensor
-    rewards: torch.Tensor
-    dones: torch.Tensor
-    next_obs: Any
-    extras: dict[str, Any]
-
-
-@dataclass(slots=True)
 class FeatureStep:
     """One vectorized feature step consumed by a reward learner.
 
@@ -139,28 +116,17 @@ class RlAlgorithm(Protocol):
     """RL algorithm adapter owned by the runner.
 
     `actor` exposes the side-effect-free policy used by validation, imitator
-    rollouts, and final-video rollouts. Side-effectful training collection
-    goes through `collect_action` / `observe` / `end_rollout` — those will
-    move into the adapter in a follow-up commit; for now they live alongside.
+    rollouts, and final-video rollouts. `update()` is responsible for any
+    env collection the algorithm needs — the runner never steps the env for
+    RL collection.
     """
-
-    collects_rollouts: bool
 
     @property
     def actor(self) -> Actor:
         """Side-effect-free policy facade."""
 
-    def collect_action(self, obs: Any) -> torch.Tensor:
-        """Return actions [N, A] during training collection."""
-
-    def observe(self, transition: EnvTransition) -> None:
-        """Store/process one environment transition."""
-
-    def end_rollout(self, last_obs: Any) -> None:
-        """Finalize a just-collected rollout. No-op for off-policy algorithms."""
-
     def update(self) -> dict[str, float]:
-        """Run one algorithm update and return scalar metrics."""
+        """Collect (if needed) and run one algorithm update; return scalar metrics."""
 
     def train_metrics(self) -> dict[str, float]:
         """Cheap per-iteration metrics."""

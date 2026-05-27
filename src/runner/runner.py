@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 import torch
 
-from interfaces import EnvTransition, FeatureStep, RlAlgorithm, IrlAlgorithm
+from interfaces import FeatureStep, RlAlgorithm, IrlAlgorithm
 from runner.console_reporter import ConsoleReporter
 from runner.loggers import MetricLogger, NoopMetricLogger
 from storage.feature_storage import FeatureBufCfg, FeatureTrajectoryBuffer
@@ -22,6 +22,8 @@ class IrlRunnerCfg:
 
     rl_updates_per_cycle: int = 1
     reward_updates_per_cycle: int = 1
+    # Read by the training script when constructing the RL adapter; the
+    # runner itself no longer routes the reward signal.
     use_learned_reward: bool = True
 
     imitator_buffer: FeatureBufCfg = field(default_factory=FeatureBufCfg)
@@ -49,7 +51,19 @@ StepCallback = Callable[[], None]
 
 
 class IrlRunner:
-    """Algorithm-agnostic runner for policy + feature-buffer reward learning."""
+    """Algorithm-agnostic runner for policy + feature-buffer reward learning.
+
+    The runner coordinates three things:
+      1. The RL algorithm's own ``update()`` (which internally drives env
+         collection — the runner does not step the env for RL collection).
+      2. A dedicated imitator rollout that refreshes the reward learner's
+         imitator buffer with [N, D] features from the current policy.
+      3. The reward learner's update.
+
+    The env contract (``step`` / ``get_observations``) appears in this file
+    only for the imitator and validation rollouts. The RL collection path
+    lives entirely inside ``rl_alg.update()``.
+    """
 
     def __init__(
         self,
@@ -133,7 +147,7 @@ class IrlRunner:
             raise ValueError(f"`validation_interval` must be >= 0, got {cfg.validation_interval}.")
         if cfg.validation_steps_per_env is not None and int(cfg.validation_steps_per_env) < 0:
             raise ValueError(
-                f"`validation_steps_per_env` must be >= 0 or None, got {cfg.validation_steps_per_env}."
+                f"`validation_steps_per_env` must be >= 0 or null, got {cfg.validation_steps_per_env}."
             )
 
     def _get_obs(self):
@@ -173,75 +187,35 @@ class IrlRunner:
             )
         return features
 
-    def _rl_rewards(self, env_rewards: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
-        if not self.cfg.use_learned_reward:
-            return env_rewards
-        with torch.no_grad():
-            learned_rewards = self.irl_alg.reward_model(features)
-        learned_rewards = self._ensure_per_env_rewards(learned_rewards, num_envs=int(env_rewards.shape[0]))
-        return learned_rewards.detach().to(device=env_rewards.device, dtype=env_rewards.dtype)
-
-    @staticmethod
-    def _ensure_per_env_rewards(rewards: torch.Tensor, *, num_envs: int) -> torch.Tensor:
-        if not isinstance(rewards, torch.Tensor):
-            rewards = torch.as_tensor(rewards)
-        if rewards.ndim == 2 and rewards.shape[-1] == 1:
-            rewards = rewards.squeeze(-1)
-        if rewards.ndim != 1 or rewards.shape[0] != num_envs:
-            raise ValueError(
-                f"Expected learned reward shape [{num_envs}], got {tuple(rewards.shape)}. "
-                "Reward model must produce one scalar reward per env."
-            )
-        return rewards
-
     def _rollout(
         self,
         obs: Any,
         *,
         num_steps_per_env: int,
         action_fn: Callable[[Any], torch.Tensor],
-        observe_rl: bool,
         feature_sink: FeatureSink | None = None,
         on_step: StepCallback | None = None,
     ) -> Any:
         """Roll out the environment for a fixed vectorized horizon.
 
+        Used for imitator collection, validation, and final-video rollouts —
+        all pure (no PPO storage side effects). The RL collection rollout is
+        owned by ``rl_alg.update()`` and never passes through here.
+
         Shapes:
             actions:      [N, A]
-            rewards:      [N]
             dones:        [N]
             features:     [N, D] when extracted
         """
         with torch.inference_mode():
             for _ in range(num_steps_per_env):
-                obs_before = obs
-                actions = action_fn(obs_before)
-                obs_next, env_rewards, dones, extras = self.env.step(actions.to(self.env.device))
+                actions = action_fn(obs)
+                obs_next, _, dones, _ = self.env.step(actions.to(self.env.device))
                 obs_next = self._obs_to_device(obs_next)
-                env_rewards = env_rewards.to(self.device)
                 done_vec = self._as_done_vector(dones)
 
-                features: torch.Tensor | None = None
-                if (observe_rl and self.cfg.use_learned_reward) or feature_sink is not None:
-                    features = self._step_features()
-
-                if observe_rl:
-                    rewards = env_rewards if features is None else self._rl_rewards(env_rewards, features)
-                    self.rl_alg.observe(
-                        EnvTransition(
-                            obs=obs_before,
-                            actions=actions.to(self.device),
-                            env_rewards=env_rewards,
-                            rewards=rewards,
-                            dones=done_vec,
-                            next_obs=obs_next,
-                            extras=extras,
-                        )
-                    )
-
                 if feature_sink is not None:
-                    if features is None:
-                        features = self._step_features()
+                    features = self._step_features()
                     feature_sink(FeatureStep(features=features, dones=done_vec))
 
                 if on_step is not None:
@@ -260,16 +234,6 @@ class IrlRunner:
         if tuple(done_vec.shape) != expected_shape:
             raise ValueError(f"Expected dones shape {expected_shape}, got {tuple(dones.shape)}.")
         return done_vec
-
-    def _collect_rl_rollout(self, obs: Any) -> Any:
-        obs = self._rollout(
-            obs,
-            num_steps_per_env=int(self.cfg.steps_per_env_per_cycle),
-            action_fn=self.rl_alg.collect_action,
-            observe_rl=True,
-        )
-        self.rl_alg.end_rollout(obs)
-        return obs
 
     def _resolved_imitator_rollout_steps(self) -> int:
         if self.cfg.imitator_rollout_steps_per_env is not None:
@@ -296,21 +260,17 @@ class IrlRunner:
             obs,
             num_steps_per_env=self._resolved_imitator_rollout_steps(),
             action_fn=self.rl_alg.actor.act,
-            observe_rl=False,
             feature_sink=self.irl_alg.observe,
         )
         self.irl_alg.finalize_imitator()
         return obs
 
-    def _run_rl_updates(self, obs: Any) -> Any:
+    def _run_rl_updates(self) -> None:
         metrics: dict[str, float] = {}
-        if self.rl_alg.collects_rollouts:
-            obs = self._collect_rl_rollout(obs)
         for _ in range(int(self.cfg.rl_updates_per_cycle)):
             metrics.update(self.rl_alg.update())
         if metrics:
             self._last_rl_metrics.update(metrics)
-        return obs
 
     def _run_reward_updates(self) -> None:
         if not self.irl_alg.can_update():
@@ -398,7 +358,6 @@ class IrlRunner:
             obs,
             num_steps_per_env=num_steps_per_env,
             action_fn=action_fn,
-            observe_rl=False,
             feature_sink=_scratch_sink,
             on_step=on_step,
         )
@@ -562,7 +521,6 @@ class IrlRunner:
                     obs,
                     num_steps_per_env=video_length,
                     action_fn=method_for_mode[mode_name],
-                    observe_rl=False,
                 )
                 if getattr(recorder, "recording", False):
                     recorder.stop_recording()
@@ -585,13 +543,13 @@ class IrlRunner:
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
             )
 
-        obs = self._obs_to_device(self._get_obs())
         self.train_mode()
 
         start_iter = self.current_learning_iteration
         self.console_reporter.start(int(num_learning_iterations))
         for it in range(start_iter, start_iter + int(num_learning_iterations)):
-            obs = self._run_rl_updates(obs)
+            self._run_rl_updates()
+            obs = self._obs_to_device(self._get_obs())
             obs = self._collect_imitator_trajectories(obs)
             self._run_reward_updates()
 

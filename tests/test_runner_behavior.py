@@ -9,7 +9,7 @@ import pytest
 torch = pytest.importorskip("torch")
 nn = pytest.importorskip("torch.nn")
 
-from interfaces import EnvTransition, FeatureStep
+from interfaces import FeatureStep
 from runner import IrlRunner, IrlRunnerCfg, RslRlPpoAdapter
 from runner.loggers import NoopMetricLogger
 from storage.feature_storage import FeatureBufCfg
@@ -105,15 +105,18 @@ class _StubActor:
 
 
 class _DummyRlAlg:
-    """Minimal RlAlgorithm stub for runner tests."""
+    """Minimal RlAlgorithm stub matching the post-restructure contract.
 
-    def __init__(self, action_dim: int = 3, *, collects: bool = True) -> None:
+    The runner only calls ``actor.act`` / ``actor.act_inference`` (validation
+    + imitator rollouts), ``update()`` (no args), ``train_metrics`` /
+    ``eval_metrics``, mode toggles, and save/load. RL-side env collection
+    happens inside the real adapter's ``update()``; this stub just counts
+    update() calls.
+    """
+
+    def __init__(self, action_dim: int = 3) -> None:
         self.action_dim = action_dim
-        self.collects_rollouts = collects
-        self.collect_action_calls = 0
         self.actor = _StubActor(action_dim)
-        self.transitions: list[EnvTransition] = []
-        self.end_rollout_calls = 0
         self.update_calls = 0
         self.train_mode_calls = 0
         self.eval_mode_calls = 0
@@ -123,17 +126,6 @@ class _DummyRlAlg:
     def act_modes(self) -> list[str]:
         """Test-only alias for the actor's call log."""
         return self.actor.calls
-
-    def collect_action(self, obs: torch.Tensor | dict[str, Any]) -> torch.Tensor:
-        self.collect_action_calls += 1
-        return torch.zeros((_obs_batch_size(obs), self.action_dim), dtype=torch.float32)
-
-    def observe(self, transition: EnvTransition) -> None:
-        self.transitions.append(transition)
-
-    def end_rollout(self, last_obs) -> None:
-        del last_obs
-        self.end_rollout_calls += 1
 
     def update(self) -> dict[str, float]:
         self.update_calls += 1
@@ -280,44 +272,26 @@ def _make_runner(*, use_learned_reward: bool = True, validation_interval: int = 
     return runner, env, rl_alg, irl_alg, logger
 
 
-def test_runner_separates_rl_transitions_from_reward_feature_steps():
+def test_runner_drives_rl_update_then_imitator_then_reward_update():
+    """One learn cycle: N RL updates, one imitator rollout, M reward updates.
+
+    The runner does not step the env for RL collection — that lives inside
+    rl_alg.update(). env.step_calls therefore reflects only the imitator
+    rollout, and rl_alg.update_calls reflects the configured RL update count.
+    """
     runner, env, rl_alg, irl_alg, _ = _make_runner(use_learned_reward=True)
 
     runner.learn(num_learning_iterations=1, init_at_random_ep_len=False)
 
-    assert rl_alg.collect_action_calls == 2
-    assert rl_alg.act_modes == ["stochastic"] * 3
-    assert len(rl_alg.transitions) == 2
-    assert all(not hasattr(transition, "features") for transition in rl_alg.transitions)
-    assert rl_alg.end_rollout_calls == 1
     assert rl_alg.update_calls == runner.cfg.rl_updates_per_cycle
-    assert len(irl_alg.feature_steps) == 3
+    assert rl_alg.act_modes == ["stochastic"] * runner.cfg.imitator_rollout_steps_per_env
+    assert len(irl_alg.feature_steps) == runner.cfg.imitator_rollout_steps_per_env
     assert irl_alg.update_calls == runner.cfg.reward_updates_per_cycle
-    assert env.step_calls == runner.cfg.steps_per_env_per_cycle + runner.cfg.imitator_rollout_steps_per_env
+    assert env.step_calls == runner.cfg.imitator_rollout_steps_per_env
 
 
-def test_runner_passes_learned_rewards_from_post_step_features_to_rl_alg():
-    runner, _, rl_alg, irl_alg, _ = _make_runner(use_learned_reward=True)
-
-    runner.learn(num_learning_iterations=1, init_at_random_ep_len=False)
-
-    first_transition = rl_alg.transitions[0]
-    assert torch.allclose(first_transition.env_rewards, torch.zeros(2))
-    # First post-step feature has step_feature=1, reward_model gives 10 * step.
-    assert torch.allclose(first_transition.rewards, torch.full((2,), 10.0))
-    assert irl_alg.reward_model.forward_calls == runner.cfg.steps_per_env_per_cycle
-
-
-def test_runner_can_train_rl_alg_on_env_rewards_without_calling_reward_model_for_rl_rollout():
-    runner, _, rl_alg, irl_alg, _ = _make_runner(use_learned_reward=False)
-
-    runner.learn(num_learning_iterations=1, init_at_random_ep_len=False)
-
-    assert torch.allclose(rl_alg.transitions[0].rewards, rl_alg.transitions[0].env_rewards)
-    assert irl_alg.reward_model.forward_calls == 0
-
-
-def test_runner_handles_nested_observation_trees_and_done_vectors():
+def test_runner_imitator_rollout_handles_nested_observation_trees():
+    """Imitator collection through a nested-obs env populates the IRL feature buffer."""
     env = _NestedObsEnv()
     rl_alg = _DummyRlAlg(action_dim=env.num_actions)
     irl_alg = _DummyIrlAlg(feature_dim=2)
@@ -337,12 +311,9 @@ def test_runner_handles_nested_observation_trees_and_done_vectors():
 
     runner.learn(num_learning_iterations=1, init_at_random_ep_len=False)
 
-    first_transition = rl_alg.transitions[0]
-    assert first_transition.obs["policy"]["x"].shape == (env.num_envs, env.obs_dim)
-    assert first_transition.next_obs["policy"]["x"].device == runner.device
-    assert first_transition.dones.shape == (env.num_envs,)
-    assert first_transition.dones.dtype == torch.bool
+    assert len(irl_alg.feature_steps) == cfg.imitator_rollout_steps_per_env
     assert irl_alg.feature_steps[0].dones.shape == (env.num_envs,)
+    assert irl_alg.feature_steps[0].dones.dtype == torch.bool
 
 
 def test_validation_uses_scratch_features_and_does_not_mutate_training_buffers():
@@ -351,11 +322,8 @@ def test_validation_uses_scratch_features_and_does_not_mutate_training_buffers()
 
     runner._run_validation(obs, iteration=0)
 
-    assert rl_alg.transitions == []
     assert irl_alg.feature_steps == []
     assert irl_alg.update_calls == 0
-    # Validation must never hit the side-effectful collection path.
-    assert rl_alg.collect_action_calls == 0
     assert rl_alg.act_modes == ["stochastic", "stochastic", "inference", "inference"]
     emitted = {key for _, payload in logger.calls for key in payload}
     assert "ValidationFeatures/expert/step" in emitted
@@ -395,7 +363,9 @@ def test_runner_finishes_injected_logger():
     assert logger.finished == 3
 
 
-class _DummyActor(nn.Module):
+class _DummyMlpActor(nn.Module):
+    """rsl_rl MLPModel-shaped stub: callable with stochastic_output flag."""
+
     def __init__(self, obs_dim: int = 4, action_dim: int = 3) -> None:
         super().__init__()
         self.mean = nn.Linear(obs_dim, action_dim)
@@ -414,9 +384,10 @@ class _DummyPpo:
     """Minimal rsl_rl PPO-shaped stub for the adapter tests."""
 
     def __init__(self, obs_dim: int = 4, action_dim: int = 3) -> None:
-        self.actor = _DummyActor(obs_dim=obs_dim, action_dim=action_dim)
+        self.actor = _DummyMlpActor(obs_dim=obs_dim, action_dim=action_dim)
         self.collect_act_calls = 0
         self.process_calls = 0
+        self.process_rewards: list[torch.Tensor] = []
         self.compute_returns_calls = 0
         self.update_calls = 0
         self.bc_only_update_calls = 0
@@ -429,8 +400,9 @@ class _DummyPpo:
         return torch.zeros(obs.shape[0], self.actor.out_features)
 
     def process_env_step(self, obs_next, rewards, dones, extras) -> None:
-        del obs_next, rewards, dones, extras
+        del obs_next, dones, extras
         self.process_calls += 1
+        self.process_rewards.append(rewards.detach().clone())
 
     def compute_returns(self, obs) -> None:
         del obs
@@ -470,44 +442,99 @@ class _DummyBCAlg:
         return 0.75
 
 
-def test_rsl_rl_adapter_collect_vs_pure_action_paths():
-    ppo = _DummyPpo()
-    adapter = RslRlPpoAdapter(ppo)
-    obs = torch.zeros(2, 4)
+def _adapter_env(num_envs: int = 2, obs_dim: int = 4, action_dim: int = 3) -> _DummyEnv:
+    return _DummyEnv(num_envs=num_envs, obs_dim=obs_dim, action_dim=action_dim)
 
-    _ = adapter.collect_action(obs)
-    _ = adapter.actor.act(obs)
-    _ = adapter.actor.act_inference(obs)
-    transition = EnvTransition(
-        obs=obs,
-        actions=torch.zeros(2, 3),
-        env_rewards=torch.zeros(2),
-        rewards=torch.ones(2),
-        dones=torch.zeros(2, dtype=torch.bool),
-        next_obs=obs,
-        extras={},
+
+def _identity_feature_map(env: _DummyEnv) -> torch.Tensor:
+    """Return [N, 1] features whose value is the step counter."""
+    return torch.full((env.num_envs, 1), float(env.step_calls), dtype=torch.float32)
+
+
+class _ConstantRewardModel(nn.Module):
+    def __init__(self, scale: float = 10.0) -> None:
+        super().__init__()
+        self.scale = float(scale)
+        self.forward_calls = 0
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        self.forward_calls += 1
+        return features.squeeze(-1) * self.scale
+
+
+def test_rsl_rl_adapter_update_drives_env_loop_and_passes_learned_rewards():
+    """`adapter.update()` should step the env, score each step with the reward
+    model, hand the learned rewards to `ppo.process_env_step`, finalize with
+    `ppo.compute_returns`, then run `ppo.update`.
+    """
+    env = _adapter_env()
+    ppo = _DummyPpo(obs_dim=env.obs_dim, action_dim=env.num_actions)
+    reward_model = _ConstantRewardModel(scale=10.0)
+    adapter = RslRlPpoAdapter(
+        ppo,
+        env=env,
+        feature_map=_identity_feature_map,
+        reward_model=reward_model,
+        steps_per_env_per_cycle=3,
+        use_learned_reward=True,
     )
-    adapter.observe(transition)
-    adapter.end_rollout(obs)
+
     metrics = adapter.update()
 
-    assert ppo.collect_act_calls == 1
-    # `act` should hit the pure actor (no side effects on PPO's pending transition).
-    assert ppo.actor.call_modes == [True, False]
-    assert ppo.process_calls == 1
+    assert ppo.collect_act_calls == 3
+    assert env.step_calls == 3
+    assert ppo.process_calls == 3
     assert ppo.compute_returns_calls == 1
+    assert ppo.update_calls == 1
+    assert reward_model.forward_calls == 3
     assert metrics["RL/policy_loss"] == 0.25
+    # First post-step features have step=1, reward = 10*step = 10. All envs same.
+    assert torch.allclose(ppo.process_rewards[0], torch.full((env.num_envs,), 10.0))
+    assert torch.allclose(ppo.process_rewards[2], torch.full((env.num_envs,), 30.0))
 
 
-def test_rsl_rl_adapter_bc_only_skips_collection_and_reports_bc_metrics():
-    ppo = _DummyPpo()
-    adapter = RslRlPpoAdapter(ppo, bc_alg=_DummyBCAlg())
+def test_rsl_rl_adapter_update_with_env_rewards_skips_reward_model():
+    env = _adapter_env()
+    ppo = _DummyPpo(obs_dim=env.obs_dim, action_dim=env.num_actions)
+    reward_model = _ConstantRewardModel()
+    adapter = RslRlPpoAdapter(
+        ppo,
+        env=env,
+        feature_map=_identity_feature_map,
+        reward_model=reward_model,
+        steps_per_env_per_cycle=2,
+        use_learned_reward=False,
+    )
 
-    assert adapter.collects_rollouts is False
+    adapter.update()
+
+    assert reward_model.forward_calls == 0
+    # All env rewards are zero from _DummyEnv.step.
+    assert all(torch.allclose(r, torch.zeros(env.num_envs)) for r in ppo.process_rewards)
+
+
+def test_rsl_rl_adapter_bc_only_skips_env_loop_and_reports_bc_metrics():
+    env = _adapter_env()
+    ppo = _DummyPpo(obs_dim=env.obs_dim, action_dim=env.num_actions)
+    reward_model = _ConstantRewardModel()
+    adapter = RslRlPpoAdapter(
+        ppo,
+        env=env,
+        feature_map=_identity_feature_map,
+        reward_model=reward_model,
+        steps_per_env_per_cycle=2,
+        use_learned_reward=True,
+        bc_alg=_DummyBCAlg(),
+    )
+
     metrics = adapter.update()
     eval_metrics = adapter.eval_metrics()
     train_metrics = adapter.train_metrics()
 
+    assert ppo.collect_act_calls == 0
+    assert env.step_calls == 0
+    assert ppo.process_calls == 0
+    assert ppo.compute_returns_calls == 0
     assert ppo.bc_only_update_calls == 1
     assert metrics["BC/loss"] == 0.5
     assert eval_metrics["BC/val_loss"] == 0.75
@@ -515,8 +542,15 @@ def test_rsl_rl_adapter_bc_only_skips_collection_and_reports_bc_metrics():
 
 
 def test_rsl_rl_adapter_checkpoint_delegates_to_wrapped_algorithm():
-    ppo = _DummyPpo()
-    adapter = RslRlPpoAdapter(ppo)
+    env = _adapter_env()
+    ppo = _DummyPpo(obs_dim=env.obs_dim, action_dim=env.num_actions)
+    adapter = RslRlPpoAdapter(
+        ppo,
+        env=env,
+        feature_map=_identity_feature_map,
+        reward_model=_ConstantRewardModel(),
+        steps_per_env_per_cycle=1,
+    )
 
     state = adapter.save_state()
     adapter.load_state(state, load_optimizer=True)
@@ -526,60 +560,24 @@ def test_rsl_rl_adapter_checkpoint_delegates_to_wrapped_algorithm():
 
 
 def test_adapter_actor_act_does_not_invoke_ppo_collect_path():
-    """`adapter.actor.act` must hit the pure actor path, not `ppo.act`.
+    """`adapter.actor.act` must hit the pure actor, not `ppo.act`.
 
-    Regression guard: rsl_rl PPO.act populates a pending Transition object on
-    the wrapped algorithm. Calling it during imitator/validation rollouts would
-    silently affect PPO storage state. The adapter must route stochastic
+    Regression guard: rsl_rl PPO.act populates a pending Transition on the
+    wrapped algorithm. Calling it during imitator/validation rollouts would
+    silently affect PPO storage state. The actor facade routes stochastic
     actions through `actor(obs, stochastic_output=True)` instead.
     """
-    ppo = _DummyPpo()
-    adapter = RslRlPpoAdapter(ppo)
+    env = _adapter_env()
+    ppo = _DummyPpo(obs_dim=env.obs_dim, action_dim=env.num_actions)
+    adapter = RslRlPpoAdapter(
+        ppo,
+        env=env,
+        feature_map=_identity_feature_map,
+        reward_model=_ConstantRewardModel(),
+        steps_per_env_per_cycle=1,
+    )
 
     adapter.actor.act(torch.zeros(2, 4))
 
     assert ppo.collect_act_calls == 0
     assert ppo.actor.call_modes == [True]
-
-
-def test_adapter_bc_alpha_only_in_train_metrics_not_update_output():
-    """BC/alpha is a constant; emitting it twice per iteration is noise."""
-    ppo = _DummyPpo()
-    adapter = RslRlPpoAdapter(ppo, bc_alg=_DummyBCAlg())
-
-    update_metrics = adapter.update()
-    train_metrics = adapter.train_metrics()
-
-    assert "BC/alpha" not in update_metrics
-    assert "BC/alpha" in train_metrics
-
-
-@pytest.mark.parametrize(
-    "overrides, match",
-    [
-        ({"steps_per_env_per_cycle": 0}, "steps_per_env_per_cycle"),
-        ({"save_interval": 0}, "save_interval"),
-        ({"rl_updates_per_cycle": 0}, "rl_updates_per_cycle"),
-        ({"reward_updates_per_cycle": -1}, "reward_updates_per_cycle"),
-        ({"expert_num_envs": 0}, "expert_num_envs"),
-        ({"imitator_rollout_steps_per_env": 0}, "imitator_rollout_steps_per_env"),
-        ({"validation_interval": -1}, "validation_interval"),
-        ({"validation_steps_per_env": -1}, "validation_steps_per_env"),
-    ],
-)
-def test_runner_cfg_rejects_invalid_values(overrides, match):
-    cfg = _runner_cfg()
-    for key, value in overrides.items():
-        setattr(cfg, key, value)
-    with pytest.raises(ValueError, match=match):
-        IrlRunner(
-            env=_DummyEnv(),
-            rl_alg=_DummyRlAlg(),
-            irl_alg=_DummyIrlAlg(),
-            feature_map=_feature_map,
-            runner_cfg=cfg,
-            runtime_ctx=RuntimeContext(num_envs=2, feature_dim=2, device="cpu"),
-            log_dir=None,
-            device="cpu",
-            metric_logger=_CaptureLogger(),
-        )

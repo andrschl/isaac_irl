@@ -670,10 +670,19 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
                 device=train_cfg.device,
                 **ppo_kwargs,
             )
-        rl_alg = RslRlPpoAdapter(ppo_alg, bc_alg=bc_alg)
         reward_cfg = replace(train_cfg.reward, num_features=runtime_ctx.feature_dim)
         reward_model_cls = LinearFeatureRewardModel if reward_cfg.is_linear else DenseFeatureRewardModel
         reward_model = reward_model_cls(reward_cfg).to(train_cfg.device)
+        rl_alg = RslRlPpoAdapter(
+            ppo_alg,
+            env=env,
+            feature_map=feature_map,
+            reward_model=reward_model,
+            steps_per_env_per_cycle=int(train_cfg.runner.steps_per_env_per_cycle),
+            use_learned_reward=bool(train_cfg.runner.use_learned_reward),
+            device=train_cfg.device,
+            bc_alg=bc_alg,
+        )
         expert_success_rate: float | None = None
         if train_cfg.irl.expert_data_path:
             try:
