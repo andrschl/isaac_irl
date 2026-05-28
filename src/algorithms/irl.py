@@ -155,8 +155,7 @@ class IrlAlgorithm:
             step.features: [N, D]
             step.dones:    [N]
         """
-        dones = rearrange(step.dones, "... -> (...)").to(torch.bool)
-        self.imitator_storage.add_step(z=step.features, done=dones)
+        self.imitator_storage.add_step(z=step.features, done=step.dones.to(torch.bool))
 
     def add_expert_episode(self, features: torch.Tensor) -> None:
         """Append one complete expert episode. Shape: ``features [T, D]``. Single-env buffer only."""

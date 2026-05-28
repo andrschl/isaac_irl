@@ -158,11 +158,6 @@ class _DummyIrlAlg:
         self.batch_size = 4
         self.feature_names = ["step", "env_idx"][:feature_dim]
         self.expert_success_rate = 0.75
-        # Buffers are eagerly built by the real IrlAlgorithm; the stub
-        # mirrors that with sentinel objects so anything that probes them
-        # sees a non-None value.
-        self.expert_storage = object()
-        self.imitator_storage = object()
         self.has_data = has_data
         self.feature_steps: list[FeatureStep] = []
         self.clear_calls = 0
