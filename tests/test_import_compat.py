@@ -71,4 +71,4 @@ def test_collectors_package_is_importable_and_advertises_public_api():
         "ObsActionBuffer",
     }
     assert "ManagerBasedFeatureCfg" in reward_features.__all__
-    assert utils.__all__ == ["RuntimeContext"]
+    assert set(utils.__all__) == {"RuntimeContext", "dump_run_configs"}

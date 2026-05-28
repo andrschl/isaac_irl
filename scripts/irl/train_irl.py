@@ -12,7 +12,7 @@ import os
 import re
 import shutil
 import sys
-from dataclasses import asdict, dataclass, fields, is_dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -25,7 +25,6 @@ if _env_path.exists():
 from typing import Any, Callable
 
 import torch
-import yaml
 
 REPO_SRC = Path(__file__).resolve().parents[2] / "src"
 if str(REPO_SRC) not in sys.path:
@@ -56,6 +55,7 @@ from reward_features.manager_based import (
 from reward_features.success_bonus import add_success_bonus_term
 from reward_model import DenseFeatureRewardModel, LinearFeatureRewardModel
 from runner import IrlRunner, NoopMetricLogger, WandbMetricLogger
+from utils.run_output import dump_run_configs
 from utils.runtime_context import RuntimeContext
 from storage.obs_action_storage import ObsActionBufCfg, ObsActionBuffer
 
@@ -213,106 +213,6 @@ def _build_log_dir(experiment_name: str, run_name: str) -> tuple[str, str]:
     return log_root_path, log_dir
 
 
-def _to_serializable(value: Any) -> Any:
-    if is_dataclass(value):
-        return {
-            str(field_def.name): _to_serializable(getattr(value, field_def.name))
-            for field_def in fields(value)
-        }
-
-    if isinstance(value, dict):
-        return {str(key): _to_serializable(item) for key, item in value.items()}
-
-    if isinstance(value, (list, tuple, set)):
-        return [_to_serializable(item) for item in value]
-
-    if isinstance(value, torch.dtype):
-        return str(value)
-
-    if isinstance(value, Path):
-        return str(value)
-
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-
-    return str(value)
-
-def _dump_yaml(path: str, payload: Any) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as file_handle:
-        yaml.safe_dump(_to_serializable(payload), file_handle, sort_keys=False)
-
-
-def _is_scalar_like(value: Any) -> bool:
-    return isinstance(value, (str, int, float, bool)) or value is None
-
-
-def _try_get_nested_attr(root: Any, attr_path: tuple[str, ...]) -> Any | None:
-    current = root
-    for attr_name in attr_path:
-        if not hasattr(current, attr_name):
-            return None
-        current = getattr(current, attr_name)
-    if _is_scalar_like(current):
-        return current
-    return None
-
-
-def _extract_ground_truth_reward_weights(env: Any) -> dict[str, float]:
-    """Extract reward term weights from env's reward_manager (ground truth params)."""
-    try:
-        unwrapped = getattr(env, "unwrapped", env)
-        reward_manager = getattr(unwrapped, "reward_manager", None)
-        if reward_manager is None:
-            return {}
-        term_names = getattr(reward_manager, "_term_names", [])
-        term_cfgs = getattr(reward_manager, "_term_cfgs", [])
-        if len(term_names) != len(term_cfgs):
-            return {}
-        return {str(name): float(getattr(cfg, "weight", 0.0)) for name, cfg in zip(term_names, term_cfgs)}
-    except Exception:
-        return {}
-
-
-def _summarize_env_cfg(env_cfg: Any, train_cfg: TrainCfg) -> dict[str, Any]:
-    summary: dict[str, Any] = {
-        "cfg_type": f"{type(env_cfg).__module__}.{type(env_cfg).__name__}",
-        "task_name": str(train_cfg.env.name),
-        "train_device": str(train_cfg.env.device),
-        "train_num_envs": train_cfg.env.num_envs,
-    }
-
-    for key_name, attr_path in (
-        ("sim_device", ("sim", "device")),
-        ("scene_num_envs", ("scene", "num_envs")),
-        ("seed", ("seed",)),
-        ("decimation", ("decimation",)),
-        ("episode_length_s", ("episode_length_s",)),
-    ):
-        value = _try_get_nested_attr(env_cfg, attr_path)
-        if value is not None:
-            summary[key_name] = value
-
-    return summary
-
-
-def _dump_run_configs(
-    log_dir: str,
-    env_cfg: Any,
-    train_cfg: TrainCfg,
-    env: Any | None = None,
-) -> None:
-    serializable_train_cfg = _to_serializable(train_cfg)
-    params_dir = os.path.join(log_dir, "params")
-    env_summary = _summarize_env_cfg(env_cfg, train_cfg)
-    experiment_cfg = {**serializable_train_cfg, "env": env_summary}
-    _dump_yaml(os.path.join(params_dir, "experiment.yaml"), experiment_cfg)
-    if env is not None:
-        ground_truth = _extract_ground_truth_reward_weights(env)
-        if ground_truth:
-            _dump_yaml(os.path.join(params_dir, "ground_truth_reward_weights.yaml"), ground_truth)
-            weights_str = "  ".join(f"{k}={v:.4f}" for k, v in ground_truth.items())
-            print(f"[INFO] Ground truth reward weights: {weights_str}")
 
 
 def _latest_mp4_in(video_dir: str) -> str | None:
@@ -786,7 +686,7 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
                 train_cfg.load_checkpoint,
             )
             runner.load(resume_path, load_optimizer=True)
-        _dump_run_configs(log_dir=log_dir, env_cfg=env_cfg, train_cfg=train_cfg, env=env)
+        dump_run_configs(log_dir=log_dir, env_cfg=env_cfg, train_cfg=train_cfg, env=env)
         runner.learn(
             num_learning_iterations=int(train_cfg.max_iterations),
             init_at_random_ep_len=True,

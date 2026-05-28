@@ -351,14 +351,15 @@ def test_load_train_cfg_rejects_invalid_irl_discount_gamma_value(tmp_path: Path)
 
 
 def test_dump_run_configs_allows_unpickleable_env_cfg(tmp_path: Path):
-    module = _load_train_irl_module()
+    from utils.run_output import dump_run_configs
+
     run_dir = tmp_path / "run"
 
     # Lambdas are intentionally unpickleable in this context.
     env_cfg = {"callable": lambda x: x}
     train_cfg = TrainCfg()
 
-    module._dump_run_configs(str(run_dir), env_cfg=env_cfg, train_cfg=train_cfg)
+    dump_run_configs(str(run_dir), env_cfg=env_cfg, train_cfg=train_cfg)
 
     assert (run_dir / "params" / "experiment.yaml").exists()
     assert not (run_dir / "params" / "experiment.pkl").exists()
