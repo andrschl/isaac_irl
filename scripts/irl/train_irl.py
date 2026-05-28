@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -134,6 +135,59 @@ def _load_runtime_deps(app_launcher_cls: Any) -> RuntimeDeps:
 
 
 
+@dataclass
+class _RunState:
+    """Mutable state shared between the train_irl ``main`` body and the
+    Isaac-lifecycle cleanup in :func:`isaac_lifecycle`. Fields are set as
+    objects are constructed; the lifecycle reads them on shutdown."""
+
+    env: Any = None
+    runner: "IrlRunner | None" = None
+    log_dir: str | None = None
+    train_video_dir: str | None = None
+    video_dir_for_iteration_names: str | None = None
+    video_steps_per_iteration: int | None = None
+
+
+@contextmanager
+def isaac_lifecycle(simulation_app: Any, args_cli: argparse.Namespace):
+    """Own Isaac SimulationApp + env close + wandb finalize + video copy.
+
+    SimulationApp.close() in the cleanup calls ``os._exit(0)`` which skips
+    Python's default traceback and wandb's atexit hook, so we print the
+    traceback explicitly and call ``runner.finish_logger(exit_code=…)``
+    ourselves before closing.
+    """
+    state = _RunState()
+    run_crashed = False
+    try:
+        yield state
+    except BaseException:
+        run_crashed = True
+        import traceback
+        print("[ERROR] train_irl.py crashed:", flush=True)
+        traceback.print_exc()
+        sys.stderr.flush()
+        sys.stdout.flush()
+        raise
+    finally:
+        if state.env is not None and hasattr(state.env, "close"):
+            try:
+                state.env.close()
+            except Exception as exc:
+                print(f"[WARN] Failed to close environment cleanly: {exc}")
+        finalize_videos(
+            args_cli,
+            log_dir=state.log_dir,
+            train_video_dir=state.train_video_dir,
+            rename_dir=state.video_dir_for_iteration_names,
+            rename_steps_per_iter=state.video_steps_per_iteration,
+        )
+        if state.runner is not None:
+            state.runner.finish_logger(exit_code=1 if run_crashed else 0)
+        simulation_app.close()
+
+
 def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None:
     runtime_deps = deps
     if runtime_deps is None:
@@ -148,20 +202,13 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
 
     app_launcher = app_launcher_cls(args_cli)
     simulation_app = app_launcher.app
-    env = None
-    runner: IrlRunner | None = None
-    log_dir: str | None = None
-    video_dir_for_iteration_names: str | None = None
-    video_steps_per_iteration: int | None = None
-    record_video_wrapper: Any = None
-    train_video_dir: str | None = None
-    run_crashed = False
 
     if runtime_deps is None:
         # Isaac/Omniverse runtime deps must be imported only after SimulationApp creation.
         runtime_deps = _load_runtime_deps(app_launcher_cls=app_launcher_cls)
 
-    try:
+    with isaac_lifecycle(simulation_app, args_cli) as run:
+        record_video_wrapper: Any = None
         requested_task_name = args_cli.task
         if requested_task_name is None:
             raise ValueError("`--task` is required.")
@@ -208,15 +255,18 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
             experiment_name=train_cfg.experiment_name,
             run_name=train_cfg.run_name,
         )
+        run.log_dir = log_dir
 
         env = runtime_deps.gym.make(
             requested_task_name,
             cfg=env_cfg,
             render_mode="rgb_array" if args_cli.video else None,
         )
+        run.env = env
 
         if args_cli.video:
             train_video_dir = os.path.join(log_dir, "videos", "train")
+            run.train_video_dir = train_video_dir
             if args_cli.video_final_only:
                 # Final clip(s) are produced by an explicit post-training rollout
                 # (see runner.record_final_rollouts), not by an in-training
@@ -231,7 +281,7 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
                 )
                 record_video_wrapper = env
             else:
-                step_trigger, video_dir_for_iteration_names, video_steps_per_iteration = (
+                step_trigger, run.video_dir_for_iteration_names, run.video_steps_per_iteration = (
                     build_video_step_trigger(
                         video_final_only=False,
                         video_interval_iterations=(
@@ -259,6 +309,7 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
         # Wrap once so the rest of the script sees `env.action_dim`; the
         # adapter proxies every other attribute to the rsl_rl VecEnv.
         env = RslRlVecEnvAdapter(env)
+        run.env = env
 
         obs, obs_groups = _get_initial_obs(env, runtime_deps.resolve_obs_groups)
         obs = obs.to(train_cfg.device)
@@ -425,6 +476,7 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
             device=train_cfg.device,
             metric_logger=metric_logger,
         )
+        run.runner = runner
         if train_cfg.irl.expert_data_path:
             install_expert_features(
                 irl_alg,
@@ -455,37 +507,6 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
                 )
             except Exception as exc:
                 print(f"[WARN] Failed to record final rollout videos: {exc}")
-    except BaseException:
-        # SimulationApp.close() in the finally below calls os._exit(0) which
-        # terminates before Python flushes its default traceback. Print
-        # explicitly so silent crashes show up in the sweep logs.
-        run_crashed = True
-        import traceback
-        print("[ERROR] train_irl.py crashed:", flush=True)
-        traceback.print_exc()
-        sys.stderr.flush()
-        sys.stdout.flush()
-        raise
-    finally:
-        if env is not None and hasattr(env, "close"):
-            try:
-                env.close()
-            except Exception as exc:
-                print(f"[WARN] Failed to close environment cleanly: {exc}")
-        finalize_videos(
-            args_cli,
-            log_dir=log_dir,
-            train_video_dir=train_video_dir,
-            rename_dir=video_dir_for_iteration_names,
-            rename_steps_per_iter=video_steps_per_iteration,
-        )
-        if runner is not None:
-            # Explicit finalize: SimulationApp.close() below calls os._exit(0),
-            # which skips wandb's atexit hook and leaves the run marked as
-            # crashed on the server. Call wandb.finish() here so completed
-            # runs report the correct state.
-            runner.finish_logger(exit_code=1 if run_crashed else 0)
-        simulation_app.close()
 
 
 if __name__ == "__main__":
