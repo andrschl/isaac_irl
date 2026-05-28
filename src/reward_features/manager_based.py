@@ -5,6 +5,8 @@ from typing import Iterable
 
 import torch
 
+from interfaces import FeatureSpec
+
 
 @dataclass
 class ManagerBasedFeatureCfg:
@@ -105,41 +107,13 @@ def manager_based_reward_features(
     return torch.stack(ordered_values, dim=1)
 
 
-class ManagerBasedRewardFeatureEncoder:
-    """
-    Callable encoder for manager-based reward terms.
-
-    Implements env-based feature extraction: `encoder(env) -> [N, D]`.
-    """
-
-    def __init__(
-        self,
-        env,
-        cfg: ManagerBasedFeatureCfg | None = None,
-        device: torch.device | str | None = None,
-    ):
-        self.env = env
-        self.cfg = cfg or ManagerBasedFeatureCfg()
-        self.device = device
-
-    def __call__(self, env=None) -> torch.Tensor:
-        """Extract features from env. Uses self.env if env is None."""
-        target = env if env is not None else self.env
-        return manager_based_reward_features(
-            env=target,
-            ignored_reward_terms=self.cfg.ignored_reward_terms,
-            device=self.device,
-            force_include_terms=self.cfg.force_include_terms,
-        )
-
-
 class ManagerBasedFeatureSource:
     """``FeatureSource`` over Isaac Lab's reward manager.
 
     Probes the env's reward manager once at construction to fix the feature
-    order (and learn the feature names) and exposes that via ``spec``. Per
-    step it ignores everything in ``StepContext`` except ``ctx.env`` —
-    Isaac's reward manager already owns the env state internally.
+    order (and learn the feature names) and exposes that via ``spec``.
+    Isaac's reward manager already owns the env state, so per-step extraction
+    only needs the env handle.
     """
 
     def __init__(
@@ -157,24 +131,10 @@ class ManagerBasedFeatureSource:
             force_include_terms=self.cfg.force_include_terms,
         )
         names = tuple(feature_dict.keys())
-        # interfaces.FeatureSpec is imported lazily to keep this module free
-        # of a top-level dependency on the protocols layer.
-        from interfaces import FeatureSpec  # noqa: PLC0415
         self.spec = FeatureSpec(dim=len(names), names=names)
 
-    def features(self, ctx) -> torch.Tensor:
-        """Extract `[num_envs, D]` features from ``ctx.env``. Other ctx
-        fields are intentionally ignored for the Isaac reward-manager backend.
-        """
-        return manager_based_reward_features(
-            env=ctx.env,
-            ignored_reward_terms=self.cfg.ignored_reward_terms,
-            device=self.device,
-            force_include_terms=self.cfg.force_include_terms,
-        )
-
-    def features_from_env(self, env) -> torch.Tensor:
-        """Compatibility shim for the runner's legacy `feature_map(env)` API."""
+    def features(self, env) -> torch.Tensor:
+        """Extract `[num_envs, D]` features from the current env state."""
         return manager_based_reward_features(
             env=env,
             ignored_reward_terms=self.cfg.ignored_reward_terms,

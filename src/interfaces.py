@@ -12,7 +12,6 @@ from typing import Any, Protocol
 import torch
 
 
-
 @dataclass(slots=True)
 class FeatureStep:
     """One vectorized feature step consumed by a reward learner.
@@ -46,37 +45,18 @@ class FeatureSpec:
             )
 
 
-@dataclass(slots=True)
-class StepContext:
-    """Inputs available to a :class:`FeatureSource` at one vectorized step.
-
-    Built by the rollout helper. Backends consume whichever fields they need:
-    Isaac's reward-manager FeatureSource reads only `ctx.env`; tabular MDPs
-    consume `(obs, action, next_obs)`. `info` carries any extra dict the env
-    emitted on the last `step()` (e.g. rsl_rl's `time_outs`).
-    """
-
-    env: Any
-    obs: Any
-    action: torch.Tensor
-    next_obs: Any
-    env_reward: torch.Tensor
-    done: torch.Tensor
-    info: dict[str, Any]
-
-
 class FeatureSource(Protocol):
-    """Compute per-step features φ(...) for the visited state(s).
+    """Compute per-step features φ(env) from the vectorized env.
 
     Implementations declare what they emit via `spec` and produce a
-    `[num_envs, spec.dim]` tensor from a `StepContext`. The protocol is the
-    one per-env seam that genuinely varies across backends — everything
-    downstream consumes [N, D] features uniformly.
+    `[num_envs, spec.dim]` tensor from the current env state. The protocol
+    is the one per-env seam that genuinely varies across backends —
+    everything downstream consumes [N, D] features uniformly.
     """
 
     spec: FeatureSpec
 
-    def features(self, ctx: StepContext) -> torch.Tensor: ...
+    def features(self, env: Any) -> torch.Tensor: ...
 
 
 class Actor(Protocol):
@@ -89,25 +69,6 @@ class Actor(Protocol):
 
     def act(self, obs: Any) -> torch.Tensor: ...
     def act_inference(self, obs: Any) -> torch.Tensor: ...
-
-
-class VecEnv(Protocol):
-    """Vectorized env contract mirrored from rsl_rl's `VecEnv`.
-
-    Adapters that bridge to rsl_rl-shaped envs translate `num_actions` ->
-    `action_dim` so the core uses one consistent name.
-    """
-
-    num_envs: int
-    action_dim: int
-    device: torch.device | str
-    max_episode_length: int | torch.Tensor
-
-    def get_observations(self) -> Any: ...
-
-    def step(
-        self, actions: torch.Tensor
-    ) -> tuple[Any, torch.Tensor, torch.Tensor, dict]: ...
 
 
 class RlAlgorithm(Protocol):
@@ -145,7 +106,5 @@ class RlAlgorithm(Protocol):
         """Load checkpoint payload for this algorithm."""
 
 
-# Note: there is no IrlAlgorithm Protocol. Only one IRL estimator exists
-# (algorithms.IrlAlgorithm); the runner reaches into it directly as a
-# concrete dependency. Reintroduce a protocol if/when a second estimator
-# lands.
+# No IrlAlgorithm Protocol: only one IRL estimator exists today
+# (algorithms.IrlAlgorithm). Reintroduce when a second one lands.

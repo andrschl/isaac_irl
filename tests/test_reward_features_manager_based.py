@@ -8,7 +8,7 @@ torch = pytest.importorskip("torch")
 
 from reward_features.manager_based import (
     ManagerBasedFeatureCfg,
-    ManagerBasedRewardFeatureEncoder,
+    ManagerBasedFeatureSource,
     _as_term_vector,
     manager_based_reward_features,
 )
@@ -108,17 +108,19 @@ def test_manager_based_reward_features_returns_empty_feature_matrix_when_all_fil
     assert feats.dtype == torch.float32
 
 
-def test_manager_based_feature_encoder_calls_manager_features():
+def test_manager_based_feature_source_emits_spec_and_features():
     reward_manager = _RewardManager(
         term_names=["t"],
         term_cfgs=[_TermCfg(weight=1.0, params=None, func=lambda env: torch.tensor([3.0, 4.0]))],
     )
     env = _Env(num_envs=2, reward_manager=reward_manager)
-    encoder = ManagerBasedRewardFeatureEncoder(
+    source = ManagerBasedFeatureSource(
         env=env,
         cfg=ManagerBasedFeatureCfg(ignored_reward_terms=set()),
         device="cpu",
     )
-    out = encoder()
+    assert source.spec.dim == 1
+    assert source.spec.names == ("t",)
+    out = source.features(env)
     assert tuple(out.shape) == (2, 1)
     assert torch.allclose(out[:, 0], torch.tensor([3.0, 4.0]))

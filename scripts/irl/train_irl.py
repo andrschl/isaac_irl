@@ -571,7 +571,7 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
         feature_source = ManagerBasedFeatureSource(
             env, cfg=train_cfg.feature_map, device=train_cfg.device,
         )
-        feature_map = feature_source.features_from_env
+        feature_map = feature_source.features
         runtime_ctx = RuntimeContext(
             num_envs=int(env.num_envs),
             feature_dim=int(feature_source.spec.dim),

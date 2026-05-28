@@ -13,10 +13,10 @@ from algorithms import IRLCfg as IRLCfgFromPackage
 from algorithms.irl import IrlAlgorithm as IrlAlgorithmFromModule
 from algorithms.irl import IRLCfg as IRLCfgFromModule
 from reward_features import ManagerBasedFeatureCfg as FeatureCfgFromPackage
-from reward_features import ManagerBasedRewardFeatureEncoder as FeatureEncoderFromPackage
+from reward_features import ManagerBasedFeatureSource as FeatureSourceFromPackage
 from reward_features import manager_based_reward_features as FeatureFnFromPackage
 from reward_features.manager_based import ManagerBasedFeatureCfg as FeatureCfgFromModule
-from reward_features.manager_based import ManagerBasedRewardFeatureEncoder as FeatureEncoderFromModule
+from reward_features.manager_based import ManagerBasedFeatureSource as FeatureSourceFromModule
 from reward_features.manager_based import manager_based_reward_features as FeatureFnFromModule
 from reward_model import RewardModelCfg as RewardCfgFromPackage
 from reward_model.dense import RewardModelCfg as RewardCfgFromModule
@@ -53,7 +53,7 @@ def test_storage_import_surfaces():
 
 def test_reward_features_import_surfaces():
     assert FeatureCfgFromPackage is FeatureCfgFromModule
-    assert FeatureEncoderFromPackage is FeatureEncoderFromModule
+    assert FeatureSourceFromPackage is FeatureSourceFromModule
     assert FeatureFnFromPackage is FeatureFnFromModule
 
 
