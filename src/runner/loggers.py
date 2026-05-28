@@ -1,37 +1,80 @@
+"""Logger event stream consumed by the runner.
+
+The runner emits one :class:`LogEvent` per logical training event (iteration
+summary, validation summary, etc.) into a single :class:`Logger`. Sinks decide
+what to do with each event — :class:`WandbLogger` forwards the payload to
+wandb, :class:`ConsoleLogger` formats human-readable lines, :class:`NoopLogger`
+drops everything. :class:`CompositeLogger` fans out to a list.
+
+This replaces the older split between ``MetricLogger`` (wandb) and
+``ConsoleReporter`` (stdout) the runner used to drive separately.
+"""
+
 from __future__ import annotations
 
 import os
-from typing import Any, Protocol
+from dataclasses import dataclass, field
+from typing import Any, Iterable, Protocol
 
 
-class MetricLogger(Protocol):
-    """Small scalar logger API used by the runner."""
+@dataclass(slots=True)
+class LogEvent:
+    """One logical training event.
 
-    def start(self) -> None:
-        """Initialize external logging resources."""
+    ``payload`` carries the scalar metrics (wandb key → float). Optional
+    ``label`` and ``key_prefix`` are read by the console sink to format the
+    line; the wandb sink ignores them. ``iteration`` is used by the console
+    sink for per-iter headers; the wandb sink reads ``step`` only.
+    """
 
-    def log(self, payload: dict[str, float], step: int) -> None:
-        """Log scalar payload at a training step."""
+    kind: str
+    step: int
+    iteration: int = 0
+    payload: dict[str, float] = field(default_factory=dict)
+    label: str = ""
+    key_prefix: str = ""
 
-    def finish(self, exit_code: int = 0) -> None:
-        """Flush/close external logging resources."""
+
+class Logger(Protocol):
+    def start(self, num_iterations: int) -> None: ...
+    def log(self, event: LogEvent) -> None: ...
+    def finish(self, exit_code: int = 0) -> None: ...
 
 
-class NoopMetricLogger:
-    """Metric logger that intentionally does nothing."""
+class NoopLogger:
+    """Logger that drops everything. Useful for tests and ``--logger noop``."""
 
-    def start(self) -> None:
-        return
+    def start(self, num_iterations: int) -> None:
+        del num_iterations
 
-    def log(self, payload: dict[str, float], step: int) -> None:
-        del payload, step
+    def log(self, event: LogEvent) -> None:
+        del event
 
     def finish(self, exit_code: int = 0) -> None:
         del exit_code
 
 
-class WandbMetricLogger:
-    """Weights & Biases scalar logger.
+class CompositeLogger:
+    """Fan-out logger: forwards each call to every wrapped logger."""
+
+    def __init__(self, loggers: Iterable[Logger]) -> None:
+        self._loggers = list(loggers)
+
+    def start(self, num_iterations: int) -> None:
+        for logger in self._loggers:
+            logger.start(num_iterations)
+
+    def log(self, event: LogEvent) -> None:
+        for logger in self._loggers:
+            logger.log(event)
+
+    def finish(self, exit_code: int = 0) -> None:
+        for logger in self._loggers:
+            logger.finish(exit_code)
+
+
+class WandbLogger:
+    """Forward ``event.payload`` to Weights & Biases at ``event.step``.
 
     ``finish`` must be called explicitly because Isaac's ``SimulationApp.close``
     exits via ``os._exit`` and can skip Python atexit handlers.
@@ -55,7 +98,8 @@ class WandbMetricLogger:
         self.config = dict(config) if config else None
         self._run: Any = None
 
-    def start(self) -> None:
+    def start(self, num_iterations: int) -> None:
+        del num_iterations
         if self._run is not None:
             return
         if self.log_dir is not None:
@@ -77,12 +121,13 @@ class WandbMetricLogger:
             print(f"[WARN] wandb.init failed: {exc}")
             self._run = None
 
-    def log(self, payload: dict[str, float], step: int) -> None:
-        if not payload:
+    def log(self, event: LogEvent) -> None:
+        if not event.payload:
             return
-        self.start()
+        if self._run is None:
+            self.start(num_iterations=0)
         if self._run is not None:
-            self._run.log(payload, step=step)
+            self._run.log(event.payload, step=event.step)
 
     def finish(self, exit_code: int = 0) -> None:
         if self._run is None:

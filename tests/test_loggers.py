@@ -1,4 +1,4 @@
-"""Tests for the runner's metric loggers."""
+"""Tests for the runner's logger event sinks."""
 
 from __future__ import annotations
 
@@ -41,24 +41,30 @@ def _install_fake_wandb(monkeypatch, *, init_should_fail: bool = False) -> dict[
     return record
 
 
+def _event(payload, step=0, **kwargs):
+    from runner.loggers import LogEvent
+
+    return LogEvent(kind="iteration_summary", step=step, payload=payload, **kwargs)
+
+
 def test_wandb_logger_start_is_idempotent(monkeypatch):
     record = _install_fake_wandb(monkeypatch)
-    from runner.loggers import WandbMetricLogger
+    from runner.loggers import WandbLogger
 
-    logger = WandbMetricLogger(project="test", log_dir=None)
-    logger.start()
-    logger.start()
-    logger.start()
+    logger = WandbLogger(project="test", log_dir=None)
+    logger.start(num_iterations=10)
+    logger.start(num_iterations=10)
+    logger.start(num_iterations=10)
 
     assert record["init_calls"] == 1
 
 
 def test_wandb_logger_log_starts_lazily(monkeypatch):
     record = _install_fake_wandb(monkeypatch)
-    from runner.loggers import WandbMetricLogger
+    from runner.loggers import WandbLogger
 
-    logger = WandbMetricLogger(project="test", log_dir=None)
-    logger.log({"a": 1.0}, step=10)
+    logger = WandbLogger(project="test", log_dir=None)
+    logger.log(_event({"a": 1.0}, step=10))
 
     assert record["init_calls"] == 1
     assert record["log_calls"] == [(10, {"a": 1.0})]
@@ -66,10 +72,10 @@ def test_wandb_logger_log_starts_lazily(monkeypatch):
 
 def test_wandb_logger_log_skips_empty_payload(monkeypatch):
     record = _install_fake_wandb(monkeypatch)
-    from runner.loggers import WandbMetricLogger
+    from runner.loggers import WandbLogger
 
-    logger = WandbMetricLogger(project="test", log_dir=None)
-    logger.log({}, step=0)
+    logger = WandbLogger(project="test", log_dir=None)
+    logger.log(_event({}, step=0))
 
     assert record["init_calls"] == 0
     assert record["log_calls"] == []
@@ -77,10 +83,10 @@ def test_wandb_logger_log_skips_empty_payload(monkeypatch):
 
 def test_wandb_logger_finish_is_safe_when_init_failed(monkeypatch):
     record = _install_fake_wandb(monkeypatch, init_should_fail=True)
-    from runner.loggers import WandbMetricLogger
+    from runner.loggers import WandbLogger
 
-    logger = WandbMetricLogger(project="test", log_dir=None)
-    logger.start()
+    logger = WandbLogger(project="test", log_dir=None)
+    logger.start(num_iterations=1)
     logger.finish(exit_code=0)
 
     # init failed -> _run is None -> finish must short-circuit, NOT call wandb.finish.
@@ -89,10 +95,10 @@ def test_wandb_logger_finish_is_safe_when_init_failed(monkeypatch):
 
 def test_wandb_logger_finish_passes_exit_code(monkeypatch):
     record = _install_fake_wandb(monkeypatch)
-    from runner.loggers import WandbMetricLogger
+    from runner.loggers import WandbLogger
 
-    logger = WandbMetricLogger(project="test", log_dir=None)
-    logger.start()
+    logger = WandbLogger(project="test", log_dir=None)
+    logger.start(num_iterations=1)
     logger.finish(exit_code=7)
 
     assert record["finish_calls"] == 1
@@ -100,9 +106,40 @@ def test_wandb_logger_finish_passes_exit_code(monkeypatch):
 
 
 def test_noop_logger_does_not_explode():
-    from runner.loggers import NoopMetricLogger
+    from runner.loggers import NoopLogger
 
-    logger = NoopMetricLogger()
-    logger.start()
-    logger.log({"a": 1.0}, step=5)
+    logger = NoopLogger()
+    logger.start(num_iterations=5)
+    logger.log(_event({"a": 1.0}, step=5))
     logger.finish(exit_code=0)
+
+
+def test_composite_logger_fans_out():
+    from runner.loggers import CompositeLogger, LogEvent
+
+    class _Recorder:
+        def __init__(self):
+            self.starts: list[int] = []
+            self.events: list[LogEvent] = []
+            self.finishes: list[int] = []
+
+        def start(self, num_iterations):
+            self.starts.append(num_iterations)
+
+        def log(self, event):
+            self.events.append(event)
+
+        def finish(self, exit_code=0):
+            self.finishes.append(exit_code)
+
+    a, b = _Recorder(), _Recorder()
+    logger = CompositeLogger([a, b])
+    logger.start(7)
+    evt = LogEvent(kind="iteration_summary", step=1, payload={"x": 1.0})
+    logger.log(evt)
+    logger.finish(exit_code=3)
+
+    for r in (a, b):
+        assert r.starts == [7]
+        assert r.events == [evt]
+        assert r.finishes == [3]

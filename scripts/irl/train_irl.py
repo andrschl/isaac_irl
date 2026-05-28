@@ -47,7 +47,7 @@ from data import install_expert_features, load_expert_success_rate
 from reward_features.lift_success import add_success_bonus_term, build_success_fn
 from reward_features.manager_based import ManagerBasedFeatureSource
 from reward_model import DenseFeatureRewardModel, LinearFeatureRewardModel
-from runner import IrlRunner, NoopMetricLogger, WandbMetricLogger
+from runner import CompositeLogger, ConsoleLogger, IrlRunner, WandbLogger
 from utils.run_output import dump_run_configs
 from utils.runtime_context import RuntimeContext
 
@@ -452,18 +452,20 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
             expert_num_envs=int(train_cfg.runner.expert_num_envs),
             expert_success_rate=expert_success_rate,
         )
-        metric_logger = (
-            WandbMetricLogger(
-                project=train_cfg.wandb_project,
-                log_dir=log_dir,
-                run_name=(train_cfg.run_name or None),
-                group=train_cfg.experiment_name,
-                tags=wandb_tags,
-                config=wandb_config,
+        sinks = [ConsoleLogger()]
+        if train_cfg.logger == "wandb":
+            sinks.insert(
+                0,
+                WandbLogger(
+                    project=train_cfg.wandb_project,
+                    log_dir=log_dir,
+                    run_name=(train_cfg.run_name or None),
+                    group=train_cfg.experiment_name,
+                    tags=wandb_tags,
+                    config=wandb_config,
+                ),
             )
-            if train_cfg.logger == "wandb"
-            else NoopMetricLogger()
-        )
+        logger = CompositeLogger(sinks)
 
         runner = IrlRunner(
             env=env,
@@ -474,7 +476,7 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
             success_fn=success_fn,
             log_dir=log_dir,
             device=train_cfg.device,
-            metric_logger=metric_logger,
+            logger=logger,
         )
         run.runner = runner
         if train_cfg.irl.expert_data_path:

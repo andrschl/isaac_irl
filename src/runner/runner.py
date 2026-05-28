@@ -7,8 +7,8 @@ from typing import Any, Callable
 import torch
 
 from interfaces import FeatureSource, FeatureStep, RlAlgorithm
-from runner.console_reporter import ConsoleReporter
-from runner.loggers import MetricLogger, NoopMetricLogger
+from runner.console_logger import ConsoleLogger
+from runner.loggers import LogEvent, Logger, NoopLogger
 from storage.feature_storage import FeatureBufCfg, FeatureTrajectoryBuffer
 from utils.runtime_context import RuntimeContext
 
@@ -76,8 +76,7 @@ class IrlRunner:
         success_fn: Callable[[Any], torch.Tensor] | None = None,
         log_dir: str | None = None,
         device: str | torch.device = "cpu",
-        metric_logger: MetricLogger | None = None,
-        console_reporter: ConsoleReporter | None = None,
+        logger: Logger | None = None,
     ) -> None:
         self.device = torch.device(device)
         self.env = env
@@ -87,8 +86,7 @@ class IrlRunner:
         self.success_fn = success_fn
         self.cfg = runner_cfg
         self.log_dir = log_dir
-        self.metric_logger = metric_logger or NoopMetricLogger()
-        self.console_reporter = console_reporter or ConsoleReporter()
+        self.logger: Logger = logger or NoopLogger()
 
         self.current_learning_iteration = 0
         self.global_timestep = 0
@@ -261,23 +259,38 @@ class IrlRunner:
         if metrics:
             self._last_reward_metrics.update(metrics)
 
-    def _log(self, payload: dict[str, float]) -> None:
-        if not payload:
-            return
-        self.metric_logger.log(payload, step=self.global_timestep)
+    def _emit(
+        self,
+        kind: str,
+        payload: dict[str, float],
+        *,
+        iteration: int = 0,
+        label: str = "",
+        key_prefix: str = "",
+    ) -> None:
+        self.logger.log(
+            LogEvent(
+                kind=kind,
+                step=self.global_timestep,
+                iteration=iteration,
+                payload=payload,
+                label=label,
+                key_prefix=key_prefix,
+            )
+        )
 
     @staticmethod
     def _scalar_payload(prefix: str, names: list[str], values: torch.Tensor) -> dict[str, float]:
         """Build a ``{prefix/name: float(value)}`` dict from a [D] tensor."""
         return {f"{prefix}/{name}": float(values[i].item()) for i, name in enumerate(names)}
 
-    def _log_iteration(self) -> None:
+    def _log_iteration(self, iteration: int) -> None:
         payload: dict[str, float] = {}
         payload.update(self._last_reward_metrics)
         payload.update(self._last_rl_metrics)
         payload.update(self.rl_alg.train_metrics())
         payload.update(self.irl_alg.train_metrics())
-        self._log(payload)
+        self._emit("iteration_summary", payload, iteration=iteration)
 
     def _resolved_validation_steps(self) -> int:
         if self.cfg.validation_interval <= 0:
@@ -382,8 +395,7 @@ class IrlRunner:
         metrics = self.rl_alg.eval_metrics()
         if not metrics:
             return
-        self._log(metrics)
-        self.console_reporter.validation_summary(iteration=iteration, metrics=metrics)
+        self._emit("validation/summary", metrics, iteration=iteration)
 
     def _log_validation_expert(self, iteration: int) -> tuple[torch.Tensor | None, list[str]]:
         expert_mean = self.irl_alg.sample_expert_feature_return_mean(self.device)
@@ -393,17 +405,21 @@ class IrlRunner:
 
         expert_prefix = "ValidationFeatures/expert"
         expert_payload = self._scalar_payload(expert_prefix, feature_names, expert_mean)
-        self._log(expert_payload)
-        self.console_reporter.validation_features(
+        self._emit(
+            "validation/features",
+            expert_payload,
             iteration=iteration,
             label="group=expert",
-            prefix=f"{expert_prefix}/",
-            payload=expert_payload,
+            key_prefix=f"{expert_prefix}/",
         )
 
         expert_success_rate = self.irl_alg.expert_success_rate
         if expert_success_rate is not None:
-            self._log({"Validation/expert/success_rate": float(expert_success_rate)})
+            self._emit(
+                "validation/expert_success_rate",
+                {"Validation/expert/success_rate": float(expert_success_rate)},
+                iteration=iteration,
+            )
         return expert_mean, feature_names
 
     def _log_validation_mode(
@@ -439,23 +455,26 @@ class IrlRunner:
             gap_prefix = f"ValidationFeatures/{mode_name}/gap"
             imitator_payload = self._scalar_payload(imitator_prefix, feature_names, imitator_mean)
             gap_payload = self._scalar_payload(gap_prefix, feature_names, gap_mean)
-            self._log({**imitator_payload, **gap_payload})
-            self.console_reporter.validation_features(
+            self._emit(
+                "validation/features",
+                imitator_payload,
                 iteration=iteration,
                 label=f"mode={mode_name} group=imitator",
-                prefix=f"{imitator_prefix}/",
-                payload=imitator_payload,
+                key_prefix=f"{imitator_prefix}/",
             )
-            self.console_reporter.validation_features(
+            self._emit(
+                "validation/features",
+                gap_payload,
                 iteration=iteration,
                 label=f"mode={mode_name} group=gap",
-                prefix=f"{gap_prefix}/",
-                payload=gap_payload,
+                key_prefix=f"{gap_prefix}/",
             )
 
-        self._log(summary)
-        self.console_reporter.validation_summary(
-            iteration=iteration, metrics=summary, label=f"mode={mode_name}"
+        self._emit(
+            "validation/summary",
+            summary,
+            iteration=iteration,
+            label=f"mode={mode_name}",
         )
         return obs
 
@@ -467,7 +486,7 @@ class IrlRunner:
         self.save(os.path.join(self.log_dir, f"model_{iteration + 1}.pt"))
 
     def finish_logger(self, exit_code: int = 0) -> None:
-        self.metric_logger.finish(exit_code=exit_code)
+        self.logger.finish(exit_code=exit_code)
 
     def record_final_rollouts(
         self,
@@ -516,7 +535,7 @@ class IrlRunner:
         self.irl_alg.eval_mode()
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
-        self.metric_logger.start()
+        self.logger.start(int(num_learning_iterations))
 
         if init_at_random_ep_len and hasattr(self.env, "episode_length_buf") and hasattr(self.env, "max_episode_length"):
             self.env.episode_length_buf = torch.randint_like(
@@ -526,7 +545,6 @@ class IrlRunner:
         self.train_mode()
 
         start_iter = self.current_learning_iteration
-        self.console_reporter.start(int(num_learning_iterations))
         for it in range(start_iter, start_iter + int(num_learning_iterations)):
             self._run_rl_updates()
             obs = self._obs_to_device(self._get_obs())
@@ -534,12 +552,7 @@ class IrlRunner:
             self._run_reward_updates()
 
             self.current_learning_iteration = it + 1
-            self._log_iteration()
-            self.console_reporter.iteration_summary(
-                iteration=it,
-                rl_metrics=self._last_rl_metrics,
-                reward_metrics=self._last_reward_metrics,
-            )
+            self._log_iteration(iteration=it)
 
             if self._should_validate(it + 1):
                 obs = self._run_validation(obs, it)

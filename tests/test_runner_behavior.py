@@ -12,7 +12,7 @@ nn = pytest.importorskip("torch.nn")
 from adapters import RslRlPpoAdapter
 from interfaces import FeatureSpec, FeatureStep
 from runner import IrlRunner, IrlRunnerCfg
-from runner.loggers import NoopMetricLogger
+from runner.loggers import LogEvent, NoopLogger
 from storage.feature_storage import FeatureBufCfg
 
 
@@ -211,13 +211,18 @@ class _DummyIrlAlg:
         self.loaded_state = checkpoint
 
 
-class _CaptureLogger(NoopMetricLogger):
+class _CaptureLogger(NoopLogger):
     def __init__(self) -> None:
-        self.calls: list[tuple[int, dict[str, float]]] = []
+        self.events: list[LogEvent] = []
         self.finished: int | None = None
 
-    def log(self, payload: dict[str, float], step: int) -> None:
-        self.calls.append((step, dict(payload)))
+    def log(self, event: LogEvent) -> None:
+        self.events.append(event)
+
+    @property
+    def calls(self) -> list[tuple[int, dict[str, float]]]:
+        """Backwards-compat alias for assertions that filter by (step, payload)."""
+        return [(e.step, dict(e.payload)) for e in self.events]
 
     def finish(self, exit_code: int = 0) -> None:
         self.finished = exit_code
@@ -271,7 +276,7 @@ def _make_runner(*, use_learned_reward: bool = True, validation_interval: int = 
         runner_cfg=cfg,
         log_dir=None,
         device="cpu",
-        metric_logger=logger,
+        logger=logger,
     )
     return runner, env, rl_alg, irl_alg, logger
 
@@ -309,7 +314,7 @@ def test_runner_imitator_rollout_handles_nested_observation_trees():
         runner_cfg=cfg,
         log_dir=None,
         device="cpu",
-        metric_logger=_CaptureLogger(),
+        logger=_CaptureLogger(),
     )
 
     runner.learn(num_learning_iterations=1, init_at_random_ep_len=False)
