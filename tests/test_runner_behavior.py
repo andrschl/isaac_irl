@@ -10,11 +10,10 @@ torch = pytest.importorskip("torch")
 nn = pytest.importorskip("torch.nn")
 
 from adapters import RslRlPpoAdapter
-from interfaces import FeatureStep
+from interfaces import FeatureSpec, FeatureStep
 from runner import IrlRunner, IrlRunnerCfg
 from runner.loggers import NoopMetricLogger
 from storage.feature_storage import FeatureBufCfg
-from utils.runtime_context import RuntimeContext
 
 
 class _DummyEnv:
@@ -245,6 +244,16 @@ def _feature_map(env: _DummyEnv) -> torch.Tensor:
     return torch.stack((step_feature, env_idx_feature), dim=1)
 
 
+class _StubFeatureSource:
+    """FeatureSource that delegates to ``_feature_map``."""
+
+    def __init__(self) -> None:
+        self.spec = FeatureSpec(dim=2, names=("step", "env_idx"))
+
+    def features(self, env) -> torch.Tensor:
+        return _feature_map(env)
+
+
 def _make_runner(*, use_learned_reward: bool = True, validation_interval: int = 0):
     env = _DummyEnv()
     rl_alg = _DummyRlAlg(action_dim=env.num_actions)
@@ -258,9 +267,8 @@ def _make_runner(*, use_learned_reward: bool = True, validation_interval: int = 
         env=env,
         rl_alg=rl_alg,
         irl_alg=irl_alg,
-        feature_map=_feature_map,
+        feature_source=_StubFeatureSource(),
         runner_cfg=cfg,
-        runtime_ctx=RuntimeContext(num_envs=env.num_envs, feature_dim=2, device="cpu"),
         log_dir=None,
         device="cpu",
         metric_logger=logger,
@@ -297,9 +305,8 @@ def test_runner_imitator_rollout_handles_nested_observation_trees():
         env=env,
         rl_alg=rl_alg,
         irl_alg=irl_alg,
-        feature_map=_feature_map,
+        feature_source=_StubFeatureSource(),
         runner_cfg=cfg,
-        runtime_ctx=RuntimeContext(num_envs=env.num_envs, feature_dim=2, device="cpu"),
         log_dir=None,
         device="cpu",
         metric_logger=_CaptureLogger(),

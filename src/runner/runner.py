@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 import torch
 
-from interfaces import FeatureStep, RlAlgorithm
+from interfaces import FeatureSource, FeatureStep, RlAlgorithm
 from runner.console_reporter import ConsoleReporter
 from runner.loggers import MetricLogger, NoopMetricLogger
 from storage.feature_storage import FeatureBufCfg, FeatureTrajectoryBuffer
@@ -71,12 +71,11 @@ class IrlRunner:
         *,
         rl_alg: RlAlgorithm,
         irl_alg: Any,
-        feature_map: Callable[[Any], torch.Tensor],
+        feature_source: FeatureSource,
         runner_cfg: IrlRunnerCfg,
         success_fn: Callable[[Any], torch.Tensor] | None = None,
         log_dir: str | None = None,
         device: str | torch.device = "cpu",
-        runtime_ctx: RuntimeContext | None = None,
         metric_logger: MetricLogger | None = None,
         console_reporter: ConsoleReporter | None = None,
     ) -> None:
@@ -84,7 +83,7 @@ class IrlRunner:
         self.env = env
         self.rl_alg = rl_alg
         self.irl_alg = irl_alg
-        self.feature_map = feature_map
+        self.feature_source = feature_source
         self.success_fn = success_fn
         self.cfg = runner_cfg
         self.log_dir = log_dir
@@ -101,23 +100,11 @@ class IrlRunner:
 
         self._validate_cfg()
 
-        if runtime_ctx is None:
-            probe_features = self._as_feature_tensor(self.feature_map(self.env))
-            if probe_features.ndim != 2:
-                raise ValueError(f"Feature map must return shape [N, D], got {tuple(probe_features.shape)}.")
-            runtime_ctx = RuntimeContext(
-                num_envs=int(self.env.num_envs),
-                feature_dim=int(probe_features.shape[1]),
-                device=str(self.device),
-            )
-        self._runtime_ctx = runtime_ctx
-
-        feature_names = self.irl_alg.feature_names
-        if feature_names is not None and len(feature_names) != int(runtime_ctx.feature_dim):
-            raise ValueError(
-                f"irl_alg.feature_names length ({len(feature_names)}) must equal "
-                f"runtime_ctx.feature_dim ({int(runtime_ctx.feature_dim)})."
-            )
+        self._runtime_ctx = RuntimeContext(
+            num_envs=int(self.env.num_envs),
+            feature_dim=int(feature_source.spec.dim),
+            device=str(self.device),
+        )
 
     def _validate_cfg(self) -> None:
         cfg = self.cfg
@@ -170,13 +157,13 @@ class IrlRunner:
         return features.to(self.device)
 
     def _step_features(self) -> torch.Tensor:
-        features = self._as_feature_tensor(self.feature_map(self.env))
+        features = self._as_feature_tensor(self.feature_source.features(self.env))
         if features.ndim != 2:
-            raise ValueError(f"Expected feature_map(env) shape [N, D], got {tuple(features.shape)}.")
+            raise ValueError(f"Expected feature_source.features(env) shape [N, D], got {tuple(features.shape)}.")
         expected_shape = (int(self._runtime_ctx.num_envs), int(self._runtime_ctx.feature_dim))
         if tuple(features.shape) != expected_shape:
             raise ValueError(
-                f"Expected feature_map(env) shape {expected_shape}, got {tuple(features.shape)}."
+                f"Expected feature_source.features(env) shape {expected_shape}, got {tuple(features.shape)}."
             )
         return features
 
@@ -304,9 +291,9 @@ class IrlRunner:
         return validation_steps > 0 and learning_iteration % int(self.cfg.validation_interval) == 0
 
     def _feature_names(self, feature_dim: int) -> list[str]:
-        feature_names = self.irl_alg.feature_names
-        if feature_names is not None:
-            return list(feature_names)
+        names = self.feature_source.spec.names
+        if names is not None:
+            return list(names)
         return [f"feat_{feature_idx}" for feature_idx in range(feature_dim)]
 
     def _make_success_accumulator(self) -> tuple[torch.Tensor | None, StepCallback | None]:
