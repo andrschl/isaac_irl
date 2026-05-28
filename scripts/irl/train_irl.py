@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
-import shutil
 import sys
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
@@ -33,8 +31,12 @@ if str(REPO_SRC) not in sys.path:
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+_SCRIPTS_ROOT = _SCRIPT_DIR.parent
+if str(_SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_ROOT))
 
 from cli_args import build_arg_parser
+from _video_helpers import build_video_step_trigger, finalize_videos
 
 from adapters import RslRlPpoAdapter, RslRlVecEnvAdapter
 from algorithms import IrlAlgorithm
@@ -215,76 +217,6 @@ def _build_log_dir(experiment_name: str, run_name: str) -> tuple[str, str]:
 
 
 
-def _latest_mp4_in(video_dir: str) -> str | None:
-    """Highest-numbered ``*-iter-K.mp4`` (or ``*-step-N.mp4``) in ``video_dir``."""
-    if not os.path.isdir(video_dir):
-        return None
-    mp4s = [f for f in os.listdir(video_dir) if f.endswith(".mp4")]
-    if not mp4s:
-        return None
-    pat = re.compile(r"-(?:iter|step)-(\d+)\.mp4$")
-    latest = max(mp4s, key=lambda name: (int(pat.search(name).group(1)) if pat.search(name) else -1, name))
-    return os.path.join(video_dir, latest)
-
-
-def _build_video_step_trigger(
-    *,
-    video_final_only: bool,
-    video_interval_iterations: int | None,
-    video_interval: int,
-    max_iterations: int,
-    steps_per_iter: int,
-    train_video_dir: str,
-) -> tuple[Callable[[int], bool], str | None, int | None]:
-    """Build the gym ``RecordVideo.step_trigger`` for the requested mode.
-
-    Returns ``(step_trigger, rename_dir, steps_per_iter)`` where the last two
-    are non-None only for the iteration-aligned modes (final-only and
-    interval-by-iterations). For those modes, the caller post-processes
-    ``rename_dir`` to rewrite ``*-step-N.mp4`` filenames to ``*-iter-K.mp4``.
-    The pure-step interval mode returns ``(trigger, None, None)``.
-    """
-    if video_final_only:
-        # Trigger fires at the start of the last iteration so the clip captures
-        # the final rollout. `video_length` may exceed `steps_per_iter`; gym's
-        # RecordVideo keeps recording across env.step() calls.
-        final_trigger_step = max(0, (max_iterations - 1) * steps_per_iter)
-        return (lambda step_idx: step_idx == final_trigger_step), train_video_dir, steps_per_iter
-
-    if video_interval_iterations is not None:
-        if video_interval_iterations <= 0:
-            raise ValueError(
-                f"`--video_interval_iterations` must be > 0, got {video_interval_iterations}."
-            )
-        interval_steps = video_interval_iterations * steps_per_iter
-        return (lambda step_idx: step_idx % interval_steps == 0), train_video_dir, steps_per_iter
-
-    if video_interval <= 0:
-        raise ValueError(f"`--video_interval` must be > 0, got {video_interval}.")
-    return (lambda step_idx: step_idx % video_interval == 0), None, None
-
-
-def _rename_video_files_to_iteration_index(video_dir: str, steps_per_iteration: int) -> None:
-    if steps_per_iteration <= 0:
-        raise ValueError(f"`steps_per_iteration` must be > 0, got {steps_per_iteration}.")
-    if not os.path.isdir(video_dir):
-        return
-
-    step_name_pattern = re.compile(r"^(?P<prefix>.+)-step-(?P<step>\d+)(?P<ext>\.mp4)$")
-    for file_name in sorted(os.listdir(video_dir)):
-        match = step_name_pattern.match(file_name)
-        if match is None:
-            continue
-
-        step_idx = int(match.group("step"))
-        iter_idx = step_idx // steps_per_iteration
-        new_name = f"{match.group('prefix')}-iter-{iter_idx}{match.group('ext')}"
-
-        source_path = os.path.join(video_dir, file_name)
-        target_path = os.path.join(video_dir, new_name)
-        if source_path == target_path:
-            continue
-        os.replace(source_path, target_path)
 
 
 def _get_initial_obs(
@@ -429,7 +361,7 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
                 record_video_wrapper = env
             else:
                 step_trigger, video_dir_for_iteration_names, video_steps_per_iteration = (
-                    _build_video_step_trigger(
+                    build_video_step_trigger(
                         video_final_only=False,
                         video_interval_iterations=(
                             int(args_cli.video_interval_iterations)
@@ -718,40 +650,13 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
                 env.close()
             except Exception as exc:
                 print(f"[WARN] Failed to close environment cleanly: {exc}")
-        if video_dir_for_iteration_names is not None and video_steps_per_iteration is not None:
-            try:
-                _rename_video_files_to_iteration_index(
-                    video_dir=video_dir_for_iteration_names,
-                    steps_per_iteration=video_steps_per_iteration,
-                )
-            except Exception as exc:
-                print(f"[WARN] Failed to rename video files with iteration indices: {exc}")
-        if args_cli.video and log_dir is not None and train_video_dir is not None:
-            videos_dir = os.path.join(log_dir, "videos")
-            if args_cli.video_final_only:
-                # Explicit dual-clip mode: deterministic + stochastic, named at
-                # the source by runner.record_final_rollouts.
-                for mode_name in ("inference", "stochastic"):
-                    source = os.path.join(train_video_dir, f"final_{mode_name}.mp4")
-                    if not os.path.isfile(source):
-                        continue
-                    final_path = os.path.join(videos_dir, f"final_{mode_name}.mp4")
-                    try:
-                        shutil.copy2(source, final_path)
-                        print(f"[INFO] Copied final {mode_name} rollout video to {final_path}")
-                    except Exception as exc:
-                        print(f"[WARN] Failed to copy final {mode_name} video locally: {exc}")
-                        continue
-            else:
-                # Interval modes: copy the latest trigger-produced clip.
-                try:
-                    latest_mp4 = _latest_mp4_in(train_video_dir)
-                    if latest_mp4 is not None:
-                        final_path = os.path.join(videos_dir, "final.mp4")
-                        shutil.copy2(latest_mp4, final_path)
-                        print(f"[INFO] Copied final rollout video to {final_path}")
-                except Exception as exc:
-                    print(f"[WARN] Failed to copy final video locally: {exc}")
+        finalize_videos(
+            args_cli,
+            log_dir=log_dir,
+            train_video_dir=train_video_dir,
+            rename_dir=video_dir_for_iteration_names,
+            rename_steps_per_iter=video_steps_per_iteration,
+        )
         if runner is not None:
             # Explicit finalize: SimulationApp.close() below calls os._exit(0),
             # which skips wandb's atexit hook and leaves the run marked as
