@@ -122,13 +122,13 @@ from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
 try:
     from collectors import RobomimicDataCollector
     from reward_features.manager_based import manager_based_reward_feature_dict
-    from reward_features.success_bonus import add_success_bonus_term
+    from reward_features.lift_success import add_success_bonus_term
 except ModuleNotFoundError:
     repo_src = Path(__file__).resolve().parents[2] / "src"
     sys.path.insert(0, str(repo_src))
     from collectors import RobomimicDataCollector
     from reward_features.manager_based import manager_based_reward_feature_dict
-    from reward_features.success_bonus import add_success_bonus_term
+    from reward_features.lift_success import add_success_bonus_term
 
 
 def _is_mapping_like(value: Any) -> bool:

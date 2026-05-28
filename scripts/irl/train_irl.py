@@ -38,28 +38,17 @@ if str(_SCRIPTS_ROOT) not in sys.path:
 from cli_args import build_arg_parser
 from _video_helpers import build_video_step_trigger, finalize_videos
 
-from adapters import RslRlPpoAdapter, RslRlVecEnvAdapter
-from algorithms import IrlAlgorithm
-from algorithms.bc import BC
+from adapters import RslRlPpoAdapter, RslRlVecEnvAdapter, make_actor_critic
+from algorithms import IrlAlgorithm, build_bc_alg
 from algorithms.ppo_with_bc import make_ppo_with_bc_cls
-from config import ActorCriticCfg, TrainCfg, load_train_cfg
-from data import (
-    load_expert_success_rate,
-    load_feature_episodes,
-    load_obs_action_episodes,
-    split_holdout_episodes,
-    subset_episodes,
-)
-from reward_features.manager_based import (
-    ManagerBasedFeatureCfg,
-    ManagerBasedFeatureSource,
-)
-from reward_features.success_bonus import add_success_bonus_term
+from config import TrainCfg, load_train_cfg
+from data import install_expert_features, load_expert_success_rate
+from reward_features.lift_success import add_success_bonus_term, build_success_fn
+from reward_features.manager_based import ManagerBasedFeatureSource
 from reward_model import DenseFeatureRewardModel, LinearFeatureRewardModel
 from runner import IrlRunner, NoopMetricLogger, WandbMetricLogger
 from utils.run_output import dump_run_configs
 from utils.runtime_context import RuntimeContext
-from storage.obs_action_storage import ObsActionBufCfg, ObsActionBuffer
 
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -85,124 +74,6 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-
-def _build_actor_critic(
-    *,
-    obs: Any,
-    obs_groups: dict[str, list[str]],
-    action_dim: int,
-    actor_critic_cfg: ActorCriticCfg,
-    device: str,
-    MLPModel: Any,
-) -> tuple[Any, Any]:
-    """Construct rsl_rl 5.x actor + critic MLPModels from the legacy ActorCriticCfg.
-
-    Translates the (init_noise_std, noise_std_type, state_dependent_std) trio
-    that the YAML still uses into the new ``distribution_cfg`` dict consumed by
-    MLPModel. Only Gaussian (non-state-dependent) is supported here — matches
-    what the franka_lift config provides.
-    """
-    if actor_critic_cfg.state_dependent_std:
-        raise NotImplementedError(
-            "state_dependent_std=True is not wired into the new MLPModel construction yet. "
-            "Add a HeteroscedasticGaussianDistribution branch if you need it."
-        )
-    distribution_cfg = {
-        "class_name": "rsl_rl.modules.GaussianDistribution",
-        "init_std": float(actor_critic_cfg.init_noise_std),
-        "std_type": str(actor_critic_cfg.noise_std_type),
-    }
-    actor = MLPModel(
-        obs,
-        obs_groups,
-        "actor",
-        int(action_dim),
-        hidden_dims=list(actor_critic_cfg.actor_hidden_dims),
-        activation=str(actor_critic_cfg.activation),
-        obs_normalization=bool(actor_critic_cfg.actor_obs_normalization),
-        distribution_cfg=distribution_cfg,
-    ).to(device)
-    critic = MLPModel(
-        obs,
-        obs_groups,
-        "critic",
-        1,
-        hidden_dims=list(actor_critic_cfg.critic_hidden_dims),
-        activation=str(actor_critic_cfg.activation),
-        obs_normalization=bool(actor_critic_cfg.critic_obs_normalization),
-        distribution_cfg=None,
-    ).to(device)
-    return actor, critic
-
-
-def _build_success_fn(
-    *,
-    task_name: str,
-    threshold: float,
-    probe_env: Any,
-) -> Callable[[Any], torch.Tensor] | None:
-    """Build a ``success_fn(env) -> [N] bool`` for the validation success metric.
-
-    Uses the Lift task's ``object_reached_goal`` (object within ``threshold`` of
-    the commanded goal pose). Returns None — disabling success logging — for any
-    task that doesn't expose it, or if a probe call fails. Best-effort: success
-    logging must never break training.
-    """
-    try:
-        from isaaclab_tasks.manager_based.manipulation.lift.mdp import object_reached_goal
-    except Exception as exc:
-        print(f"[WARN] No success metric for task {task_name!r} (object_reached_goal unavailable): {exc}")
-        return None
-
-    def success_fn(env: Any) -> torch.Tensor:
-        return object_reached_goal(env.unwrapped, threshold=threshold)
-
-    try:
-        probe = success_fn(probe_env)
-        if not isinstance(probe, torch.Tensor):
-            raise TypeError(f"object_reached_goal returned {type(probe)}, expected Tensor.")
-    except Exception as exc:
-        print(f"[WARN] Disabling success metric for task {task_name!r} (probe failed): {exc}")
-        return None
-
-    print(f"[INFO] Success metric enabled: object within {threshold} m of goal pose.")
-    return success_fn
-
-
-
-def _install_expert_episodes(
-    irl_alg: IrlAlgorithm,
-    expert_data_path: str,
-    *,
-    expected_feature_dim: int,
-    expected_feature_names: list[str] | None = None,
-    max_num_trajectories: int | None = None,
-    subset_strategy: str = "first",
-    seed: int = 42,
-) -> None:
-    """Load expert feature episodes from disk and add them to ``irl_alg``.
-
-    The expert buffer is initialized eagerly by ``IrlAlgorithm.__init__`` with
-    ``expert_num_envs`` envs; this helper appends one episode per demo.
-    """
-    expert_ctx = irl_alg.expert_storage.ctx
-    if int(expert_ctx.num_envs) != 1:
-        raise ValueError(
-            "Expert loader requires IrlAlgorithm.expert_storage with num_envs == 1, "
-            f"got {int(expert_ctx.num_envs)}."
-        )
-
-    episodes = load_feature_episodes(
-        os.path.abspath(expert_data_path),
-        expected_feature_dim=expected_feature_dim,
-        expected_feature_names=expected_feature_names,
-    )
-    total = len(episodes)
-    if max_num_trajectories is not None:
-        episodes = subset_episodes(episodes, max_num_trajectories, subset_strategy, seed)
-        print(f"[INFO] Expert subset: {len(episodes)}/{total} trajectories (strategy={subset_strategy})")
-    for episode in episodes:
-        irl_alg.add_expert_episode(episode)
 
 
 def _build_log_dir(experiment_name: str, run_name: str) -> tuple[str, str]:
@@ -391,11 +262,11 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
 
         obs, obs_groups = _get_initial_obs(env, runtime_deps.resolve_obs_groups)
         obs = obs.to(train_cfg.device)
-        actor, critic = _build_actor_critic(
+        actor, critic = make_actor_critic(
             obs=obs,
             obs_groups=obs_groups,
             action_dim=int(env.action_dim),
-            actor_critic_cfg=train_cfg.actor_critic,
+            cfg=train_cfg.actor_critic,
             device=train_cfg.device,
             MLPModel=runtime_deps.MLPModel,
         )
@@ -403,75 +274,28 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
         feature_source = ManagerBasedFeatureSource(
             env, cfg=train_cfg.feature_map, device=train_cfg.device,
         )
-        feature_map = feature_source.features
         runtime_ctx = RuntimeContext(
             num_envs=int(env.num_envs),
             feature_dim=int(feature_source.spec.dim),
             device=train_cfg.device,
         )
-        feature_names = list(feature_source.spec.names or ())
 
         # Optional task success predicate for the validation success-rate metric.
-        # Uses the Lift task's built-in `object_reached_goal` (object within
-        # `env.success_threshold` of the commanded goal pose). Disabled gracefully
-        # for tasks that don't provide it.
-        success_fn = _build_success_fn(
+        success_fn = build_success_fn(
             task_name=requested_task_name,
             threshold=float(train_cfg.env.success_threshold),
             probe_env=env,
         )
 
-        bc_alg: BC | None = None
-        if train_cfg.bc.alpha > 0.0:
-            if not train_cfg.irl.expert_data_path:
-                raise ValueError(
-                    "`bc.alpha > 0` requires `irl.expert_data_path` to point at an "
-                    "HDF5 file with (obs, actions) demos."
-                )
-            obs_action_episodes = load_obs_action_episodes(train_cfg.irl.expert_data_path)
-            if train_cfg.irl.expert_num_trajectories is not None:
-                total = len(obs_action_episodes)
-                obs_action_episodes = subset_episodes(
-                    obs_action_episodes,
-                    int(train_cfg.irl.expert_num_trajectories),
-                    train_cfg.irl.expert_subset_strategy,
-                    train_cfg.seed,
-                )
-                print(
-                    f"[INFO] BC expert subset: {len(obs_action_episodes)}/{total} "
-                    f"trajectories (strategy={train_cfg.irl.expert_subset_strategy})"
-                )
-            train_episodes, val_episodes = split_holdout_episodes(
-                obs_action_episodes, train_cfg.bc.val_fraction, train_cfg.seed
-            )
-            obs_action_storage = ObsActionBuffer(
-                cfg=ObsActionBufCfg(store_device="cpu", store_dtype=torch.float32),
-                ctx=runtime_ctx,
-            )
-            obs_action_storage.load_episodes(train_episodes)
-            val_storage: ObsActionBuffer | None = None
-            if val_episodes:
-                val_storage = ObsActionBuffer(
-                    cfg=ObsActionBufCfg(store_device="cpu", store_dtype=torch.float32),
-                    ctx=runtime_ctx,
-                )
-                val_storage.load_episodes(val_episodes)
-            print(
-                f"[INFO] BC dataset: {len(train_episodes)} train episodes "
-                f"({len(obs_action_storage)} pairs)"
-                + (
-                    f", {len(val_episodes)} val episodes ({len(val_storage)} pairs)"
-                    if val_storage is not None
-                    else " (no validation split)"
-                )
-                + "."
-            )
-            bc_alg = BC(
-                cfg=train_cfg.bc,
-                storage=obs_action_storage,
-                val_storage=val_storage,
-                device=train_cfg.device,
-            )
+        bc_alg = build_bc_alg(
+            cfg=train_cfg.bc,
+            expert_data_path=train_cfg.irl.expert_data_path,
+            ctx=runtime_ctx,
+            device=train_cfg.device,
+            expert_num_trajectories=train_cfg.irl.expert_num_trajectories,
+            expert_subset_strategy=train_cfg.irl.expert_subset_strategy,
+            seed=train_cfg.seed,
+        )
 
         rollout_storage = runtime_deps.RolloutStorage(
             "rl",
@@ -506,7 +330,7 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
         rl_alg = RslRlPpoAdapter(
             ppo_alg,
             env=env,
-            feature_map=feature_map,
+            feature_map=feature_source.features,
             reward_model=reward_model,
             steps_per_env_per_cycle=int(train_cfg.runner.steps_per_env_per_cycle),
             use_learned_reward=bool(train_cfg.runner.use_learned_reward),
@@ -602,11 +426,9 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
             metric_logger=metric_logger,
         )
         if train_cfg.irl.expert_data_path:
-            _install_expert_episodes(
+            install_expert_features(
                 irl_alg,
                 train_cfg.irl.expert_data_path,
-                expected_feature_dim=runtime_ctx.feature_dim,
-                expected_feature_names=feature_names,
                 max_num_trajectories=train_cfg.irl.expert_num_trajectories,
                 subset_strategy=train_cfg.irl.expert_subset_strategy,
                 seed=train_cfg.seed,

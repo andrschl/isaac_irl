@@ -14,12 +14,16 @@ Supports two payload formats:
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from einops import rearrange
 
 from ._hdf5 import iter_hdf5_demos
+from .sampling import subset_episodes
+
+if TYPE_CHECKING:
+    from algorithms.irl import IrlAlgorithm
 
 
 def _torch_load_payload(path: str) -> Any:
@@ -222,3 +226,39 @@ def load_expert_success_rate(path: str) -> float | None:
     if not per_demo_success:
         return None
     return sum(per_demo_success) / len(per_demo_success)
+
+
+def install_expert_features(
+    irl_alg: "IrlAlgorithm",
+    expert_data_path: str,
+    *,
+    max_num_trajectories: int | None = None,
+    subset_strategy: str = "first",
+    seed: int = 42,
+) -> None:
+    """Load expert feature episodes from disk and add them to ``irl_alg``.
+
+    Reads ``feature_spec.dim`` / ``feature_spec.names`` from the alg itself —
+    the caller doesn't need to pass them. The expert buffer must already be
+    initialized with ``num_envs == 1`` (``IrlAlgorithm.__init__`` does this).
+    """
+    expert_ctx = irl_alg.expert_storage.ctx
+    if int(expert_ctx.num_envs) != 1:
+        raise ValueError(
+            "Expert loader requires IrlAlgorithm.expert_storage with num_envs == 1, "
+            f"got {int(expert_ctx.num_envs)}."
+        )
+
+    spec = irl_alg.feature_spec
+    expected_feature_names = list(spec.names) if spec.names is not None else None
+    episodes = load_feature_episodes(
+        os.path.abspath(expert_data_path),
+        expected_feature_dim=int(spec.dim),
+        expected_feature_names=expected_feature_names,
+    )
+    total = len(episodes)
+    if max_num_trajectories is not None:
+        episodes = subset_episodes(episodes, max_num_trajectories, subset_strategy, seed)
+        print(f"[INFO] Expert subset: {len(episodes)}/{total} trajectories (strategy={subset_strategy})")
+    for episode in episodes:
+        irl_alg.add_expert_episode(episode)

@@ -319,17 +319,7 @@ def test_ppo_with_bc_bc_only_update_runs_bc_alone():
 
 def test_obs_action_hdf5_loader_round_trip(tmp_path: Path):
     h5py = pytest.importorskip("h5py")
-
-    # Import via path to avoid importing the full Isaac Lab dependency tree.
-    import importlib.util
-    import sys
-
-    module_path = Path(__file__).resolve().parents[1] / "scripts" / "irl" / "train_irl.py"
-    spec = importlib.util.spec_from_file_location("train_irl_for_bc_tests", module_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["train_irl_for_bc_tests"] = module
-    spec.loader.exec_module(module)
+    from data import load_obs_action_episodes
 
     path = tmp_path / "demos.hdf5"
     with h5py.File(path, "w") as f:
@@ -340,7 +330,7 @@ def test_obs_action_hdf5_loader_round_trip(tmp_path: Path):
         policy_group.create_dataset("x", data=torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3).numpy())
         demo.create_dataset("actions", data=torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2).numpy())
 
-    episodes = module.load_obs_action_episodes(str(path))
+    episodes = load_obs_action_episodes(str(path))
     assert len(episodes) == 1
     obs, actions = episodes[0]
     assert actions.shape == (5, 2)

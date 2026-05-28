@@ -1,16 +1,21 @@
-"""Custom reward term: constant bonus when the Lift task's success predicate
-fires (object within ``threshold`` of the commanded goal pose).
+"""Lift-task success utilities.
 
-Exposes Isaac Lab's :func:`object_reached_goal` as a *reward function* (float
-tensor) rather than a termination, plus a helper that mutates an Isaac Lab
-env config in place to add the new term. The injected term becomes both a
-reward-manager term (so PPO sees the bonus in env rewards) and an IRL feature
-(:mod:`reward_features.manager_based` picks up every non-zero-weight term).
+Three concerns share this module because they all wrap the same Isaac Lab
+predicate (``object_reached_goal``):
+
+  - :func:`success_bonus_reward` — exposes the predicate as a *reward
+    function* (float ``[N]``), so it can be injected as a manager-based
+    reward term.
+  - :func:`add_success_bonus_term` — mutates an Isaac Lab env config to add
+    a ``success_bonus`` reward term backed by :func:`success_bonus_reward`.
+  - :func:`build_success_fn` — builds a ``success_fn(env) -> [N] bool``
+    closure for the validation success-rate metric, with a probe call to
+    confirm the predicate is wired in.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
@@ -76,3 +81,34 @@ def add_success_bonus_term(
     )
     setattr(rewards_cfg, term_name, term)
     return True
+
+
+def build_success_fn(
+    *,
+    task_name: str,
+    threshold: float,
+    probe_env: Any,
+) -> Callable[[Any], torch.Tensor] | None:
+    """Build a ``success_fn(env) -> [N] bool`` for the validation success metric.
+
+    Returns ``None`` — disabling success logging — for any task that doesn't
+    expose ``object_reached_goal``, or if a probe call fails. Best-effort:
+    success logging must never break training.
+    """
+    if object_reached_goal is None:
+        print(f"[WARN] No success metric for task {task_name!r} (object_reached_goal unavailable).")
+        return None
+
+    def success_fn(env: Any) -> torch.Tensor:
+        return object_reached_goal(env.unwrapped, threshold=threshold)
+
+    try:
+        probe = success_fn(probe_env)
+        if not isinstance(probe, torch.Tensor):
+            raise TypeError(f"object_reached_goal returned {type(probe)}, expected Tensor.")
+    except Exception as exc:
+        print(f"[WARN] Disabling success metric for task {task_name!r} (probe failed): {exc}")
+        return None
+
+    print(f"[INFO] Success metric enabled: object within {threshold} m of goal pose.")
+    return success_fn

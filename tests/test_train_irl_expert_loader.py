@@ -199,8 +199,7 @@ def test_subset_episodes_random_same_seed_returns_same_subset():
         assert torch.allclose(a, b)
 
 
-def test_install_expert_episodes_with_max_num_trajectories_loads_subset(tmp_path: Path):
-    module = _load_train_irl_module()
+def test_install_expert_features_with_max_num_trajectories_loads_subset(tmp_path: Path):
     payload_path = tmp_path / "expert.pt"
     torch.save(
         {"episodes": [torch.ones(2, 2), torch.ones(3, 2), torch.ones(4, 2)]},
@@ -208,6 +207,7 @@ def test_install_expert_episodes_with_max_num_trajectories_loads_subset(tmp_path
     )
 
     from algorithms.irl import IrlAlgorithm, IRLCfg
+    from data import install_expert_features
     from interfaces import FeatureSpec
     from reward_model import LinearFeatureRewardModel, RewardModelCfg
 
@@ -220,10 +220,9 @@ def test_install_expert_episodes_with_max_num_trajectories_loads_subset(tmp_path
         cfg=IRLCfg(batch_size=2),
     )
 
-    module._install_expert_episodes(
+    install_expert_features(
         irl_alg,
         str(payload_path),
-        expected_feature_dim=2,
         max_num_trajectories=1,
         subset_strategy="first",
         seed=42,

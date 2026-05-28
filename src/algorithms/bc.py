@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 
-from storage.obs_action_storage import ObsActionBuffer
+from data import load_obs_action_episodes, split_holdout_episodes, subset_episodes
+from storage.obs_action_storage import ObsActionBufCfg, ObsActionBuffer
+from utils.runtime_context import RuntimeContext
 
 if TYPE_CHECKING:
     from rsl_rl.models import MLPModel
@@ -116,3 +118,64 @@ class BC:
             return None
         with torch.no_grad():
             return float(self._compute_loss(actor, self.val_storage).item())
+
+
+def build_bc_alg(
+    *,
+    cfg: BCCfg,
+    expert_data_path: str,
+    ctx: RuntimeContext,
+    device: str | torch.device,
+    expert_num_trajectories: int | None = None,
+    expert_subset_strategy: str = "first",
+    seed: int = 42,
+) -> BC | None:
+    """Return a configured :class:`BC` when ``cfg.alpha > 0``, else ``None``.
+
+    Loads (obs, actions) demos from ``expert_data_path``, optionally subsets
+    them, splits off a held-out validation set per ``cfg.val_fraction``, and
+    wraps the result in ``ObsActionBuffer`` instances. Returns ``None`` when
+    BC is disabled (``cfg.alpha <= 0``) so the caller can short-circuit.
+    """
+    if cfg.alpha <= 0.0:
+        return None
+    if not expert_data_path:
+        raise ValueError(
+            "`bc.alpha > 0` requires expert_data_path to point at an HDF5 file "
+            "with (obs, actions) demos."
+        )
+
+    obs_action_episodes = load_obs_action_episodes(expert_data_path)
+    if expert_num_trajectories is not None:
+        total = len(obs_action_episodes)
+        obs_action_episodes = subset_episodes(
+            obs_action_episodes,
+            int(expert_num_trajectories),
+            expert_subset_strategy,
+            seed,
+        )
+        print(
+            f"[INFO] BC expert subset: {len(obs_action_episodes)}/{total} "
+            f"trajectories (strategy={expert_subset_strategy})"
+        )
+
+    train_episodes, val_episodes = split_holdout_episodes(
+        obs_action_episodes, cfg.val_fraction, seed
+    )
+    buf_cfg = ObsActionBufCfg(store_device="cpu", store_dtype=torch.float32)
+    train_storage = ObsActionBuffer(cfg=buf_cfg, ctx=ctx)
+    train_storage.load_episodes(train_episodes)
+    val_storage: ObsActionBuffer | None = None
+    if val_episodes:
+        val_storage = ObsActionBuffer(cfg=buf_cfg, ctx=ctx)
+        val_storage.load_episodes(val_episodes)
+    val_summary = (
+        f", {len(val_episodes)} val episodes ({len(val_storage)} pairs)"
+        if val_storage is not None
+        else " (no validation split)"
+    )
+    print(
+        f"[INFO] BC dataset: {len(train_episodes)} train episodes "
+        f"({len(train_storage)} pairs){val_summary}."
+    )
+    return BC(cfg=cfg, storage=train_storage, val_storage=val_storage, device=device)

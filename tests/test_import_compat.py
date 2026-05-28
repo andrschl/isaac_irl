@@ -63,7 +63,14 @@ def test_utils_import_surface():
 
 def test_collectors_package_is_importable_and_advertises_public_api():
     assert "RobomimicDataCollector" in collectors.__all__
-    assert set(algorithms.__all__) == {"BC", "BCCfg", "IRLCfg", "IrlAlgorithm", "make_ppo_with_bc_cls"}
+    assert set(algorithms.__all__) == {
+        "BC",
+        "BCCfg",
+        "IRLCfg",
+        "IrlAlgorithm",
+        "build_bc_alg",
+        "make_ppo_with_bc_cls",
+    }
     assert set(storage.__all__) == {
         "FeatureBufCfg",
         "FeatureTrajectoryBuffer",

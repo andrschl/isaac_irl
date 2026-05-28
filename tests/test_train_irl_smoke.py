@@ -209,11 +209,8 @@ def test_train_irl_main_smoke_with_mocked_runtime(tmp_path: Path, monkeypatch):
                 names = ("feat_a", "feat_b")
             return _Spec()
 
-        def features_from_env(self, env):
+        def features(self, env):
             return torch.zeros(env.num_envs, 2)
-
-        def features(self, ctx):
-            return torch.zeros(ctx.env.num_envs, 2)
 
     monkeypatch.setattr(module, "_repo_root", lambda: tmp_path)
     monkeypatch.setattr(module, "ManagerBasedFeatureSource", _FakeFeatureSource)
@@ -221,7 +218,7 @@ def test_train_irl_main_smoke_with_mocked_runtime(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(module, "LinearFeatureRewardModel", _FakeRewardModel)
     monkeypatch.setattr(module, "IrlAlgorithm", _FakeIrlAlg)
     monkeypatch.setattr(module, "IrlRunner", _FakeRunner)
-    monkeypatch.setattr(module, "_install_expert_episodes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "install_expert_features", lambda *args, **kwargs: None)
 
     fake_deps = module.RuntimeDeps(
         AppLauncher=_FakeAppLauncher,
