@@ -58,6 +58,7 @@ def build_off_policy_stack(
     observations: Any,
     algorithm_cfg: OffPolicyAlgorithmCfg,
     ignored_reward_terms: set[str],
+    force_include_reward_terms: set[str] = frozenset(),
     device: str,
     seed: int,
     reward: RewardScorer | None = None,
@@ -69,6 +70,7 @@ def build_off_policy_stack(
     feature_tap = IsaacPreResetTap(
         env,
         ignored_terms=ignored_reward_terms,
+        force_include_terms=force_include_reward_terms,
         device=device,
         capture_terminal_observations=True,
     )

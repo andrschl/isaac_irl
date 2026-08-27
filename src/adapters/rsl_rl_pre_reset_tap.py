@@ -9,12 +9,67 @@ reachable from inside the reward-manager call, which this tap wraps.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import torch
 
 from interfaces import FeatureSpec
+from reward_features.manager_based import as_term_vector
 from storage.observations import Observation, detached_observation
+
+
+@dataclass(frozen=True, slots=True)
+class TapTerm:
+    """One captured reward term.
+
+    ``step_reward_index`` points into the manager's per-step reward for terms
+    the environment actually weights; it is None for feature-only terms, whose
+    value must be computed directly.
+    """
+
+    name: str
+    weight: float
+    step_reward_index: int | None
+    cfg: Any
+
+
+def _select_terms(
+    reward_manager: Any,
+    *,
+    ignored_terms: set[str],
+    force_include_terms: set[str],
+) -> tuple[TapTerm, ...]:
+    """Choose captured terms in reward-manager order.
+
+    The rule matches ``ManagerBasedFeatureSource``: skip ignored terms, skip
+    zero-weight terms unless they are explicitly requested as features. Both
+    feature sources must agree, or recorded demonstrations and online features
+    would describe different reward spaces.
+    """
+    terms: list[TapTerm] = []
+    for index, (name, cfg) in enumerate(
+        zip(reward_manager._term_names, reward_manager._term_cfgs, strict=True)
+    ):
+        if name in ignored_terms:
+            continue
+        weight = float(cfg.weight)
+        if weight == 0.0 and name not in force_include_terms:
+            continue
+        terms.append(
+            TapTerm(
+                name=str(name),
+                weight=weight,
+                step_reward_index=None if weight == 0.0 else index,
+                cfg=cfg,
+            )
+        )
+    if not terms:
+        raise ValueError(
+            "The reward manager exposes no captured terms: every term is either "
+            "ignored or has weight zero without being requested as a feature."
+        )
+    return tuple(terms)
 
 
 class IsaacPreResetTap:
@@ -25,30 +80,21 @@ class IsaacPreResetTap:
         env: Any,
         *,
         ignored_terms: Iterable[str] = (),
+        force_include_terms: Iterable[str] = (),
         device: str | torch.device | None = None,
         capture_terminal_observations: bool = False,
     ) -> None:
         self.env = env
         self.unwrapped = getattr(env, "unwrapped", env)
         self.reward_manager = self.unwrapped.reward_manager
-        ignored = set(ignored_terms)
-        active: list[tuple[int, str, float]] = []
-        for index, (name, cfg) in enumerate(
-            zip(
-                self.reward_manager._term_names,
-                self.reward_manager._term_cfgs,
-                strict=True,
-            )
-        ):
-            weight = float(cfg.weight)
-            if name not in ignored and weight != 0.0:
-                active.append((index, str(name), weight))
-        if not active:
-            raise ValueError("Fixed reward requires at least one nonzero reward term.")
-        self._term_indices = tuple(item[0] for item in active)
-        self._weights = torch.tensor([item[2] for item in active])
+        self.terms = _select_terms(
+            self.reward_manager,
+            ignored_terms=set(ignored_terms),
+            force_include_terms=set(force_include_terms),
+        )
+        self._weights = torch.tensor([term.weight for term in self.terms])
         self.spec = FeatureSpec(
-            dim=len(active), names=tuple(item[1] for item in active)
+            dim=len(self.terms), names=tuple(term.name for term in self.terms)
         )
         self.device = torch.device(
             device if device is not None else getattr(env, "device", "cpu")
@@ -75,11 +121,7 @@ class IsaacPreResetTap:
 
         def compute_and_capture(dt: float) -> torch.Tensor:
             environment_reward = original_compute(dt)
-            weighted_terms = self.reward_manager._step_reward[:, self._term_indices]
-            weights = self._weights.to(
-                device=weighted_terms.device, dtype=weighted_terms.dtype
-            )
-            raw_features = weighted_terms / weights.unsqueeze(0)
+            raw_features = self._capture_features()
             if not torch.isfinite(raw_features).all():
                 bad = (
                     (~torch.isfinite(raw_features)).nonzero(as_tuple=False)[:8].tolist()
@@ -101,6 +143,25 @@ class IsaacPreResetTap:
             return
         self.reward_manager.compute = self._original_compute
         self._original_compute = None
+
+    def _capture_features(self) -> torch.Tensor:
+        """Return raw unweighted term values [N,D] in reward-manager order.
+
+        Weighted terms are recovered from the manager's per-step reward, which
+        holds ``func(env) * weight``. Feature-only terms carry weight zero, so
+        the manager skips them entirely and their value has to be computed here
+        — still before the reset, like everything else this tap captures.
+        """
+        step_reward = self.reward_manager._step_reward
+        num_envs = int(self.unwrapped.num_envs)
+        columns: list[torch.Tensor] = []
+        for term in self.terms:
+            if term.step_reward_index is None:
+                value = term.cfg.func(self.unwrapped, **(term.cfg.params or {}))
+                columns.append(as_term_vector(value, num_envs).to(step_reward))
+            else:
+                columns.append(step_reward[:, term.step_reward_index] / term.weight)
+        return torch.stack(columns, dim=1)
 
     def _compute_terminal_observations(self) -> Observation | None:
         """Compute pre-reset observations, but only when an episode timed out.

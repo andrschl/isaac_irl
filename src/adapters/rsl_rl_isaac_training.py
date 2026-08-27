@@ -499,6 +499,7 @@ def main(argv: list[str] | None = None, deps: RuntimeDeps | None = None) -> None
                 observations=observations,
                 algorithm_cfg=train_cfg.rl_algorithm,
                 ignored_reward_terms=train_cfg.feature_map.ignored_reward_terms,
+                force_include_reward_terms=train_cfg.feature_map.force_include_terms,
                 device=train_cfg.device,
                 seed=train_cfg.seed,
                 reward=reward_scorer,

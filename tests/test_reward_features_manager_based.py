@@ -11,7 +11,7 @@ torch = pytest.importorskip("torch")
 from reward_features.manager_based import (
     ManagerBasedFeatureCfg,
     ManagerBasedFeatureSource,
-    _as_term_vector,
+    as_term_vector,
     manager_based_reward_features,
 )
 
@@ -38,26 +38,26 @@ class _Env:
         )()
 
 
-def test_as_term_vector_supports_scalar_1d_and_n1():
-    scalar_out = _as_term_vector(torch.tensor(2.0), num_envs=3)
+def testas_term_vector_supports_scalar_1d_and_n1():
+    scalar_out = as_term_vector(torch.tensor(2.0), num_envs=3)
     assert tuple(scalar_out.shape) == (3,)
     assert torch.allclose(scalar_out, torch.tensor([2.0, 2.0, 2.0]))
 
-    one_d_out = _as_term_vector(torch.tensor([1.0, 3.0, 5.0]), num_envs=3)
+    one_d_out = as_term_vector(torch.tensor([1.0, 3.0, 5.0]), num_envs=3)
     assert tuple(one_d_out.shape) == (3,)
     assert torch.allclose(one_d_out, torch.tensor([1.0, 3.0, 5.0]))
 
-    n1_out = _as_term_vector(torch.tensor([[4.0], [6.0], [8.0]]), num_envs=3)
+    n1_out = as_term_vector(torch.tensor([[4.0], [6.0], [8.0]]), num_envs=3)
     assert tuple(n1_out.shape) == (3,)
     assert torch.allclose(n1_out, torch.tensor([4.0, 6.0, 8.0]))
 
 
-def test_as_term_vector_rejects_invalid_shapes():
+def testas_term_vector_rejects_invalid_shapes():
     with pytest.raises(ValueError, match="expected first dim 3"):
-        _as_term_vector(torch.tensor([1.0, 2.0]), num_envs=3)
+        as_term_vector(torch.tensor([1.0, 2.0]), num_envs=3)
 
     with pytest.raises(ValueError, match="Unsupported reward term output shape"):
-        _as_term_vector(torch.ones(3, 2), num_envs=3)
+        as_term_vector(torch.ones(3, 2), num_envs=3)
 
 
 def test_manager_based_reward_features_filters_zero_weight_and_ignored():

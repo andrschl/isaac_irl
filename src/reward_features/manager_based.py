@@ -20,7 +20,7 @@ class ManagerBasedFeatureCfg:
     the env reward signal."""
 
 
-def _as_term_vector(term_value: torch.Tensor, num_envs: int) -> torch.Tensor:
+def as_term_vector(term_value: torch.Tensor, num_envs: int) -> torch.Tensor:
     """Normalize a reward term output into shape [num_envs]."""
     if not isinstance(term_value, torch.Tensor):
         term_value = torch.as_tensor(term_value)
@@ -77,7 +77,7 @@ def manager_based_reward_feature_dict(
 
         term_params = term_cfg.params or {}
         term_value = term_cfg.func(unwrapped_env, **term_params)
-        term_vector = _as_term_vector(term_value, num_envs)
+        term_vector = as_term_vector(term_value, num_envs)
         if device is not None:
             term_vector = term_vector.to(device)
         feature_values[str(name)] = term_vector

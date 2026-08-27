@@ -359,9 +359,13 @@ def main() -> None:
         for term in args_cli.ignored_reward_terms.split(",")
         if term.strip()
     }
+    # A zero-weight success bonus is a feature, not part of the env reward, so
+    # it has to be requested explicitly - exactly as online training does.
+    force_include_terms = {"success_bonus"} if args_cli.add_success_bonus else set()
     feature_tap = IsaacPreResetTap(
         env,
         ignored_terms=ignored_terms,
+        force_include_terms=force_include_terms,
         device=env.unwrapped.device,
     )
     feature_tap.install()
