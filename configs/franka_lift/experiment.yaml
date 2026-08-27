@@ -57,6 +57,8 @@ policy:
 # PMD's nonparametric update is
 #   pi_target(a|s) proportional to pi_old(a|s)^beta * exp(c * Q(s,a)).
 # beta=1 keeps the mirror-descent prior; beta=0 uses the SAC/Boltzmann target.
+# critic_updates_per_projection sets how often PMD replaces its frozen policy,
+# which is what decides policy improvement per simulator transition.
 # See docs/rl_algorithms.md for every off-policy hyperparameter.
 algo:
   type: ppo
@@ -65,6 +67,24 @@ algo:
   lam: 0.95  # GAE lambda
   num_learning_epochs: 5
   num_mini_batches: 4
+
+# Off-policy example (select with `--algorithm pmd`, which keeps these
+# sections; every key below is already the default):
+#
+# algo:
+#   type: pmd
+#   beta: 1.0
+#   candidate_actions: 32
+#   candidate_target_kl: 0.05
+#   actor_projection_kl: 0.02
+#   critic_updates_per_projection: 8
+#   projection_steps: 8
+#   train:
+#     gamma: 0.99
+#     rollout_steps: 8
+#     updates_per_transition: 0.0625
+#     replay: {learning_starts: 4096, capacity: 1000000}
+#   value: {type: successor, num_heads: 5}
 
 # IRL reward learning
 irl:
