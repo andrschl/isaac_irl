@@ -108,10 +108,16 @@ class BC:
         return self._compute_loss(actor, self.storage)
 
     def compute_policy_loss(self, policy: TanhPolicyProtocol) -> torch.Tensor:
-        """Return BC loss for the bounded SAC/PMD policy."""
+        """Return BC loss for the bounded SAC/PMD policy.
+
+        Shapes:
+            sampled observations: nested dict; leaves ``[B, *leaf]``
+            expert actions: ``[B, A]``
+        """
         observations, expert_actions = self.storage.sample(
             self.cfg.batch_size, self.device
         )
+        _validate_bounded_expert_actions(expert_actions, policy)
         if self.cfg.loss_type == "nll":
             return -policy.log_probability(observations, expert_actions).mean()
         predicted_actions = policy.deterministic_action(observations)
@@ -129,6 +135,25 @@ class BC:
             return None
         with torch.no_grad():
             return float(self._compute_loss(actor, self.val_storage).item())
+
+
+def _validate_bounded_expert_actions(
+    expert_actions: torch.Tensor, policy: TanhPolicyProtocol
+) -> None:
+    """Reject expert actions a bounded policy could never have produced.
+
+    A tanh policy assigns them no density: the log-probability path has to
+    clamp before inverting tanh, which silently turns every out-of-range action
+    into the same boundary action.
+    """
+    action_bound = float(getattr(policy.model, "action_bound", 1.0))
+    largest = float(expert_actions.abs().max().item())
+    if largest > action_bound * (1.0 + 1.0e-6):
+        raise ValueError(
+            f"Expert actions reach {largest:.4f}, outside the policy action "
+            f"bound {action_bound:.4f}. Record demonstrations with the same "
+            "action clip as the policy bound, or raise policy.action_bound."
+        )
 
 
 def build_bc_alg(

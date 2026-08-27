@@ -352,3 +352,54 @@ def test_obs_action_hdf5_loader_round_trip(tmp_path: Path):
     assert torch.allclose(
         actions, torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2)
     )
+
+
+def test_bounded_policy_bc_rejects_out_of_range_expert_actions() -> None:
+    torch = pytest.importorskip("torch")
+    from algorithms.bc import BC, BCCfg
+    from algorithms.state_dependent_tanh_actor import (
+        StateDependentTanhGaussianActor,
+        StateDependentTanhPolicy,
+    )
+
+    class _Storage:
+        def sample(self, batch_size, device):
+            del device
+            return (
+                torch.zeros(batch_size, 3),
+                torch.full((batch_size, 2), 1.5),
+            )
+
+    policy = StateDependentTanhPolicy(
+        StateDependentTanhGaussianActor(3, 2, hidden_dims=(8,), action_bound=1.0)
+    )
+    bc = BC(cfg=BCCfg(weight=0.5, batch_size=4), storage=_Storage())
+
+    with pytest.raises(ValueError, match="outside the policy action bound"):
+        bc.compute_policy_loss(policy)
+
+
+def test_bounded_policy_bc_scores_in_range_expert_actions() -> None:
+    torch = pytest.importorskip("torch")
+    from algorithms.bc import BC, BCCfg
+    from algorithms.state_dependent_tanh_actor import (
+        StateDependentTanhGaussianActor,
+        StateDependentTanhPolicy,
+    )
+
+    class _Storage:
+        def sample(self, batch_size, device):
+            del device
+            return (
+                torch.zeros(batch_size, 3),
+                torch.full((batch_size, 2), 0.4),
+            )
+
+    policy = StateDependentTanhPolicy(
+        StateDependentTanhGaussianActor(3, 2, hidden_dims=(8,), action_bound=1.0)
+    )
+    bc = BC(cfg=BCCfg(weight=0.5, batch_size=4), storage=_Storage())
+
+    loss = bc.compute_policy_loss(policy)
+
+    assert loss.ndim == 0 and torch.isfinite(loss)
