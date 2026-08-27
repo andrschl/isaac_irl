@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -26,14 +28,18 @@ class NonLinearFeatureReward(BaseRewardModel):
         self.scale = nn.Parameter(torch.ones(feature_dim))
         self.bias = nn.Parameter(torch.tensor(0.25))
 
-    def get_reward_from_features(self, feats: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    def get_reward_from_features(
+        self, feats: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         rewards = (feats * self.scale).sum(dim=-1) + self.bias
         if mask is not None:
             rewards = rewards * mask.to(dtype=rewards.dtype)
         return rewards
 
 
-def _manual_discounted_returns(rewards: torch.Tensor, mask: torch.Tensor, gamma: float) -> torch.Tensor:
+def _manual_discounted_returns(
+    rewards: torch.Tensor, mask: torch.Tensor, gamma: float
+) -> torch.Tensor:
     """
     Args:
         rewards: [B, T]
@@ -42,12 +48,16 @@ def _manual_discounted_returns(rewards: torch.Tensor, mask: torch.Tensor, gamma:
         returns: [B]
     """
     if rewards.shape != mask.shape:
-        raise ValueError(f"Expected rewards/mask shape match, got {rewards.shape=} and {mask.shape=}")
+        raise ValueError(
+            f"Expected rewards/mask shape match, got {rewards.shape=} and {mask.shape=}"
+        )
 
     batch_size, traj_len = rewards.shape
     out = torch.zeros(batch_size, dtype=rewards.dtype, device=rewards.device)
     for time_idx in range(traj_len):
-        out = out + (gamma**time_idx) * rewards[:, time_idx] * mask[:, time_idx].to(dtype=rewards.dtype)
+        out = out + (gamma**time_idx) * rewards[:, time_idx] * mask[:, time_idx].to(
+            dtype=rewards.dtype
+        )
     return out
 
 
@@ -97,8 +107,12 @@ def test_discounted_returns_from_features_linear_matches_discounted_features():
     mask = torch.tensor([[True, True, False], [True, False, False]])
 
     reward_model = LinearFeatureReward(weight=torch.tensor([2.0, -1.0]))
-    discounted_feats = FeatureTrajectoryBuffer.discounted_feature_returns(feats, mask, gamma)
-    expected_returns = reward_model.get_reward_from_features(discounted_feats).squeeze(-1)
+    discounted_feats = FeatureTrajectoryBuffer.discounted_feature_returns(
+        feats, mask, gamma
+    )
+    expected_returns = reward_model.get_reward_from_features(discounted_feats).squeeze(
+        -1
+    )
 
     returns = reward_model.discounted_returns_from_features(
         feats=feats,
@@ -153,12 +167,18 @@ def test_discounted_returns_from_features_linear_aligns_compute_dtype():
     )
     mask = torch.tensor([[True, True, False], [True, False, False]])
 
-    reward_model = LinearFeatureReward(weight=torch.tensor([2.0, -1.0], dtype=torch.float32))
+    reward_model = LinearFeatureReward(
+        weight=torch.tensor([2.0, -1.0], dtype=torch.float32)
+    )
     reward_param = next(reward_model.parameters())
     feats_compute = feats.to(device=reward_param.device, dtype=reward_param.dtype)
     mask_compute = mask.to(device=reward_param.device, dtype=torch.bool)
-    discounted_feats = FeatureTrajectoryBuffer.discounted_feature_returns(feats_compute, mask_compute, gamma)
-    expected_returns = reward_model.get_reward_from_features(discounted_feats).squeeze(-1)
+    discounted_feats = FeatureTrajectoryBuffer.discounted_feature_returns(
+        feats_compute, mask_compute, gamma
+    )
+    expected_returns = reward_model.get_reward_from_features(discounted_feats).squeeze(
+        -1
+    )
 
     returns = reward_model.discounted_returns_from_features(
         feats=feats,
@@ -199,7 +219,9 @@ def test_irl_eval_expected_return_matches_shared_helper():
     )
     lengths = mask.to(dtype=returns.dtype).sum(dim=1).clamp_min(1.0)
     expected_scalar = (returns / lengths).mean()
-    discounted_feats = FeatureTrajectoryBuffer.discounted_feature_returns(feats, mask, gamma)
+    discounted_feats = FeatureTrajectoryBuffer.discounted_feature_returns(
+        feats, mask, gamma
+    )
     expected_per_feature = (discounted_feats / lengths.unsqueeze(1)).mean(dim=0)
 
     got_scalar, got_per_feature = irl.eval_expected_return(feats, mask)
@@ -234,7 +256,9 @@ def test_irl_eval_expected_return_can_disable_length_normalization():
         gamma=gamma,
     ).mean()
     expected_per_feature = FeatureTrajectoryBuffer.discounted_feature_returns(
-        feats, mask, gamma,
+        feats,
+        mask,
+        gamma,
     ).mean(dim=0)
 
     got_scalar, got_per_feature = irl.eval_expected_return(feats, mask)
@@ -248,7 +272,9 @@ def _make_irl_for_discount_cfg(
     discount_gamma: float | None,
     normalize_returns_by_episode_length: bool,
 ) -> IrlAlgorithm:
-    reward_model = LinearFeatureReward(weight=torch.tensor([1.0, 0.0], dtype=torch.float32))
+    reward_model = LinearFeatureReward(
+        weight=torch.tensor([1.0, 0.0], dtype=torch.float32)
+    )
     buffer_cfg = FeatureBufCfg(min_ep_len=1, store_dtype=torch.float32)
     irl = IrlAlgorithm(
         reward=reward_model,
@@ -307,7 +333,9 @@ def test_irl_reward_update_uses_separate_discount_gamma_when_configured():
 def test_irl_rejects_invalid_discount_gamma():
     with pytest.raises(ValueError, match="discount_gamma"):
         _ = IrlAlgorithm(
-            reward=LinearFeatureReward(weight=torch.tensor([1.0, 0.0], dtype=torch.float32)),
+            reward=LinearFeatureReward(
+                weight=torch.tensor([1.0, 0.0], dtype=torch.float32)
+            ),
             feature_spec=FeatureSpec(dim=2),
             num_envs=1,
             gamma=0.9,
@@ -332,7 +360,9 @@ def test_irl_rejects_invalid_discount_gamma():
 def test_irl_rejects_invalid_cfg_values(cfg: IRLCfg, match: str):
     with pytest.raises(ValueError, match=match):
         _ = IrlAlgorithm(
-            reward=LinearFeatureReward(weight=torch.tensor([1.0, 0.0], dtype=torch.float32)),
+            reward=LinearFeatureReward(
+                weight=torch.tensor([1.0, 0.0], dtype=torch.float32)
+            ),
             feature_spec=FeatureSpec(dim=2),
             num_envs=1,
             gamma=0.9,

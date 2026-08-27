@@ -1,0 +1,248 @@
+"""Bootstrapped successor-feature ensemble with a shared representation."""
+
+from __future__ import annotations
+
+import copy
+
+import torch
+import torch.nn as nn
+
+
+class RunningStandardizer(nn.Module):
+    """Online observation normalization with checkpointed population moments."""
+
+    def __init__(self, dimension: int, *, epsilon: float, clip: float) -> None:
+        super().__init__()
+        if dimension <= 0:
+            raise ValueError("dimension must be > 0.")
+        self.epsilon = float(epsilon)
+        self.clip = float(clip)
+        self.register_buffer("mean", torch.zeros(dimension))
+        self.register_buffer("variance", torch.ones(dimension))
+        self.register_buffer("count", torch.zeros((), dtype=torch.float64))
+
+    @torch.no_grad()
+    def update(self, values: torch.Tensor) -> None:
+        """Incorporate raw observations ``[B,O]`` exactly once."""
+        if values.ndim != 2 or values.shape[1] != self.mean.numel():
+            raise ValueError(
+                f"Expected values [B,{self.mean.numel()}], got {tuple(values.shape)}."
+            )
+        if values.shape[0] == 0 or not torch.isfinite(values).all():
+            raise ValueError("Running normalization requires finite non-empty values.")
+        batch = values.to(device=self.mean.device, dtype=self.mean.dtype)
+        batch_count = float(batch.shape[0])
+        batch_mean = batch.mean(dim=0)
+        batch_variance = batch.var(dim=0, unbiased=False)
+        old_count = float(self.count.item())
+        if old_count == 0.0:
+            self.mean.copy_(batch_mean)
+            self.variance.copy_(batch_variance.clamp_min(self.epsilon**2))
+            self.count.fill_(batch_count)
+            return
+        total_count = old_count + batch_count
+        delta = batch_mean - self.mean
+        combined_mean = self.mean + delta * (batch_count / total_count)
+        old_m2 = self.variance * old_count
+        batch_m2 = batch_variance * batch_count
+        correction = delta.square() * (old_count * batch_count / total_count)
+        self.mean.copy_(combined_mean)
+        self.variance.copy_(
+            ((old_m2 + batch_m2 + correction) / total_count).clamp_min(self.epsilon**2)
+        )
+        self.count.fill_(total_count)
+
+    @property
+    def is_fitted(self) -> bool:
+        return bool(self.count.item() > 0.0)
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        if values.ndim != 2 or values.shape[1] != self.mean.numel():
+            raise ValueError(
+                f"Expected values [B,{self.mean.numel()}], got {tuple(values.shape)}."
+            )
+        standard_deviation = self.variance.sqrt().clamp_min(self.epsilon)
+        return ((values - self.mean) / standard_deviation).clamp(-self.clip, self.clip)
+
+
+class SuccessorFeatureEnsemble(nn.Module):
+    """Shared trunk and independent nonlinear successor-feature heads.
+
+    Shapes:
+        observations: [B,O]
+        actions: [B,A]
+        all outputs: [M,B,D]
+        selected outputs: [B,D]
+    """
+
+    def __init__(
+        self,
+        observation_dim: int,
+        action_dim: int,
+        feature_dim: int,
+        *,
+        num_heads: int = 5,
+        trunk_hidden_dims: tuple[int, ...] = (256, 256),
+        latent_dim: int = 256,
+        head_hidden_dim: int = 128,
+    ) -> None:
+        super().__init__()
+        if min(observation_dim, action_dim, feature_dim, num_heads) <= 0:
+            raise ValueError("All dimensions and num_heads must be positive.")
+        if not trunk_hidden_dims or any(value <= 0 for value in trunk_hidden_dims):
+            raise ValueError("trunk_hidden_dims must contain positive dimensions.")
+        trunk_dims = (observation_dim + action_dim, *trunk_hidden_dims, latent_dim)
+        trunk_layers: list[nn.Module] = []
+        for input_dim, output_dim in zip(trunk_dims[:-1], trunk_dims[1:], strict=True):
+            trunk_layers.extend((nn.Linear(input_dim, output_dim), nn.ELU()))
+        self.trunk = nn.Sequential(*trunk_layers)
+        self.heads = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(latent_dim, head_hidden_dim),
+                    nn.ELU(),
+                    nn.Linear(head_hidden_dim, feature_dim),
+                )
+                for _ in range(num_heads)
+            ]
+        )
+        for head in self.heads:
+            output_layer = head[-1]
+            if not isinstance(output_layer, nn.Linear):
+                raise TypeError("Successor head must end in a linear output layer.")
+            nn.init.zeros_(output_layer.weight)
+            nn.init.zeros_(output_layer.bias)
+        self.observation_dim = int(observation_dim)
+        self.action_dim = int(action_dim)
+        self.feature_dim = int(feature_dim)
+        self.num_heads = int(num_heads)
+        self.register_buffer("output_scale", torch.ones(feature_dim))
+
+    def latent(self, observations: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        if observations.ndim != 2 or observations.shape[1] != self.observation_dim:
+            raise ValueError(
+                f"Expected observations [B,{self.observation_dim}], "
+                f"got {tuple(observations.shape)}."
+            )
+        if actions.ndim != 2 or actions.shape != (
+            observations.shape[0],
+            self.action_dim,
+        ):
+            raise ValueError(
+                f"Expected actions [B,{self.action_dim}], got {tuple(actions.shape)}."
+            )
+        return self.trunk(torch.cat((observations, actions), dim=-1))
+
+    def forward(
+        self, observations: torch.Tensor, actions: torch.Tensor
+    ) -> torch.Tensor:
+        latent = self.latent(observations, actions)
+        normalized = torch.stack([head(latent) for head in self.heads], dim=0)
+        return normalized * self.output_scale.reshape(1, 1, self.feature_dim)
+
+    def head(
+        self, head_index: int, observations: torch.Tensor, actions: torch.Tensor
+    ) -> torch.Tensor:
+        if not 0 <= head_index < self.num_heads:
+            raise ValueError(
+                f"head_index must be in [0,{self.num_heads}), got {head_index}."
+            )
+        normalized = self.heads[head_index](self.latent(observations, actions))
+        return normalized * self.output_scale.reshape(1, self.feature_dim)
+
+    def mean(self, observations: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        return self.forward(observations, actions).mean(dim=0)
+
+    @torch.no_grad()
+    def set_output_scale(self, scale: torch.Tensor) -> None:
+        """Set positive raw-unit scale [D] for normalized network outputs."""
+        scale_tensor = torch.as_tensor(
+            scale,
+            device=self.output_scale.device,
+            dtype=self.output_scale.dtype,
+        )
+        if tuple(scale_tensor.shape) != (self.feature_dim,):
+            raise ValueError(
+                f"Expected successor output scale [{self.feature_dim}], "
+                f"got {tuple(scale_tensor.shape)}."
+            )
+        if not torch.isfinite(scale_tensor).all() or torch.any(scale_tensor <= 0.0):
+            raise ValueError("Successor output scale must be finite and positive.")
+        self.output_scale.copy_(scale_tensor)
+
+    def target_copy(self) -> "SuccessorFeatureEnsemble":
+        target = copy.deepcopy(self)
+        target.requires_grad_(False)
+        target.eval()
+        return target
+
+
+def successor_ensemble_td_target(
+    features: torch.Tensor,
+    next_successors: torch.Tensor,
+    bootstrap_valid: torch.Tensor,
+    gamma: float,
+) -> torch.Tensor:
+    """Build head-local vector Bellman targets.
+
+    Args:
+        features: immediate raw features ``[B,D]``.
+        next_successors: output of the same target head ``[B,D]``.
+        bootstrap_valid: whether a true next state exists ``[B]``.
+
+    Returns:
+        Successor targets ``[B,D]``. Reward parameters never enter this target.
+    """
+    if features.ndim != 2 or next_successors.shape != features.shape:
+        raise ValueError(
+            "Expected matching features and next_successors [B,D], got "
+            f"{tuple(features.shape)} and {tuple(next_successors.shape)}."
+        )
+    if tuple(bootstrap_valid.shape) != (features.shape[0],):
+        raise ValueError(
+            f"Expected bootstrap_valid [B], got {tuple(bootstrap_valid.shape)}."
+        )
+    if bootstrap_valid.dtype != torch.bool:
+        raise TypeError("bootstrap_valid must have dtype bool.")
+    if not 0.0 <= gamma <= 1.0:
+        raise ValueError("gamma must be in [0,1].")
+    mask = bootstrap_valid.to(dtype=features.dtype).unsqueeze(-1)
+    return features + float(gamma) * mask * next_successors
+
+
+def estimate_successor_return_scale(
+    features: torch.Tensor,
+    *,
+    gamma: float,
+    minimum_scale: float,
+) -> torch.Tensor:
+    """Estimate a fixed per-feature scale ``[D]`` in return units.
+
+    The one-step feature RMS is divided by ``1-gamma``. This keeps normalized
+    successor outputs near unit scale without placing reward weights in TD.
+    """
+    if features.ndim != 2 or features.shape[0] == 0:
+        raise ValueError(f"Expected non-empty features [B,D], got {features.shape}.")
+    if not torch.isfinite(features).all():
+        raise ValueError("Cannot fit successor scale on non-finite features.")
+    if not 0.0 <= gamma < 1.0:
+        raise ValueError("gamma must be in [0,1) when estimating return scale.")
+    if minimum_scale <= 0.0:
+        raise ValueError("minimum_scale must be > 0.")
+    feature_rms = features.square().mean(dim=0).sqrt()
+    return (feature_rms / (1.0 - float(gamma))).clamp_min(minimum_scale)
+
+
+@torch.no_grad()
+def update_ensemble_target(
+    source: SuccessorFeatureEnsemble,
+    target: SuccessorFeatureEnsemble,
+    coefficient: float,
+) -> None:
+    """EMA-update the shared target trunk and every paired target head."""
+    if not 0.0 < coefficient <= 1.0:
+        raise ValueError("coefficient must be in (0,1].")
+    for source_parameter, target_parameter in zip(
+        source.parameters(), target.parameters(), strict=True
+    ):
+        target_parameter.lerp_(source_parameter, coefficient)

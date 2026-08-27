@@ -18,7 +18,9 @@ import sys
 from pathlib import Path
 
 _rsl_rl_cli_args_path = Path(__file__).resolve().parents[1] / "rsl_rl" / "cli_args.py"
-_spec = importlib.util.spec_from_file_location("_rsl_rl_cli_args", _rsl_rl_cli_args_path)
+_spec = importlib.util.spec_from_file_location(
+    "_rsl_rl_cli_args", _rsl_rl_cli_args_path
+)
 if _spec is None or _spec.loader is None:  # pragma: no cover - defensive
     raise ImportError(f"Could not load rsl_rl CLI helpers from {_rsl_rl_cli_args_path}")
 _rsl_rl_cli_args = importlib.util.module_from_spec(_spec)

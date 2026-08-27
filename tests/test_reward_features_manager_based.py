@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -79,7 +81,9 @@ def test_manager_based_reward_features_filters_zero_weight_and_ignored():
             _TermCfg(weight=1.0, params=None, func=_term_a),
             _TermCfg(weight=1.0, params={}, func=_term_b),
             _TermCfg(weight=1.0, params=None, func=_term_ignored),
-            _TermCfg(weight=0.0, params=None, func=lambda env: torch.tensor([7.0, 7.0])),
+            _TermCfg(
+                weight=0.0, params=None, func=lambda env: torch.tensor([7.0, 7.0])
+            ),
         ],
     )
     env = _Env(num_envs=num_envs, reward_manager=reward_manager)
@@ -100,7 +104,9 @@ def test_manager_based_reward_features_filters_zero_weight_and_ignored():
 def test_manager_based_reward_features_returns_empty_feature_matrix_when_all_filtered():
     reward_manager = _RewardManager(
         term_names=["only_zero"],
-        term_cfgs=[_TermCfg(weight=0.0, params=None, func=lambda env: torch.tensor([1.0]))],
+        term_cfgs=[
+            _TermCfg(weight=0.0, params=None, func=lambda env: torch.tensor([1.0]))
+        ],
     )
     env = _Env(num_envs=1, reward_manager=reward_manager)
     feats = manager_based_reward_features(env=env)
@@ -111,7 +117,9 @@ def test_manager_based_reward_features_returns_empty_feature_matrix_when_all_fil
 def test_manager_based_feature_source_emits_spec_and_features():
     reward_manager = _RewardManager(
         term_names=["t"],
-        term_cfgs=[_TermCfg(weight=1.0, params=None, func=lambda env: torch.tensor([3.0, 4.0]))],
+        term_cfgs=[
+            _TermCfg(weight=1.0, params=None, func=lambda env: torch.tensor([3.0, 4.0]))
+        ],
     )
     env = _Env(num_envs=2, reward_manager=reward_manager)
     source = ManagerBasedFeatureSource(

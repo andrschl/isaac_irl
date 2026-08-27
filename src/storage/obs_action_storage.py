@@ -99,8 +99,8 @@ class ObsActionBuffer:
             if ep_paths != leaf_paths:
                 raise ValueError(
                     f"Episode {ep_idx} obs leaf structure mismatch: "
-                    f"expected {[ '/'.join(p) for p in leaf_paths ]}, "
-                    f"got {[ '/'.join(p) for p in ep_paths ]}."
+                    f"expected {['/'.join(p) for p in leaf_paths]}, "
+                    f"got {['/'.join(p) for p in ep_paths]}."
                 )
             if actions.ndim != 2 or actions.shape[-1] != action_dim:
                 raise ValueError(
@@ -114,7 +114,9 @@ class ObsActionBuffer:
 
             for path in leaf_paths:
                 leaf = _get_at_path(obs_dict, path)
-                leaf_tensor = leaf if isinstance(leaf, torch.Tensor) else torch.as_tensor(leaf)
+                leaf_tensor = (
+                    leaf if isinstance(leaf, torch.Tensor) else torch.as_tensor(leaf)
+                )
                 if leaf_tensor.shape[0] != t_steps:
                     raise ValueError(
                         f"Episode {ep_idx} leaf {'/'.join(path)} has shape "
@@ -164,14 +166,18 @@ class ObsActionBuffer:
                 with shape ``[B, *leaf_shape]``.
         """
         if self._actions is None or self._n_total == 0:
-            raise RuntimeError("ObsActionBuffer is empty. Call load_episodes(...) first.")
+            raise RuntimeError(
+                "ObsActionBuffer is empty. Call load_episodes(...) first."
+            )
         if batch_size <= 0:
             raise ValueError(f"`batch_size` must be positive, got {batch_size}.")
 
         device = torch.device(device)
 
         if self.cfg.sample_with_replacement:
-            idx = torch.randint(0, self._n_total, (batch_size,), device=self._store_device)
+            idx = torch.randint(
+                0, self._n_total, (batch_size,), device=self._store_device
+            )
         else:
             if batch_size > self._n_total:
                 raise ValueError(

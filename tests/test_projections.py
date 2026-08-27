@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 """Tests for reward_model.projections."""
 
 from __future__ import annotations

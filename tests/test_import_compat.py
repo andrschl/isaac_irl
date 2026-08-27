@@ -16,8 +16,12 @@ from reward_features import ManagerBasedFeatureCfg as FeatureCfgFromPackage
 from reward_features import ManagerBasedFeatureSource as FeatureSourceFromPackage
 from reward_features import manager_based_reward_features as FeatureFnFromPackage
 from reward_features.manager_based import ManagerBasedFeatureCfg as FeatureCfgFromModule
-from reward_features.manager_based import ManagerBasedFeatureSource as FeatureSourceFromModule
-from reward_features.manager_based import manager_based_reward_features as FeatureFnFromModule
+from reward_features.manager_based import (
+    ManagerBasedFeatureSource as FeatureSourceFromModule,
+)
+from reward_features.manager_based import (
+    manager_based_reward_features as FeatureFnFromModule,
+)
 from reward_model import RewardModelCfg as RewardCfgFromPackage
 from reward_model.dense import RewardModelCfg as RewardCfgFromModule
 from runner import IrlRunner as RunnerFromPackage
@@ -66,16 +70,30 @@ def test_collectors_package_is_importable_and_advertises_public_api():
     assert set(algorithms.__all__) == {
         "BC",
         "BCCfg",
+        "ExponentialTarget",
         "IRLCfg",
         "IrlAlgorithm",
+        "Pmd",
+        "Sac",
+        "ScalarActionValue",
+        "ScalarActionValueEnsemble",
+        "SuccessorFeatureEnsemble",
+        "adaptive_exponential_target",
         "build_bc_alg",
+        "entropy_return_td_target",
+        "exponential_log_weights",
+        "exponential_target",
         "make_ppo_with_bc_cls",
+        "soft_task_q_td_target",
     }
     assert set(storage.__all__) == {
         "FeatureBufCfg",
         "FeatureTrajectoryBuffer",
         "ObsActionBufCfg",
         "ObsActionBuffer",
+        "TransitionBatch",
+        "TransitionReplayBuffer",
+        "TransitionRollout",
     }
     assert "ManagerBasedFeatureCfg" in reward_features.__all__
     assert set(utils.__all__) == {"RuntimeContext", "dump_run_configs"}

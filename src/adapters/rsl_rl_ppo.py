@@ -65,7 +65,6 @@ class RslRlPpoAdapter:
                 "RslRlPpoAdapter requires `rl_alg.actor` (rsl_rl >= 4.0 MLPModel contract)."
             )
         self._actor_facade = _RslRlActor(mlp_actor)
-        self._last_obs: Any = None
 
     @property
     def actor(self) -> _RslRlActor:
@@ -73,12 +72,12 @@ class RslRlPpoAdapter:
         return self._actor_facade
 
     @property
-    def _alpha(self) -> float:
-        return 0.0 if self._bc_alg is None else float(self._bc_alg.cfg.alpha)
+    def _bc_weight(self) -> float:
+        return 0.0 if self._bc_alg is None else float(self._bc_alg.cfg.weight)
 
     @property
     def _is_bc_only(self) -> bool:
-        return self._bc_alg is not None and self._alpha >= 1.0
+        return self._bc_alg is not None and self._bc_weight >= 1.0
 
     def update(self) -> dict[str, float]:
         if self._is_bc_only:
@@ -99,18 +98,19 @@ class RslRlPpoAdapter:
 
     def _collect_rollout(self) -> None:
         """Step the env for one cycle, scoring with the reward model and
-        feeding rsl_rl PPO's per-transition recorder. Caches the trailing obs
-        so the next cycle resumes without re-fetching from the env.
+        feeding rsl_rl PPO's per-transition recorder.
         """
-        if self._last_obs is None:
-            self._last_obs = self._obs_to_device(self._fetch_obs())
-        obs = self._last_obs
+        obs = self._obs_to_device(self._fetch_obs())
         env_device = getattr(self._env, "device", self._device)
         num_envs = int(self._env.num_envs)
-        with torch.inference_mode():
+        # Isaac may lazily cache simulator-state tensors during env.step().
+        # no_grad avoids autograd without creating immutable inference tensors.
+        with torch.no_grad():
             for _ in range(self._steps_per_env_per_cycle):
                 actions = self._rl_alg.act(obs)
-                obs_next, env_rewards, dones, extras = self._env.step(actions.to(env_device))
+                obs_next, env_rewards, dones, extras = self._env.step(
+                    actions.to(env_device)
+                )
                 obs_next = self._obs_to_device(obs_next)
                 env_rewards = env_rewards.to(self._device)
                 done_vec = self._as_done_vector(dones, num_envs)
@@ -125,7 +125,6 @@ class RslRlPpoAdapter:
                 self._rl_alg.process_env_step(obs_next, rewards, done_vec, extras)
                 obs = obs_next
         self._rl_alg.compute_returns(obs)
-        self._last_obs = obs
 
     def _fetch_obs(self) -> Any:
         obs = self._env.get_observations()
@@ -183,7 +182,7 @@ class RslRlPpoAdapter:
     def train_metrics(self) -> dict[str, float]:
         metrics = self._policy_std_stats()
         if self._bc_alg is not None:
-            metrics["BC/alpha"] = self._alpha
+            metrics["BC/weight"] = self._bc_weight
         return metrics
 
     def eval_metrics(self) -> dict[str, float]:
@@ -207,7 +206,9 @@ class RslRlPpoAdapter:
     def save_state(self) -> dict[str, Any]:
         return dict(self._rl_alg.save())
 
-    def load_state(self, checkpoint: dict[str, Any], *, load_optimizer: bool = True) -> None:
+    def load_state(
+        self, checkpoint: dict[str, Any], *, load_optimizer: bool = True
+    ) -> None:
         load_cfg = {
             "actor": True,
             "critic": True,

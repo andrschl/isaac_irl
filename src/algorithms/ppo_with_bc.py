@@ -54,8 +54,8 @@ def make_ppo_with_bc_cls(ppo_cls: type) -> type:
                 )
 
         @property
-        def alpha(self) -> float:
-            return self.bc_alg.cfg.alpha
+        def bc_weight(self) -> float:
+            return self.bc_alg.cfg.weight
 
         @contextlib.contextmanager
         def _inject_bc_into_optimizer_step(self, alpha: float) -> Iterator[list[float]]:
@@ -99,10 +99,10 @@ def make_ppo_with_bc_cls(ppo_cls: type) -> type:
                 handle.remove()
 
         def update(self) -> dict[str, float]:
-            if self.alpha == 0.0:
+            if self.bc_weight == 0.0:
                 return super().update()
 
-            alpha = self.alpha
+            alpha = self.bc_weight
             with self._inject_bc_into_optimizer_step(alpha) as bc_losses:
                 result = super().update()
 
@@ -110,7 +110,7 @@ def make_ppo_with_bc_cls(ppo_cls: type) -> type:
                 result = {"surrogate": float("nan")}
             if bc_losses:
                 result["bc"] = sum(bc_losses) / len(bc_losses)
-            result["bc_alpha"] = alpha
+            result["bc_weight"] = alpha
             return result
 
         def bc_only_update(self) -> dict[str, float]:
@@ -125,7 +125,7 @@ def make_ppo_with_bc_cls(ppo_cls: type) -> type:
             bc_loss.backward()
             nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
             self.optimizer.step()
-            return {"bc": bc_loss.detach().item(), "bc_alpha": self.alpha}
+            return {"bc": bc_loss.detach().item(), "bc_weight": self.bc_weight}
 
     PPOWithBC.__name__ = f"{ppo_cls.__name__}WithBC"
     PPOWithBC.__qualname__ = PPOWithBC.__name__

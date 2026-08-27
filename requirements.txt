@@ -7,4 +7,4 @@ einops>=0.8
 PyYAML>=6.0
 gymnasium>=0.29
 h5py>=3.9
-wandb>=0.16
+wandb[workspaces]>=0.27

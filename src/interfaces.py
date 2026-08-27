@@ -7,7 +7,7 @@ Lives at the top level of `src/` so it can be imported by both `runner.*` and
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import torch
 
@@ -102,8 +102,37 @@ class RlAlgorithm(Protocol):
     def save_state(self) -> dict[str, Any]:
         """Return checkpoint payload for this algorithm."""
 
-    def load_state(self, checkpoint: dict[str, Any], *, load_optimizer: bool = True) -> None:
+    def load_state(
+        self, checkpoint: dict[str, Any], *, load_optimizer: bool = True
+    ) -> None:
         """Load checkpoint payload for this algorithm."""
+
+
+class FixedRewardRlAlgorithm(RlAlgorithm, Protocol):
+    """Off-policy algorithm contract used by the fixed-reward runner."""
+
+    @property
+    def simulator_steps_per_update(self) -> int:
+        """Number of simulator transitions collected by one update."""
+
+    def reset_collection_state(self) -> None:
+        """Forget cached observations after an external validation rollout."""
+
+
+@runtime_checkable
+class PhasedOffPolicyAlgorithm(RlAlgorithm, Protocol):
+    """Runner contract for one-collection off-policy IRL cycles.
+
+    The runner calls collect_generation once, gives that generation to the
+    reward learner, performs reward updates, and only then calls update.
+    Implementing collect_generation is what selects the phased ordering.
+    """
+
+    def collect_generation(self) -> Any:
+        """Collect and retain one complete grouped policy generation."""
+
+    def reset_collection_state(self) -> None:
+        """Forget cached observations after an external validation rollout."""
 
 
 # No IrlAlgorithm Protocol: only one IRL estimator exists today

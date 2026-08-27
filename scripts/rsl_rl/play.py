@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 """Script to evaluate a trained RSL-RL policy checkpoint."""
 
 from __future__ import annotations
@@ -11,15 +13,27 @@ from isaaclab.app import AppLauncher
 import cli_args  # isort: skip
 
 parser = argparse.ArgumentParser(description="Evaluate an RL policy with RSL-RL.")
-parser.add_argument("--video", action="store_true", default=False, help="Record video during evaluation.")
-parser.add_argument("--video_length", type=int, default=1500, help="Length of the recorded video (in steps).")
+parser.add_argument(
+    "--video",
+    action="store_true",
+    default=False,
+    help="Record video during evaluation.",
+)
+parser.add_argument(
+    "--video_length",
+    type=int,
+    default=1500,
+    help="Length of the recorded video (in steps).",
+)
 parser.add_argument(
     "--disable_fabric",
     action="store_true",
     default=False,
     help="Disable fabric and use USD I/O operations.",
 )
-parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument(
+    "--num_envs", type=int, default=None, help="Number of environments to simulate."
+)
 parser.add_argument("--task", type=str, default=None, help="Task name.")
 parser.add_argument(
     "--num_steps",
@@ -67,13 +81,21 @@ def main() -> None:
     # Migrate legacy `policy=RslRlPpoActorCriticCfg(...)` to the new-style
     # `actor`/`critic` blocks required by rsl-rl >= 4.0. Without this,
     # `PPO.construct_algorithm` raises `KeyError: 'class_name'`.
-    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, _importlib_metadata.version("rsl-rl-lib"))
+    agent_cfg = handle_deprecated_rsl_rl_cfg(
+        agent_cfg, _importlib_metadata.version("rsl-rl-lib")
+    )
 
-    log_root_path = os.path.abspath(os.path.join("logs", "rsl_rl", agent_cfg.experiment_name))
-    resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+    log_root_path = os.path.abspath(
+        os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
+    )
+    resume_path = get_checkpoint_path(
+        log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint
+    )
     log_dir = os.path.dirname(resume_path)
 
-    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    env = gym.make(
+        args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None
+    )
     if args_cli.video:
         video_kwargs = {
             "video_folder": os.path.join(log_dir, "videos", "play"),
@@ -90,7 +112,9 @@ def main() -> None:
     env = RslRlVecEnvWrapper(env)
 
     print(f"[INFO] Loading policy checkpoint: {resume_path}")
-    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    runner = OnPolicyRunner(
+        env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device
+    )
     runner.load(resume_path)
     policy = runner.get_inference_policy(device=env.unwrapped.device)
 
@@ -124,7 +148,9 @@ def main() -> None:
             print(f"[INFO] play step {steps}")
 
         if args_cli.video and steps >= int(args_cli.video_length):
-            print(f"[INFO] Reached video length ({args_cli.video_length} steps). Stopping.")
+            print(
+                f"[INFO] Reached video length ({args_cli.video_length} steps). Stopping."
+            )
             break
         if max_steps is not None and steps >= max_steps:
             print(f"[INFO] Reached --num_steps={max_steps}. Stopping.")

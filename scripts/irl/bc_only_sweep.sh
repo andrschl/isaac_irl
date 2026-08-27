@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Comprehensive BC-only (alpha=1) verification sweep.
+# Comprehensive BC-only (weight=1) verification sweep.
 #
-# Runs pure behavioral cloning with alpha pinned to 1.0. The runner uses
+# Runs pure behavioral cloning with weight pinned to 1.0. The runner uses
 # `bc_only_update`, so no PPO rollouts or IRL reward updates are performed.
 # The sweep varies BC loss type, actor/BC learning rate, and seed.
 #
@@ -136,7 +136,7 @@ for LOSS in ${LOSS_TYPES}; do
 
     for SEED in ${SEEDS}; do
       RUN_IDX=$((RUN_IDX + 1))
-      RUN_NAME="${LOSS}_lr${LR_TAG}_alpha_1.0_seed_${SEED}"
+      RUN_NAME="${LOSS}_lr${LR_TAG}_weight_1.0_seed_${SEED}"
 
       echo "-----------------------------------------------------------------"
       echo " [${RUN_IDX}/${TOTAL_RUNS}] loss=${LOSS}  lr=${LR}  seed=${SEED}  run=${RUN_NAME}"
@@ -146,7 +146,7 @@ for LOSS in ${LOSS_TYPES}; do
         "${PYTHON}" scripts/irl/train_irl.py
         --task "${TASK}"
         --expert_data_path "${EXPERT_DATA_PATH}"
-        --bc_alpha "1.0"
+        --bc_weight "1.0"
         --bc_loss_type "${LOSS}"
         --seed "${SEED}"
         --max_iterations "${MAX_ITERATIONS}"

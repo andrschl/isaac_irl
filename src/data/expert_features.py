@@ -21,9 +21,41 @@ from einops import rearrange
 
 from ._hdf5 import iter_hdf5_demos
 from .sampling import subset_episodes
+from .feature_semantics import (
+    FEATURE_CAPTURE_TIMING,
+    FEATURE_SEMANTICS_VERSION,
+    FEATURE_VALUE_SEMANTICS,
+)
 
 if TYPE_CHECKING:
     from algorithms.irl import IrlAlgorithm
+
+
+def _validate_hdf5_feature_semantics(path: str) -> None:
+    try:
+        import h5py
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("Loading HDF5 demonstrations requires h5py.") from exc
+
+    expected = {
+        "feature_semantics_version": FEATURE_SEMANTICS_VERSION,
+        "feature_capture_timing": FEATURE_CAPTURE_TIMING,
+        "feature_value_semantics": FEATURE_VALUE_SEMANTICS,
+    }
+    with h5py.File(path, "r") as h5_file:
+        if "data" not in h5_file:
+            raise ValueError("HDF5 demonstration file is missing group 'data'.")
+        metadata = h5_file["data"].attrs
+        mismatches = {
+            key: metadata.get(key)
+            for key, expected_value in expected.items()
+            if metadata.get(key) != expected_value
+        }
+    if mismatches:
+        raise ValueError(
+            "Demonstrations use missing or legacy reward-feature semantics "
+            f"{mismatches}. Regenerate them with record_synthetic_demos.py."
+        )
 
 
 def _torch_load_payload(path: str) -> Any:
@@ -60,11 +92,15 @@ def _extract_feature_episodes_from_torch_payload(payload: Any) -> list[torch.Ten
         return _tensor_to_feature_episodes(payload)
 
     if not isinstance(payload, (list, tuple)):
-        raise TypeError(f"Expected list/tuple/tensor feature payload, got {type(payload)!r}")
+        raise TypeError(
+            f"Expected list/tuple/tensor feature payload, got {type(payload)!r}"
+        )
 
     episodes: list[torch.Tensor] = []
     for episode in payload:
-        episode_tensor = episode if isinstance(episode, torch.Tensor) else torch.as_tensor(episode)
+        episode_tensor = (
+            episode if isinstance(episode, torch.Tensor) else torch.as_tensor(episode)
+        )
         episodes.extend(_tensor_to_feature_episodes(episode_tensor))
     return episodes
 
@@ -73,7 +109,9 @@ def _extract_feature_episodes_from_hdf5(
     path: str,
     expected_feature_names: list[str] | None = None,
 ) -> list[torch.Tensor]:
-    def _episode_from_named_features(feature_group: Any, *, demo_key: str) -> torch.Tensor:
+    def _episode_from_named_features(
+        feature_group: Any, *, demo_key: str
+    ) -> torch.Tensor:
         if not hasattr(feature_group, "keys"):
             raise ValueError(
                 f"Demo '{demo_key}' uses legacy feature format. Expected group 'features/<feature_name>'. "
@@ -123,7 +161,9 @@ def _extract_feature_episodes_from_hdf5(
             num_steps = int(values.shape[0])
             if expected_steps is None:
                 if num_steps <= 0:
-                    raise ValueError(f"Demo '{demo_key}' has empty feature sequence '{feature_name}'.")
+                    raise ValueError(
+                        f"Demo '{demo_key}' has empty feature sequence '{feature_name}'."
+                    )
                 expected_steps = num_steps
             elif num_steps != expected_steps:
                 raise ValueError(
@@ -136,10 +176,14 @@ def _extract_feature_episodes_from_hdf5(
         return torch.cat(columns, dim=1)
 
     episodes: list[torch.Tensor] = []
-    for demo_key, demo_group in iter_hdf5_demos(path, payload_hint="features/<feature_name>"):
+    for demo_key, demo_group in iter_hdf5_demos(
+        path, payload_hint="features/<feature_name>"
+    ):
         if "features" not in demo_group:
             raise ValueError(f"Demo '{demo_key}' is missing required group 'features'.")
-        episodes.append(_episode_from_named_features(demo_group["features"], demo_key=demo_key))
+        episodes.append(
+            _episode_from_named_features(demo_group["features"], demo_key=demo_key)
+        )
 
     if len(episodes) == 0:
         raise ValueError("No demos found under 'data/*' in HDF5 payload.")
@@ -156,13 +200,17 @@ def _validate_feature_episodes(
 
     validated: list[torch.Tensor] = []
     for episode_idx, episode in enumerate(episodes):
-        episode_tensor = episode if isinstance(episode, torch.Tensor) else torch.as_tensor(episode)
+        episode_tensor = (
+            episode if isinstance(episode, torch.Tensor) else torch.as_tensor(episode)
+        )
         if episode_tensor.ndim != 2:
             raise ValueError(
                 f"Episode {episode_idx} must have shape [T, D], got {tuple(episode_tensor.shape)}"
             )
         if episode_tensor.shape[0] <= 0:
-            raise ValueError(f"Episode {episode_idx} is empty. Expected at least one timestep.")
+            raise ValueError(
+                f"Episode {episode_idx} is empty. Expected at least one timestep."
+            )
         if int(episode_tensor.shape[1]) != int(expected_feature_dim):
             raise ValueError(
                 f"Episode {episode_idx} feature dim mismatch: "
@@ -180,13 +228,16 @@ def load_feature_episodes(
 ) -> list[torch.Tensor]:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Expert data path does not exist: {path}")
-    if expected_feature_names is not None and len(expected_feature_names) != int(expected_feature_dim):
+    if expected_feature_names is not None and len(expected_feature_names) != int(
+        expected_feature_dim
+    ):
         raise ValueError(
             f"Expected {expected_feature_dim} feature names, got {len(expected_feature_names)}."
         )
 
     ext = os.path.splitext(path)[1].lower()
     if ext in {".h5", ".hdf5"}:
+        _validate_hdf5_feature_semantics(path)
         episodes = _extract_feature_episodes_from_hdf5(
             path, expected_feature_names=expected_feature_names
         )
@@ -198,7 +249,9 @@ def load_feature_episodes(
             f"Unsupported expert data extension '{ext}'. Expected one of: .pt, .pth, .h5, .hdf5"
         )
 
-    return _validate_feature_episodes(episodes, expected_feature_dim=expected_feature_dim)
+    return _validate_feature_episodes(
+        episodes, expected_feature_dim=expected_feature_dim
+    )
 
 
 def load_expert_success_rate(path: str) -> float | None:
@@ -258,7 +311,11 @@ def install_expert_features(
     )
     total = len(episodes)
     if max_num_trajectories is not None:
-        episodes = subset_episodes(episodes, max_num_trajectories, subset_strategy, seed)
-        print(f"[INFO] Expert subset: {len(episodes)}/{total} trajectories (strategy={subset_strategy})")
+        episodes = subset_episodes(
+            episodes, max_num_trajectories, subset_strategy, seed
+        )
+        print(
+            f"[INFO] Expert subset: {len(episodes)}/{total} trajectories (strategy={subset_strategy})"
+        )
     for episode in episodes:
         irl_alg.add_expert_episode(episode)

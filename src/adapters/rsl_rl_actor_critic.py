@@ -7,32 +7,32 @@ rsl_rl's `MLPModel`. Only Gaussian (non-state-dependent) is supported.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from config.train_irl import ActorCriticCfg
+if TYPE_CHECKING:
+    from config.train_irl import ActorCriticCfg
 
 
-def make_actor_critic(
+def make_actor(
     *,
     obs: Any,
     obs_groups: dict[str, list[str]],
     action_dim: int,
-    cfg: ActorCriticCfg,
+    cfg: "ActorCriticCfg",
     device: str,
     MLPModel: Any,
-) -> tuple[Any, Any]:
-    """Build (actor, critic) `MLPModel` instances on ``device``."""
+) -> Any:
+    """Build only the Gaussian actor; no scalar critic is constructed."""
     if cfg.state_dependent_std:
         raise NotImplementedError(
-            "state_dependent_std=True is not wired into the new MLPModel construction yet. "
-            "Add a HeteroscedasticGaussianDistribution branch if you need it."
+            "state_dependent_std=True requires a heteroscedastic Gaussian adapter."
         )
     distribution_cfg = {
         "class_name": "rsl_rl.modules.GaussianDistribution",
         "init_std": float(cfg.init_noise_std),
         "std_type": str(cfg.noise_std_type),
     }
-    actor = MLPModel(
+    return MLPModel(
         obs,
         obs_groups,
         "actor",
@@ -42,6 +42,26 @@ def make_actor_critic(
         obs_normalization=bool(cfg.actor_obs_normalization),
         distribution_cfg=distribution_cfg,
     ).to(device)
+
+
+def make_actor_critic(
+    *,
+    obs: Any,
+    obs_groups: dict[str, list[str]],
+    action_dim: int,
+    cfg: "ActorCriticCfg",
+    device: str,
+    MLPModel: Any,
+) -> tuple[Any, Any]:
+    """Build (actor, critic) `MLPModel` instances on ``device``."""
+    actor = make_actor(
+        obs=obs,
+        obs_groups=obs_groups,
+        action_dim=action_dim,
+        cfg=cfg,
+        device=device,
+        MLPModel=MLPModel,
+    )
     critic = MLPModel(
         obs,
         obs_groups,

@@ -1,6 +1,7 @@
+# ruff: noqa: E402
+
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -18,26 +19,20 @@ from data import (
     load_feature_episodes,
     subset_episodes,
 )
+from data.feature_semantics import (
+    FEATURE_CAPTURE_TIMING,
+    FEATURE_SEMANTICS_VERSION,
+    FEATURE_VALUE_SEMANTICS,
+)
 
 
-def _load_train_irl_module():
-    """Compatibility shim — only used for tests that touch script-side helpers
-    (e.g. ``_install_expert_episodes``) that still live in
-    ``scripts/irl/train_irl.py``."""
-    root = Path(__file__).resolve().parents[1]
-    module_path = root / "scripts" / "irl" / "train_irl.py"
-    module_name = "train_irl_module_expert_loader"
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load module spec from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+def _set_current_feature_semantics(data_group) -> None:
+    data_group.attrs["feature_semantics_version"] = FEATURE_SEMANTICS_VERSION
+    data_group.attrs["feature_capture_timing"] = FEATURE_CAPTURE_TIMING
+    data_group.attrs["feature_value_semantics"] = FEATURE_VALUE_SEMANTICS
 
 
 def test_load_feature_episodes_accepts_pt_payload(tmp_path: Path):
-    module = _load_train_irl_module()
     payload_path = tmp_path / "expert.pt"
 
     torch.save(
@@ -58,11 +53,11 @@ def test_load_feature_episodes_accepts_pt_payload(tmp_path: Path):
 
 def test_load_feature_episodes_accepts_named_hdf5_payload(tmp_path: Path):
     h5py = pytest.importorskip("h5py")
-    module = _load_train_irl_module()
     payload_path = tmp_path / "expert.hdf5"
 
     with h5py.File(payload_path, "w", track_order=True) as file_handle:
         data_group = file_handle.create_group("data", track_order=True)
+        _set_current_feature_semantics(data_group)
 
         demo_0 = data_group.create_group("demo_0", track_order=True)
         demo_0_features = demo_0.create_group("features", track_order=True)
@@ -90,11 +85,11 @@ def test_load_feature_episodes_accepts_named_hdf5_payload(tmp_path: Path):
 
 def test_load_feature_episodes_rejects_hdf5_feature_name_mismatch(tmp_path: Path):
     h5py = pytest.importorskip("h5py")
-    module = _load_train_irl_module()
     payload_path = tmp_path / "expert_bad_names.hdf5"
 
     with h5py.File(payload_path, "w", track_order=True) as file_handle:
         data_group = file_handle.create_group("data", track_order=True)
+        _set_current_feature_semantics(data_group)
         demo_0 = data_group.create_group("demo_0", track_order=True)
         demo_0_features = demo_0.create_group("features", track_order=True)
         demo_0_features.create_dataset("reach", data=torch.ones(3).numpy())
@@ -110,7 +105,6 @@ def test_load_feature_episodes_rejects_hdf5_feature_name_mismatch(tmp_path: Path
 
 def test_load_expert_success_rate_any_time(tmp_path: Path):
     h5py = pytest.importorskip("h5py")
-    module = _load_train_irl_module()
     payload_path = tmp_path / "expert.hdf5"
 
     with h5py.File(payload_path, "w") as file_handle:
@@ -128,7 +122,6 @@ def test_load_expert_success_rate_any_time(tmp_path: Path):
 
 def test_load_expert_success_rate_none_when_absent(tmp_path: Path):
     h5py = pytest.importorskip("h5py")
-    module = _load_train_irl_module()
     payload_path = tmp_path / "expert_nosuccess.hdf5"
 
     with h5py.File(payload_path, "w") as file_handle:
@@ -145,7 +138,6 @@ def test_load_expert_success_rate_none_when_absent(tmp_path: Path):
 
 def test_load_feature_episodes_rejects_legacy_hdf5_matrix_payload(tmp_path: Path):
     h5py = pytest.importorskip("h5py")
-    module = _load_train_irl_module()
     payload_path = tmp_path / "legacy.hdf5"
 
     with h5py.File(payload_path, "w") as file_handle:
@@ -153,12 +145,11 @@ def test_load_feature_episodes_rejects_legacy_hdf5_matrix_payload(tmp_path: Path
         demo_0 = data_group.create_group("demo_0")
         demo_0.create_dataset("features", data=torch.ones(3, 2).numpy())
 
-    with pytest.raises(ValueError, match="legacy feature format|Regenerate demos"):
+    with pytest.raises(ValueError, match="legacy reward-feature semantics|Regenerate"):
         load_feature_episodes(str(payload_path), expected_feature_dim=2)
 
 
 def test_load_feature_episodes_rejects_non_feature_torch_payload(tmp_path: Path):
-    module = _load_train_irl_module()
     payload_path = tmp_path / "bad.pt"
     torch.save({"obs": torch.randn(3, 2)}, payload_path)
 
@@ -167,7 +158,6 @@ def test_load_feature_episodes_rejects_non_feature_torch_payload(tmp_path: Path)
 
 
 def test_load_feature_episodes_rejects_feature_dim_mismatch(tmp_path: Path):
-    module = _load_train_irl_module()
     payload_path = tmp_path / "bad_dim.pt"
     torch.save([torch.randn(3, 3)], payload_path)
 
@@ -176,7 +166,6 @@ def test_load_feature_episodes_rejects_feature_dim_mismatch(tmp_path: Path):
 
 
 def test_subset_episodes_first_returns_first_n():
-    module = _load_train_irl_module()
     episodes = [
         torch.ones(2, 2),
         torch.ones(3, 2) * 2,
@@ -189,7 +178,6 @@ def test_subset_episodes_first_returns_first_n():
 
 
 def test_subset_episodes_random_same_seed_returns_same_subset():
-    module = _load_train_irl_module()
     episodes = [torch.ones(i + 1, 2) * i for i in range(10)]
     out_a = subset_episodes(episodes, max_num=3, strategy="random", seed=123)
     out_b = subset_episodes(episodes, max_num=3, strategy="random", seed=123)
@@ -211,7 +199,9 @@ def test_install_expert_features_with_max_num_trajectories_loads_subset(tmp_path
     from interfaces import FeatureSpec
     from reward_model import LinearFeatureRewardModel, RewardModelCfg
 
-    reward_model = LinearFeatureRewardModel(RewardModelCfg(num_features=2, is_linear=True))
+    reward_model = LinearFeatureRewardModel(
+        RewardModelCfg(num_features=2, is_linear=True)
+    )
     irl_alg = IrlAlgorithm(
         reward=reward_model,
         feature_spec=FeatureSpec(dim=2),

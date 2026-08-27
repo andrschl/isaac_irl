@@ -54,7 +54,9 @@ def _extract_obs_action_episodes_from_hdf5(
         if "obs" not in demo_group:
             raise ValueError(f"Demo '{demo_key}' is missing required group 'obs'.")
         if "actions" not in demo_group:
-            raise ValueError(f"Demo '{demo_key}' is missing required dataset 'actions'.")
+            raise ValueError(
+                f"Demo '{demo_key}' is missing required dataset 'actions'."
+            )
 
         obs_dict = _walk_obs_group(demo_group["obs"], demo_key=demo_key)
         actions_tensor = torch.as_tensor(demo_group["actions"][...])

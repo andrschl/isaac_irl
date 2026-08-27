@@ -63,7 +63,7 @@ def _try_get_nested_attr(root: Any, attr_path: tuple[str, ...]) -> Any | None:
     return None
 
 
-def _extract_ground_truth_reward_weights(env: Any) -> dict[str, float]:
+def extract_ground_truth_reward_weights(env: Any) -> dict[str, float]:
     """Extract reward term weights from env's reward_manager (ground truth params)."""
     try:
         unwrapped = getattr(env, "unwrapped", env)
@@ -74,7 +74,10 @@ def _extract_ground_truth_reward_weights(env: Any) -> dict[str, float]:
         term_cfgs = getattr(reward_manager, "_term_cfgs", [])
         if len(term_names) != len(term_cfgs):
             return {}
-        return {str(name): float(getattr(cfg, "weight", 0.0)) for name, cfg in zip(term_names, term_cfgs)}
+        return {
+            str(name): float(getattr(cfg, "weight", 0.0))
+            for name, cfg in zip(term_names, term_cfgs)
+        }
     except Exception:
         return {}
 
@@ -116,8 +119,11 @@ def dump_run_configs(
     experiment_cfg = {**serializable_train_cfg, "env": env_summary}
     _dump_yaml(os.path.join(params_dir, "experiment.yaml"), experiment_cfg)
     if env is not None:
-        ground_truth = _extract_ground_truth_reward_weights(env)
+        ground_truth = extract_ground_truth_reward_weights(env)
         if ground_truth:
-            _dump_yaml(os.path.join(params_dir, "ground_truth_reward_weights.yaml"), ground_truth)
+            _dump_yaml(
+                os.path.join(params_dir, "ground_truth_reward_weights.yaml"),
+                ground_truth,
+            )
             weights_str = "  ".join(f"{k}={v:.4f}" for k, v in ground_truth.items())
             print(f"[INFO] Ground truth reward weights: {weights_str}")

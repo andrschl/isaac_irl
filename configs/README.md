@@ -39,27 +39,35 @@ Runner validation settings (`runner`):
 - `validation_steps_per_env`: env steps per validation mode (`null` = `5 * steps_per_env_per_cycle`, `0` disables).
 - Validation emits feature returns only: `ValidationFeatures/<mode>/{expert,imitator,gap}/<feature>`; old reward-update `EvalFeatures/*` logs are intentionally disabled.
 
-## Behavioral Cloning (`bc`)
+## Policy algorithms
 
-Convex-combines a BC term into the policy loss: `L = (1 - α) · L_PPO + α · L_BC`.
-The BC dataset is read from `irl.expert_data_path` (same HDF5 as IRL features) —
-the loader pulls `data/demo_*/obs/<group>/<leaf>` and `data/demo_*/actions`
-alongside the `features` channel already consumed by IRL.
+The public choices are `ppo`, `sac`, and `pmd`. SAC and PMD select either
+`algo.value.type: direct` or `successor`; these are value representations,
+not separate algorithms. See [the RL algorithm reference](../docs/rl_algorithms.md)
+for the exact updates and parameter meanings.
 
-Fields (under `bc:`):
-- `alpha` (float in `[0, 1]`, default `0.0`): mixing weight. `0` = pure PPO+IRL
-  (no BC overhead), `1` = pure offline BC (normal PPO/IRL passes are skipped;
-  periodic stochastic + inference validation rollouts may still run for logging).
-- `loss_type` (`nll` | `mse`, default `nll`): `nll` maximizes log-likelihood of
-  the expert action under the actor's Gaussian; `mse` regresses the actor's
-  mean action to the expert action.
-- `batch_size` (int, default `256`): expert minibatch size sampled each PPO
-  optimizer step.
-- `val_fraction` (float in `[0, 1)`, default `0.0`): fraction of expert
-  *episodes* held out (never trained on) to report a validation BC loss.
-  The split is at the episode level, so no trajectory leaks between train and
-  val. `0` disables it; the held-out loss is computed during validation passes
-  (see `runner.validation_interval`).
+PMD keys that decide sample efficiency: `critic_updates_per_projection` (how
+many critic steps evaluate the frozen policy before each projection),
+`actor_projection_kl` (hard trust region per projection) and
+`candidate_target_kl` (the nonparametric target it aims at, which must be
+larger). CLI equivalents exist for all three:
+`--pmd_critic_updates_per_projection`, `--pmd_actor_projection_kl`,
+`--pmd_candidate_target_kl`, alongside `--rollout_steps`.
 
-CLI overrides: `--bc_alpha`, `--bc_loss_type`. Logged metrics: `BC/loss`,
-`BC/alpha`, and (when `val_fraction > 0`) `BC/val_loss`.
+## Behavioral cloning (`bc`)
+
+BC is independent of the RL algorithm:
+
+`L_actor = (1 - bc.weight) * L_RL + bc.weight * L_BC`.
+
+The dataset is read from `irl.expert_data_path`. `weight=0` is the default
+and constructs no BC loader, batch, or gradient.
+
+Fields:
+
+- `weight` (float in `[0,1]`): BC mixing weight.
+- `loss_type` (`nll` or `mse`): expert action likelihood or mean regression.
+- `batch_size`: expert minibatch size per actor optimizer step.
+- `val_fraction`: fraction of whole expert episodes reserved for validation.
+
+CLI overrides are `--bc_weight` and `--bc_loss_type`.

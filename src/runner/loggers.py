@@ -97,6 +97,7 @@ class WandbLogger:
         self.tags = list(tags) if tags else None
         self.config = dict(config) if config else None
         self._run: Any = None
+        self._last_step = 0
 
     def start(self, num_iterations: int) -> None:
         del num_iterations
@@ -114,9 +115,18 @@ class WandbLogger:
                 group=self.group,
                 tags=self.tags,
                 config=self.config,
-                reinit=True,
+                reinit="finish_previous",
                 settings=wandb.Settings(console="off"),
             )
+            self._run.define_metric("Data/simulator_transitions_total", summary="max")
+            self._run.define_metric(
+                "Overview/*",
+                step_metric="Data/simulator_transitions_total",
+                summary="last",
+            )
+            run_url = getattr(self._run, "url", None)
+            if run_url:
+                print(f"[INFO] W&B run: {run_url}", flush=True)
         except Exception as exc:
             print(f"[WARN] wandb.init failed: {exc}")
             self._run = None
@@ -128,6 +138,27 @@ class WandbLogger:
             self.start(num_iterations=0)
         if self._run is not None:
             self._run.log(event.payload, step=event.step)
+            self._last_step = int(event.step)
+
+    def _log_final_videos(self, wandb_module: Any) -> None:
+        """Upload promoted final videos from ``log_dir/videos`` when present."""
+
+        if self._run is None or self.log_dir is None:
+            return
+        videos_dir = os.path.join(self.log_dir, "videos")
+        video_names = (
+            "final_inference.mp4",
+            "final_stochastic.mp4",
+        )
+        video_payload = {
+            f"Videos/{os.path.splitext(file_name)[0]}": wandb_module.Video(
+                os.path.join(videos_dir, file_name), format="mp4"
+            )
+            for file_name in video_names
+            if os.path.isfile(os.path.join(videos_dir, file_name))
+        }
+        if video_payload:
+            self._run.log(video_payload, step=self._last_step)
 
     def finish(self, exit_code: int = 0) -> None:
         if self._run is None:
@@ -135,6 +166,7 @@ class WandbLogger:
         try:
             import wandb
 
+            self._log_final_videos(wandb)
             wandb.finish(exit_code=exit_code)
         except Exception as exc:
             print(f"[WARN] wandb.finish failed: {exc}")

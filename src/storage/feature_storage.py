@@ -49,7 +49,7 @@ class FeatureTrajectoryBuffer:
         self._cur: list[list[torch.Tensor]] = [[] for _ in range(ctx.num_envs)]
 
         # Completed episodes and their lengths.
-        self._eps: deque[torch.Tensor] = deque()   # each episode: [T, D]
+        self._eps: deque[torch.Tensor] = deque()  # each episode: [T, D]
         self._lengths: deque[int] = deque()
 
         self._steps_stored = 0
@@ -130,8 +130,48 @@ class FeatureTrajectoryBuffer:
 
         t_steps = int(feats.shape[0])
         for t in range(t_steps):
-            done = torch.tensor([t == t_steps - 1], dtype=torch.bool, device=feats.device)
+            done = torch.tensor(
+                [t == t_steps - 1], dtype=torch.bool, device=feats.device
+            )
             self.add_step(feats[t : t + 1], done)
+
+    def replace_episode_batch(self, feats: torch.Tensor, mask: torch.Tensor) -> None:
+        """Replace storage from a dense trajectory batch.
+
+        Args:
+            feats: [B,T,D]
+            mask: [B,T] bool contiguous-prefix validity mask
+        """
+        if feats.ndim != 3 or feats.shape[-1] != self.ctx.feature_dim:
+            raise ValueError(
+                f"Expected feats [B,T,{self.ctx.feature_dim}], got {tuple(feats.shape)}."
+            )
+        if tuple(mask.shape) != tuple(feats.shape[:2]) or mask.dtype != torch.bool:
+            raise ValueError(
+                f"Expected bool mask shape {tuple(feats.shape[:2])}, got "
+                f"{tuple(mask.shape)} with dtype {mask.dtype}."
+            )
+        prefix = mask.to(torch.int64).cummin(dim=1).values.to(torch.bool)
+        if not torch.equal(mask, prefix):
+            raise ValueError(
+                "mask must be a contiguous valid prefix for every episode."
+            )
+        self.clear()
+        lengths = mask.sum(dim=1).to("cpu").tolist()
+        for batch_idx, length in enumerate(lengths):
+            episode_length = int(length)
+            if episode_length < self.cfg.min_ep_len:
+                continue
+            episode = (
+                feats[batch_idx, :episode_length]
+                .detach()
+                .to(device=self._store_device, dtype=self.cfg.store_dtype)
+                .clone()
+            )
+            self._eps.append(episode)
+            self._lengths.append(episode_length)
+            self._steps_stored += episode_length
+        self._evict_by_capacity()
 
     def _finalize(self, env_i: int) -> None:
         ep_list = self._cur[env_i]
@@ -163,7 +203,9 @@ class FeatureTrajectoryBuffer:
         if self.cfg.sample_weighted_by_length:
             lens = torch.tensor(list(self._lengths), dtype=torch.float32)
             probs = lens / lens.sum()
-            return torch.multinomial(probs, num_samples=batch_size, replacement=True).tolist()
+            return torch.multinomial(
+                probs, num_samples=batch_size, replacement=True
+            ).tolist()
 
         return torch.randint(0, len(self._eps), (batch_size,)).tolist()
 
@@ -203,7 +245,9 @@ class FeatureTrajectoryBuffer:
             discounted_feature_returns [B, D]
             lengths                    [B]
         """
-        feats, mask, lengths = self.sample_episodes(batch_size=batch_size, device=device)
+        feats, mask, lengths = self.sample_episodes(
+            batch_size=batch_size, device=device
+        )
         z_ret = self.discounted_feature_returns(feats, mask, self.gamma)
         return z_ret, lengths
 
@@ -221,11 +265,12 @@ class FeatureTrajectoryBuffer:
         return einsum(feats, mask.to(dtype=feats.dtype), powers, "b t d, b t, t -> b d")
 
     @staticmethod
-    def discounted_returns(r: torch.Tensor, mask: torch.Tensor, gamma: float) -> torch.Tensor:
+    def discounted_returns(
+        r: torch.Tensor, mask: torch.Tensor, gamma: float
+    ) -> torch.Tensor:
         """
         r: [B,T], mask: [B,T] -> returns [B]
         """
         _, t = r.shape
         powers = gamma ** torch.arange(t, device=r.device, dtype=r.dtype)
         return einsum(r, mask.to(dtype=r.dtype), powers, "b t, b t, t -> b")
-

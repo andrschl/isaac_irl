@@ -1,49 +1,49 @@
 #!/usr/bin/env bash
-# Sweep BC mixing weight `alpha` × local learning-rate neighborhood × seed,
+# Sweep BC mixing weight `bc_weight` × local learning-rate neighborhood × seed,
 # with the BC loss type pinned to NLL.
 #
-# The learning rate at each alpha is the geometric interpolation between two
+# The learning rate at each bc_weight is the geometric interpolation between two
 # pre-tuned endpoint LRs, optionally scaled by a local multiplier m:
 #
-#   eta_init(alpha) = eta_ppo^(1 - alpha) * eta_bc^(alpha)
-#   eta_run(alpha, m) = m * eta_init(alpha)
+#   eta_init(bc_weight) = eta_ppo^(1 - bc_weight) * eta_bc^(bc_weight)
+#   eta_run(bc_weight, m) = m * eta_init(bc_weight)
 #
-# where eta_ppo (alpha=0 endpoint) is the vanilla PPO LR from
-# configs/franka_lift/experiment.yaml and eta_bc (alpha=1 endpoint) is the best
+# where eta_ppo (bc_weight=0 endpoint) is the vanilla PPO LR from
+# configs/franka_lift/experiment.yaml and eta_bc (bc_weight=1 endpoint) is the best
 # BC-only LR found via scripts/irl/bc_only_sweep.sh. Multipliers default to
-# {0.5, 1, 2} so each alpha gets a 3-point local LR neighborhood.
+# {0.5, 1, 2} so each bc_weight gets a 3-point local LR neighborhood.
 #
 # Self-contained: invokes scripts/irl/train_irl.py directly. BC shares PPO's
 # actor optimizer, so `--learning_rate <lr>` controls both losses. Runs are
 # sequential (Isaac Lab opens one SimulationApp per process — do NOT parallelize).
 #
 # Runs land under:
-#   logs/irl/<EXPERIMENT_NAME>/<timestamp>_nll_mult<m>_alpha_<alpha>_seed_<s>/
+#   logs/irl/<EXPERIMENT_NAME>/<timestamp>_nll_mult<m>_bc_weight_<bc_weight>_seed_<s>/
 # and (for wandb) are grouped under one project / one experiment_name.
 #
 # Usage:
-#   scripts/irl/bc_alpha_lr_sweep.sh                                 # full grid
-#   ALPHAS="0 0.5 1" scripts/irl/bc_alpha_lr_sweep.sh                # narrow alpha grid
-#   LR_MULTIPLIERS="1" SEEDS="42" scripts/irl/bc_alpha_lr_sweep.sh   # single LR, single seed
-#   ETA_BC=1e-2 scripts/irl/bc_alpha_lr_sweep.sh                     # different alpha=1 endpoint
-#   LOGGER=noop scripts/irl/bc_alpha_lr_sweep.sh              # no wandb
+#   scripts/irl/bc_weight_lr_sweep.sh                                 # full grid
+#   BC_WEIGHTS="0 0.5 1" scripts/irl/bc_weight_lr_sweep.sh                # narrow bc_weight grid
+#   LR_MULTIPLIERS="1" SEEDS="42" scripts/irl/bc_weight_lr_sweep.sh   # single LR, single seed
+#   ETA_BC=1e-2 scripts/irl/bc_weight_lr_sweep.sh                     # different bc_weight=1 endpoint
+#   LOGGER=noop scripts/irl/bc_weight_lr_sweep.sh              # no wandb
 #
 # Knobs (env vars):
-#   ALPHAS            space-separated BC alpha values    (default: "0 0.01 0.1 0.9 0.99 1")
+#   BC_WEIGHTS            space-separated BC bc_weight values    (default: "0 0.01 0.1 0.9 0.99 1")
 #   LR_MULTIPLIERS    space-separated local LR scales    (default: "0.5 1 2")
 #   SEEDS             space-separated seeds              (default: "1 2 3")
-#   ETA_PPO           alpha=0 endpoint learning rate     (default: 1e-4)
-#   ETA_BC            alpha=1 endpoint learning rate     (default: 1e-3)
+#   ETA_PPO           bc_weight=0 endpoint learning rate     (default: 1e-4)
+#   ETA_BC            bc_weight=1 endpoint learning rate     (default: 1e-3)
 #   MAX_ITERATIONS    iterations per non-BC-only run      (default: 500)
 #   BC_ONLY_MAX_ITERATIONS
-#                     iterations for alpha=1 pure BC runs (default: 20000)
+#                     iterations for bc_weight=1 pure BC runs (default: 20000)
 #   BC_ONLY_VALIDATION_INTERVAL
-#                     validation cadence for alpha=1 runs (default: 1000).
+#                     validation cadence for bc_weight=1 runs (default: 1000).
 #                     BC iters are ms each, but each validation triggers an env
 #                     rollout — bump high so validation doesn't dominate wall-clock.
 #   LOGGER            wandb | noop      (default: wandb)
-#   WANDB_PROJECT     wandb project name (alias: LOG_PROJECT_NAME) (default: bc_alpha_lr_sweep)
-#   EXPERIMENT_NAME   group name for logs + logger       (default: bc_alpha_lr_sweep_nll)
+#   WANDB_PROJECT     wandb project name (alias: LOG_PROJECT_NAME) (default: bc_weight_lr_sweep)
+#   EXPERIMENT_NAME   group name for logs + logger       (default: bc_weight_lr_sweep_nll)
 #   TASK              Isaac Lab task name                (default: Isaac-Lift-Cube-Franka-v0)
 #   EXPERT_DATA_PATH  HDF5 with (obs, actions, features) (default: logs/demos/franka_lift/demos.hdf5)
 #   RECORD_VIDEO      1 to record + save final clips     (default: 1)
@@ -51,7 +51,7 @@
 #   EXTRA_ARGS        base args appended to every run    (default: --headless)
 #   PYTHON            python interpreter                 (default: python; "echo" for dry-run)
 #
-# Total runs = |ALPHAS| × |LR_MULTIPLIERS| × |SEEDS|, run sequentially.
+# Total runs = |BC_WEIGHTS| × |LR_MULTIPLIERS| × |SEEDS|, run sequentially.
 
 set -euo pipefail
 
@@ -62,7 +62,7 @@ cd "${REPO_ROOT}"
 # ---------------------------------------------------------------------------
 # Defaults.
 # ---------------------------------------------------------------------------
-ALPHAS="${ALPHAS:-0 0.01 0.1 0.9 0.99 1}"
+BC_WEIGHTS="${BC_WEIGHTS:-0 0.01 0.1 0.9 0.99 1}"
 LR_MULTIPLIERS="${LR_MULTIPLIERS:-0.5 1 2}"
 SEEDS="${SEEDS:-1 2 3}"
 ETA_PPO="${ETA_PPO:-1e-4}"
@@ -71,8 +71,8 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-500}"
 BC_ONLY_MAX_ITERATIONS="${BC_ONLY_MAX_ITERATIONS:-20000}"
 BC_ONLY_VALIDATION_INTERVAL="${BC_ONLY_VALIDATION_INTERVAL:-1000}"
 LOGGER="${LOGGER:-wandb}"
-LOG_PROJECT_NAME="${LOG_PROJECT_NAME:-${WANDB_PROJECT:-bc_alpha_lr_sweep}}"
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-bc_alpha_lr_sweep_nll}"
+LOG_PROJECT_NAME="${LOG_PROJECT_NAME:-${WANDB_PROJECT:-bc_weight_lr_sweep}}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-bc_weight_lr_sweep_nll}"
 TASK="${TASK:-Isaac-Lift-Cube-Franka-v0}"
 EXPERT_DATA_PATH="${EXPERT_DATA_PATH:-logs/demos/franka_lift/demos.hdf5}"
 RECORD_VIDEO="${RECORD_VIDEO:-1}"
@@ -90,10 +90,10 @@ is_positive_float() {
   }'
 }
 
-is_valid_alpha() {
-  awk -v alpha="$1" 'BEGIN {
-    if (alpha !~ /^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][-+]?[0-9]+)?$/) exit 1
-    value = alpha + 0
+is_valid_bc_weight() {
+  awk -v bc_weight="$1" 'BEGIN {
+    if (bc_weight !~ /^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][-+]?[0-9]+)?$/) exit 1
+    value = bc_weight + 0
     exit !(0 <= value && value <= 1)
   }'
 }
@@ -162,9 +162,9 @@ for ENDPOINT in ETA_PPO ETA_BC; do
   fi
 done
 
-for ALPHA in ${ALPHAS}; do
-  if ! is_valid_alpha "${ALPHA}"; then
-    echo "[ERROR] ALPHAS entries must be numeric values in [0, 1] (got '${ALPHA}')." >&2
+for BC_WEIGHT in ${BC_WEIGHTS}; do
+  if ! is_valid_bc_weight "${BC_WEIGHT}"; then
+    echo "[ERROR] BC_WEIGHTS entries must be numeric values in [0, 1] (got '${BC_WEIGHT}')." >&2
     exit 1
   fi
 done
@@ -184,21 +184,21 @@ for SEED in ${SEEDS}; do
 done
 
 # ---------------------------------------------------------------------------
-# Summary (compute the (alpha, m) -> lr grid up front so the user sees it).
+# Summary (compute the (bc_weight, m) -> lr grid up front so the user sees it).
 # ---------------------------------------------------------------------------
 TOTAL_RUNS=0
-for _ in ${ALPHAS}; do
+for _ in ${BC_WEIGHTS}; do
   for _ in ${LR_MULTIPLIERS}; do
     for _ in ${SEEDS}; do TOTAL_RUNS=$((TOTAL_RUNS + 1)); done
   done
 done
 
 echo "================================================================="
-echo " BC alpha × LR-neighborhood × seed sweep  (loss=nll)"
+echo " BC bc_weight × LR-neighborhood × seed sweep  (loss=nll)"
 echo "================================================================="
 echo " task            : ${TASK}"
 echo " expert data     : ${EXPERT_DATA_PATH}"
-echo " alphas          : ${ALPHAS}"
+echo " bc_weights          : ${BC_WEIGHTS}"
 echo " lr multipliers  : ${LR_MULTIPLIERS}"
 echo " seeds           : ${SEEDS}"
 echo " eta_ppo (a=0)   : ${ETA_PPO}"
@@ -221,15 +221,15 @@ fi
 echo " extra args base : ${BASE_EXTRA_ARGS}"
 echo " total runs      : ${TOTAL_RUNS}"
 echo "-----------------------------------------------------------------"
-printf " %-8s %-14s" "alpha" "eta_init"
+printf " %-8s %-14s" "bc_weight" "eta_init"
 for MULT in ${LR_MULTIPLIERS}; do
   printf " %-14s" "m=${MULT}"
 done
 printf "\n"
-for ALPHA in ${ALPHAS}; do
-  ETA_INIT=$(awk -v a="${ALPHA}" -v ep="${ETA_PPO}" -v eb="${ETA_BC}" \
+for BC_WEIGHT in ${BC_WEIGHTS}; do
+  ETA_INIT=$(awk -v a="${BC_WEIGHT}" -v ep="${ETA_PPO}" -v eb="${ETA_BC}" \
     'BEGIN { printf "%.6e", (ep^(1-a)) * (eb^a) }')
-  printf " %-8s %-14s" "${ALPHA}" "${ETA_INIT}"
+  printf " %-8s %-14s" "${BC_WEIGHT}" "${ETA_INIT}"
   for MULT in ${LR_MULTIPLIERS}; do
     LR=$(awk -v eta="${ETA_INIT}" -v m="${MULT}" \
       'BEGIN { printf "%.6e", m * eta }')
@@ -247,8 +247,8 @@ NUM_SEEDS=$(awk -v s="${SEEDS}" 'BEGIN { n = split(s, _, /[[:space:]]+/); print 
 RUN_IDX=0
 FAILED_RUNS=()
 
-for ALPHA in ${ALPHAS}; do
-  ETA_INIT=$(awk -v a="${ALPHA}" -v ep="${ETA_PPO}" -v eb="${ETA_BC}" \
+for BC_WEIGHT in ${BC_WEIGHTS}; do
+  ETA_INIT=$(awk -v a="${BC_WEIGHT}" -v ep="${ETA_PPO}" -v eb="${ETA_BC}" \
     'BEGIN { printf "%.6e", (ep^(1-a)) * (eb^a) }')
 
   for MULT in ${LR_MULTIPLIERS}; do
@@ -260,20 +260,20 @@ for ALPHA in ${ALPHAS}; do
       RUN_IDX=$((RUN_IDX + 1))
 
       if [[ "${NUM_SEEDS}" -eq 1 ]]; then
-        RUN_NAME="nll_mult${MULT_TAG}_alpha_${ALPHA}"
+        RUN_NAME="nll_mult${MULT_TAG}_bc_weight_${BC_WEIGHT}"
       else
-        RUN_NAME="nll_mult${MULT_TAG}_alpha_${ALPHA}_seed_${SEED}"
+        RUN_NAME="nll_mult${MULT_TAG}_bc_weight_${BC_WEIGHT}_seed_${SEED}"
       fi
 
       echo "-----------------------------------------------------------------"
-      echo " [${RUN_IDX}/${TOTAL_RUNS}] alpha=${ALPHA}  m=${MULT}  lr=${LR}  seed=${SEED}  run=${RUN_NAME}"
+      echo " [${RUN_IDX}/${TOTAL_RUNS}] bc_weight=${BC_WEIGHT}  m=${MULT}  lr=${LR}  seed=${SEED}  run=${RUN_NAME}"
       echo "-----------------------------------------------------------------"
 
       CMD=(
         "${PYTHON}" scripts/irl/train_irl.py
         --task "${TASK}"
         --expert_data_path "${EXPERT_DATA_PATH}"
-        --bc_alpha "${ALPHA}"
+        --bc_weight "${BC_WEIGHT}"
         --bc_loss_type "nll"
         --seed "${SEED}"
         --experiment_name "${EXPERIMENT_NAME}"
@@ -285,7 +285,7 @@ for ALPHA in ${ALPHAS}; do
       fi
       RUN_MAX_ITERATIONS="${MAX_ITERATIONS}"
       RUN_VALIDATION_INTERVAL=""
-      if awk -v alpha="${ALPHA}" 'BEGIN { exit !((alpha + 0) == 1.0) }'; then
+      if awk -v bc_weight="${BC_WEIGHT}" 'BEGIN { exit !((bc_weight + 0) == 1.0) }'; then
         RUN_MAX_ITERATIONS="${BC_ONLY_MAX_ITERATIONS}"
         # BC-only iters are ~ms each, but validation triggers a full env rollout —
         # bump the cadence so validation doesn't dominate wall-clock.
@@ -340,8 +340,8 @@ for ALPHA in ${ALPHAS}; do
       fi
 
       if [[ ${RUN_FAILED} -ne 0 ]]; then
-        echo "[WARN] Run alpha=${ALPHA} m=${MULT} seed=${SEED} failed; continuing sweep." >&2
-        FAILED_RUNS+=("alpha=${ALPHA} m=${MULT} seed=${SEED}")
+        echo "[WARN] Run bc_weight=${BC_WEIGHT} m=${MULT} seed=${SEED} failed; continuing sweep." >&2
+        FAILED_RUNS+=("bc_weight=${BC_WEIGHT} m=${MULT} seed=${SEED}")
       fi
       echo ""
     done

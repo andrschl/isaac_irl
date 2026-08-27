@@ -24,7 +24,13 @@ def latest_mp4_in(video_dir: str) -> str | None:
     if not mp4s:
         return None
     pat = re.compile(r"-(?:iter|step)-(\d+)\.mp4$")
-    latest = max(mp4s, key=lambda name: (int(pat.search(name).group(1)) if pat.search(name) else -1, name))
+    latest = max(
+        mp4s,
+        key=lambda name: (
+            int(pat.search(name).group(1)) if pat.search(name) else -1,
+            name,
+        ),
+    )
     return os.path.join(video_dir, latest)
 
 
@@ -50,7 +56,11 @@ def build_video_step_trigger(
         # the final rollout. `video_length` may exceed `steps_per_iter`; gym's
         # RecordVideo keeps recording across env.step() calls.
         final_trigger_step = max(0, (max_iterations - 1) * steps_per_iter)
-        return (lambda step_idx: step_idx == final_trigger_step), train_video_dir, steps_per_iter
+        return (
+            (lambda step_idx: step_idx == final_trigger_step),
+            train_video_dir,
+            steps_per_iter,
+        )
 
     if video_interval_iterations is not None:
         if video_interval_iterations <= 0:
@@ -58,16 +68,24 @@ def build_video_step_trigger(
                 f"`--video_interval_iterations` must be > 0, got {video_interval_iterations}."
             )
         interval_steps = video_interval_iterations * steps_per_iter
-        return (lambda step_idx: step_idx % interval_steps == 0), train_video_dir, steps_per_iter
+        return (
+            (lambda step_idx: step_idx % interval_steps == 0),
+            train_video_dir,
+            steps_per_iter,
+        )
 
     if video_interval <= 0:
         raise ValueError(f"`--video_interval` must be > 0, got {video_interval}.")
     return (lambda step_idx: step_idx % video_interval == 0), None, None
 
 
-def rename_video_files_to_iteration_index(video_dir: str, steps_per_iteration: int) -> None:
+def rename_video_files_to_iteration_index(
+    video_dir: str, steps_per_iteration: int
+) -> None:
     if steps_per_iteration <= 0:
-        raise ValueError(f"`steps_per_iteration` must be > 0, got {steps_per_iteration}.")
+        raise ValueError(
+            f"`steps_per_iteration` must be > 0, got {steps_per_iteration}."
+        )
     if not os.path.isdir(video_dir):
         return
 
@@ -117,8 +135,7 @@ def finalize_videos(
 
     videos_dir = os.path.join(log_dir, "videos")
     if args_cli.video_final_only:
-        # Explicit dual-clip mode: deterministic + stochastic, named at the
-        # source by runner.record_final_rollouts.
+        # Explicit deterministic and stochastic target-policy rollouts.
         for mode_name in ("inference", "stochastic"):
             source = os.path.join(train_video_dir, f"final_{mode_name}.mp4")
             if not os.path.isfile(source):

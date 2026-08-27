@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections import defaultdict
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -33,6 +34,7 @@ class RobomimicDataCollector:
         filename: str,
         num_demos: int,
         flush_freq: int = 1,
+        metadata: Mapping[str, str | int | float | bool] | None = None,
     ) -> None:
         self.task_name = str(task_name)
         self.output_dir = os.path.abspath(output_dir)
@@ -40,6 +42,7 @@ class RobomimicDataCollector:
         self.file_path = os.path.join(self.output_dir, self.filename)
         self.num_demos = int(num_demos)
         self.flush_freq = int(max(1, flush_freq))
+        self.metadata = dict(metadata or {})
 
         self._state = _CollectorState()
 
@@ -63,6 +66,8 @@ class RobomimicDataCollector:
         self._h5_data_group = self._h5_file.create_group("data", track_order=True)
         self._h5_data_group.attrs["total"] = 0
         self._h5_data_group.attrs["env_name"] = self.task_name
+        for key, value in self.metadata.items():
+            self._h5_data_group.attrs[str(key)] = value
         self._state = _CollectorState()
         self._episode_buffers = []
 
@@ -86,9 +91,13 @@ class RobomimicDataCollector:
         if self._state.num_envs is None:
             first_leaf = next(iter(leaf_tensors.values()))
             if first_leaf.ndim == 0:
-                raise ValueError(f"Expected batched tensor for key '{key}', got scalar tensor.")
+                raise ValueError(
+                    f"Expected batched tensor for key '{key}', got scalar tensor."
+                )
             self._state.num_envs = int(first_leaf.shape[0])
-            self._episode_buffers = [defaultdict(list) for _ in range(self._state.num_envs)]
+            self._episode_buffers = [
+                defaultdict(list) for _ in range(self._state.num_envs)
+            ]
 
         num_envs = int(self._state.num_envs)
 
@@ -171,20 +180,28 @@ class RobomimicDataCollector:
             self._h5_file = None
             self._h5_data_group = None
 
-    def _flatten_to_leaf_tensors(self, root_key: str, value: Any) -> dict[str, torch.Tensor]:
+    def _flatten_to_leaf_tensors(
+        self, root_key: str, value: Any
+    ) -> dict[str, torch.Tensor]:
         if self._is_mapping_like(value):
             leaf_tensors: dict[str, torch.Tensor] = {}
             for sub_key in value.keys():
                 sub_path = self._join_key_path(root_key, self._key_to_str(sub_key))
                 nested_value = value[sub_key]
-                nested_leaf_tensors = self._flatten_to_leaf_tensors(sub_path, nested_value)
+                nested_leaf_tensors = self._flatten_to_leaf_tensors(
+                    sub_path, nested_value
+                )
                 for leaf_path, leaf_tensor in nested_leaf_tensors.items():
                     if leaf_path in leaf_tensors:
-                        raise ValueError(f"Duplicate tensor leaf path '{leaf_path}' while flattening '{root_key}'.")
+                        raise ValueError(
+                            f"Duplicate tensor leaf path '{leaf_path}' while flattening '{root_key}'."
+                        )
                     leaf_tensors[leaf_path] = leaf_tensor
             return leaf_tensors
 
-        tensor_value = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+        tensor_value = (
+            value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+        )
         return {root_key: tensor_value}
 
     @staticmethod
@@ -208,7 +225,9 @@ class RobomimicDataCollector:
         return hasattr(value, "keys") and hasattr(value, "__getitem__")
 
     @staticmethod
-    def _normalize_env_ids(env_ids: torch.Tensor | list[int] | tuple[int, ...]) -> list[int]:
+    def _normalize_env_ids(
+        env_ids: torch.Tensor | list[int] | tuple[int, ...],
+    ) -> list[int]:
         if isinstance(env_ids, torch.Tensor):
             raw_ids = env_ids.detach().reshape(-1).tolist()
         else:
@@ -233,7 +252,9 @@ class RobomimicDataCollector:
         return int(len(first_steps))
 
     @staticmethod
-    def _write_dataset_by_path(root_group: Any, key_path: str, values: torch.Tensor) -> None:
+    def _write_dataset_by_path(
+        root_group: Any, key_path: str, values: torch.Tensor
+    ) -> None:
         path_parts = [part for part in str(key_path).split("/") if part]
         if len(path_parts) == 0:
             raise ValueError(f"Invalid empty dataset key path: '{key_path}'.")
@@ -243,7 +264,9 @@ class RobomimicDataCollector:
             if part in group:
                 next_group = group[part]
                 if not hasattr(next_group, "create_group"):
-                    raise ValueError(f"Dataset path collision at '{part}' while writing '{key_path}'.")
+                    raise ValueError(
+                        f"Dataset path collision at '{part}' while writing '{key_path}'."
+                    )
                 group = next_group
             else:
                 group = group.create_group(part, track_order=True)

@@ -257,7 +257,7 @@ for IDX in "${!SAMPLES[@]}"; do
       "${PYTHON}" scripts/irl/train_irl.py
       --task "${TASK}"
       --expert_data_path "${EXPERT_DATA_PATH}"
-      --bc_alpha 0
+      --bc_weight 0
       --reward_learning_rate "${LR}"
       --reward_regularization_strength "${REG}"
       --reward_updates_per_cycle "${R_UPD}"

@@ -62,7 +62,9 @@ class BaseRewardModel(nn.Module):
                 f"got rewards {tuple(rewards.shape)} and mask {tuple(mask.shape)}."
             )
         time_steps = rewards.shape[1]
-        powers = gamma ** torch.arange(time_steps, device=rewards.device, dtype=rewards.dtype)
+        powers = gamma ** torch.arange(
+            time_steps, device=rewards.device, dtype=rewards.dtype
+        )
         return torch.einsum("bt,bt,t->b", rewards, mask.to(dtype=rewards.dtype), powers)
 
     def get_regularization_loss(self) -> torch.Tensor:
@@ -84,7 +86,9 @@ class BaseRewardModel(nn.Module):
     @staticmethod
     def _validate_discount_inputs(feats: torch.Tensor, mask: torch.Tensor) -> None:
         if feats.ndim != 3:
-            raise ValueError(f"Expected feats shape [B, T, D], got {tuple(feats.shape)}.")
+            raise ValueError(
+                f"Expected feats shape [B, T, D], got {tuple(feats.shape)}."
+            )
         if mask.ndim != 2:
             raise ValueError(f"Expected mask shape [B, T], got {tuple(mask.shape)}.")
         if feats.shape[:2] != mask.shape:
@@ -93,7 +97,9 @@ class BaseRewardModel(nn.Module):
                 f"got feats {tuple(feats.shape)} and mask {tuple(mask.shape)}."
             )
 
-    def _parameter_device_dtype(self, *, fallback: torch.Tensor) -> tuple[torch.device, torch.dtype]:
+    def _parameter_device_dtype(
+        self, *, fallback: torch.Tensor
+    ) -> tuple[torch.device, torch.dtype]:
         param = next(self.parameters(), None)
         if param is None:
             return fallback.device, fallback.dtype

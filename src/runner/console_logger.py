@@ -13,7 +13,10 @@ class ConsoleLogger:
     """Print concise per-event summaries to stdout."""
 
     def start(self, num_iterations: int) -> None:
-        print(f"[INFO] Starting learning for {int(num_iterations)} iterations.")
+        print(
+            f"[INFO] Starting learning for {int(num_iterations)} iterations.",
+            flush=True,
+        )
 
     def finish(self, exit_code: int = 0) -> None:
         del exit_code
@@ -32,25 +35,41 @@ class ConsoleLogger:
     @staticmethod
     def _iteration_summary(event: LogEvent) -> None:
         payload = event.payload
-        policy_loss = payload.get("RL/policy_loss", float("nan"))
-        reward_loss = payload.get("IRL/reward_loss", float("nan"))
-        feat_diff = payload.get("IRL/feature_exp_diff_norm", float("nan"))
-        bc_loss = payload.get("BC/loss")
-        bc_str = f"  bc_loss={bc_loss:.4f}" if bc_loss is not None else ""
-        print(
-            f"[INFO] iter {event.iteration + 1}  policy_loss={policy_loss:.4f}  "
-            f"reward_loss={reward_loss:.4f}  feat_diff_norm={feat_diff:.4f}{bc_str}"
-        )
+        fields: list[str] = []
+        for label, key in (
+            ("critic_loss", "Overview/critic_loss"),
+            ("actor_delta", "Overview/actor_parameter_delta"),
+            ("policy_std", "Overview/policy_std"),
+            ("actor_kl", "Overview/pmd_actor_kl"),
+            ("policy_updates", "Overview/policy_updates"),
+            ("timeout", "Overview/timeout_fraction"),
+            ("no_bootstrap", "Overview/bootstrap_disabled_fraction"),
+            ("clip", "Overview/action_clipped_fraction"),
+            ("reward_error", "Overview/reward_reconstruction_error"),
+            ("non_finite", "Overview/non_finite_count"),
+            ("policy_loss", "RL/policy_loss"),
+            ("reward_loss", "IRL/reward_loss"),
+            ("feat_diff_norm", "IRL/feature_exp_diff_norm"),
+            ("bc_loss", "BC/loss"),
+        ):
+            if key in payload:
+                fields.append(f"{label}={payload[key]:.4g}")
+        summary = "  ".join(fields) if fields else "no summary metrics"
+        print(f"[INFO] iter {event.iteration + 1}  {summary}", flush=True)
 
     @staticmethod
     def _validation_summary(event: LogEvent) -> None:
         if not event.payload:
             return
         summary = ", ".join(
-            f"{key.rsplit('/', 1)[-1]}={value:.4f}" for key, value in event.payload.items()
+            f"{key.rsplit('/', 1)[-1]}={value:.4f}"
+            for key, value in event.payload.items()
         )
         label_part = f"  {event.label}" if event.label else ""
-        print(f"[INFO] validation summary iter {event.iteration + 1}{label_part}  {summary}")
+        print(
+            f"[INFO] validation summary iter {event.iteration + 1}{label_part}  {summary}",
+            flush=True,
+        )
 
     @staticmethod
     def _validation_features(event: LogEvent) -> None:
@@ -65,5 +84,6 @@ class ConsoleLogger:
         label_part = f"  {event.label}" if event.label else ""
         print(
             f"[INFO] validation features iter {event.iteration + 1}{label_part}  "
-            + ", ".join(feature_items)
+            + ", ".join(feature_items),
+            flush=True,
         )

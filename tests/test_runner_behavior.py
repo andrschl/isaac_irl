@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import tempfile
@@ -26,6 +28,7 @@ class _DummyEnv:
         self.max_episode_length = 32
         self.step_calls = 0
         self.last_actions: list[torch.Tensor] = []
+        self.step_inference_modes: list[bool] = []
 
     def get_observations(self):
         return torch.zeros(self.num_envs, self.obs_dim, dtype=torch.float32)
@@ -33,7 +36,10 @@ class _DummyEnv:
     def step(self, actions: torch.Tensor):
         self.step_calls += 1
         self.last_actions.append(actions.detach().clone())
-        obs_next = torch.full((self.num_envs, self.obs_dim), float(self.step_calls), dtype=torch.float32)
+        self.step_inference_modes.append(torch.is_inference_mode_enabled())
+        obs_next = torch.full(
+            (self.num_envs, self.obs_dim), float(self.step_calls), dtype=torch.float32
+        )
         env_rewards = torch.zeros(self.num_envs, dtype=torch.float32)
         dones = torch.zeros(self.num_envs, dtype=torch.bool)
         extras: dict[str, Any] = {}
@@ -97,11 +103,15 @@ class _StubActor:
 
     def act(self, obs):
         self.calls.append("stochastic")
-        return torch.full((_obs_batch_size(obs), self.action_dim), 1.0, dtype=torch.float32)
+        return torch.full(
+            (_obs_batch_size(obs), self.action_dim), 1.0, dtype=torch.float32
+        )
 
     def act_inference(self, obs):
         self.calls.append("inference")
-        return torch.full((_obs_batch_size(obs), self.action_dim), 2.0, dtype=torch.float32)
+        return torch.full(
+            (_obs_batch_size(obs), self.action_dim), 2.0, dtype=torch.float32
+        )
 
 
 class _DummyRlAlg:
@@ -146,7 +156,9 @@ class _DummyRlAlg:
     def save_state(self) -> dict[str, Any]:
         return {"rl_alg_weight": torch.tensor([3.0])}
 
-    def load_state(self, checkpoint: dict[str, Any], *, load_optimizer: bool = True) -> None:
+    def load_state(
+        self, checkpoint: dict[str, Any], *, load_optimizer: bool = True
+    ) -> None:
         del load_optimizer
         self.loaded_state = checkpoint
 
@@ -182,11 +194,15 @@ class _DummyIrlAlg:
         self.update_calls += 1
         return {"IRL/reward_loss": 0.1, "IRL/feature_exp_diff_norm": 1.0}
 
-    def per_feature_return_mean(self, feats: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def per_feature_return_mean(
+        self, feats: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
         del mask
         return feats.mean(dim=(0, 1))
 
-    def sample_expert_feature_return_mean(self, device: torch.device | str) -> torch.Tensor | None:
+    def sample_expert_feature_return_mean(
+        self, device: torch.device | str
+    ) -> torch.Tensor | None:
         return torch.ones(2, dtype=torch.float32, device=device)
 
     def train_metrics(self) -> dict[str, float]:
@@ -201,7 +217,9 @@ class _DummyIrlAlg:
     def save_state(self) -> dict[str, Any]:
         return {"reward_weight": torch.tensor([4.0])}
 
-    def load_state(self, checkpoint: dict[str, Any], *, load_optimizer: bool = True) -> None:
+    def load_state(
+        self, checkpoint: dict[str, Any], *, load_optimizer: bool = True
+    ) -> None:
         del load_optimizer
         self.loaded_state = checkpoint
 
@@ -239,7 +257,9 @@ def _runner_cfg() -> IrlRunnerCfg:
 
 
 def _feature_map(env: _DummyEnv) -> torch.Tensor:
-    step_feature = torch.full((env.num_envs,), float(env.step_calls), dtype=torch.float32)
+    step_feature = torch.full(
+        (env.num_envs,), float(env.step_calls), dtype=torch.float32
+    )
     env_idx_feature = torch.arange(env.num_envs, dtype=torch.float32)
     return torch.stack((step_feature, env_idx_feature), dim=1)
 
@@ -288,10 +308,13 @@ def test_runner_drives_rl_update_then_imitator_then_reward_update():
     runner.learn(num_learning_iterations=1, init_at_random_ep_len=False)
 
     assert rl_alg.update_calls == runner.cfg.rl_updates_per_cycle
-    assert rl_alg.act_modes == ["stochastic"] * runner.cfg.imitator_rollout_steps_per_env
+    assert (
+        rl_alg.act_modes == ["stochastic"] * runner.cfg.imitator_rollout_steps_per_env
+    )
     assert len(irl_alg.feature_steps) == runner.cfg.imitator_rollout_steps_per_env
     assert irl_alg.update_calls == runner.cfg.reward_updates_per_cycle
     assert env.step_calls == runner.cfg.imitator_rollout_steps_per_env
+    assert env.step_inference_modes == [False] * env.step_calls
 
 
 def test_runner_imitator_rollout_handles_nested_observation_trees():
@@ -320,7 +343,9 @@ def test_runner_imitator_rollout_handles_nested_observation_trees():
 
 
 def test_validation_uses_scratch_features_and_does_not_mutate_training_buffers():
-    runner, _, rl_alg, irl_alg, logger = _make_runner(use_learned_reward=True, validation_interval=1)
+    runner, _, rl_alg, irl_alg, logger = _make_runner(
+        use_learned_reward=True, validation_interval=1
+    )
     obs = runner._get_obs().to(runner.device)
 
     runner._run_validation(obs, iteration=0)
@@ -378,7 +403,9 @@ class _DummyMlpActor(nn.Module):
     def out_features(self) -> int:
         return int(self.mean.out_features)
 
-    def forward(self, obs: torch.Tensor, stochastic_output: bool = False) -> torch.Tensor:
+    def forward(
+        self, obs: torch.Tensor, stochastic_output: bool = False
+    ) -> torch.Tensor:
         self.call_modes.append(bool(stochastic_output))
         return self.mean(obs) + (1.0 if stochastic_output else 0.0)
 
@@ -417,7 +444,7 @@ class _DummyPpo:
 
     def bc_only_update(self) -> dict[str, float]:
         self.bc_only_update_calls += 1
-        return {"bc": 0.5, "bc_alpha": 1.0}
+        return {"bc": 0.5, "bc_weight": 1.0}
 
     def train_mode(self) -> None:
         self.train_mode_calls += 1
@@ -434,7 +461,7 @@ class _DummyPpo:
 
 
 class _DummyBCCfg:
-    alpha = 1.0
+    weight = 1.0
 
 
 class _DummyBCAlg:
@@ -486,6 +513,7 @@ def test_rsl_rl_adapter_update_drives_env_loop_and_passes_learned_rewards():
 
     assert ppo.collect_act_calls == 3
     assert env.step_calls == 3
+    assert env.step_inference_modes == [False, False, False]
     assert ppo.process_calls == 3
     assert ppo.compute_returns_calls == 1
     assert ppo.update_calls == 1
@@ -513,7 +541,9 @@ def test_rsl_rl_adapter_update_with_env_rewards_skips_reward_model():
 
     assert reward_model.forward_calls == 0
     # All env rewards are zero from _DummyEnv.step.
-    assert all(torch.allclose(r, torch.zeros(env.num_envs)) for r in ppo.process_rewards)
+    assert all(
+        torch.allclose(r, torch.zeros(env.num_envs)) for r in ppo.process_rewards
+    )
 
 
 def test_rsl_rl_adapter_bc_only_skips_env_loop_and_reports_bc_metrics():
@@ -541,7 +571,7 @@ def test_rsl_rl_adapter_bc_only_skips_env_loop_and_reports_bc_metrics():
     assert ppo.bc_only_update_calls == 1
     assert metrics["BC/loss"] == 0.5
     assert eval_metrics["BC/val_loss"] == 0.75
-    assert train_metrics["BC/alpha"] == 1.0
+    assert train_metrics["BC/weight"] == 1.0
 
 
 def test_rsl_rl_adapter_checkpoint_delegates_to_wrapped_algorithm():

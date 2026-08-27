@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
@@ -12,16 +10,9 @@ nn = pytest.importorskip("torch.nn")
 
 
 def _load_train_irl_module():
-    root = Path(__file__).resolve().parents[1]
-    module_path = root / "scripts" / "irl" / "train_irl.py"
-    module_name = "train_irl_module_smoke_test"
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load module spec from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+    from adapters import rsl_rl_isaac_training
+
+    return rsl_rl_isaac_training
 
 
 class _FakeSimulationApp:
@@ -78,6 +69,8 @@ class _FakeEnv:
 
 
 class _FakeGym:
+    last_cfg = None
+
     class wrappers:
         @staticmethod
         def RecordVideo(env, **kwargs):
@@ -86,7 +79,8 @@ class _FakeGym:
 
     @staticmethod
     def make(task_name: str, cfg, render_mode=None):
-        del task_name, cfg, render_mode
+        del task_name, render_mode
+        _FakeGym.last_cfg = cfg
         return _FakeEnv()
 
 
@@ -111,12 +105,22 @@ class _FakeMLPModel(nn.Module):
 
 
 class _FakeRolloutStorage:
-    def __init__(self, training_type, num_envs, num_transitions_per_env, obs, actions_shape, device="cpu"):
+    def __init__(
+        self,
+        training_type,
+        num_envs,
+        num_transitions_per_env,
+        obs,
+        actions_shape,
+        device="cpu",
+    ):
         del training_type, num_envs, num_transitions_per_env, obs, actions_shape, device
 
 
 class _FakePPO:
-    def __init__(self, *, actor: nn.Module, critic: nn.Module, storage, device: str, **kwargs):
+    def __init__(
+        self, *, actor: nn.Module, critic: nn.Module, storage, device: str, **kwargs
+    ):
         del storage, device, kwargs
         self.actor = actor
         self.critic = critic
@@ -153,7 +157,9 @@ class _FakeRunner:
     def load(self, path: str, load_optimizer: bool = True) -> None:
         del path, load_optimizer
 
-    def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
+    def learn(
+        self, num_learning_iterations: int, init_at_random_ep_len: bool = False
+    ) -> None:
         del num_learning_iterations, init_at_random_ep_len
         _FakeRunner.learn_calls += 1
 
@@ -177,14 +183,22 @@ def test_train_irl_main_smoke_with_mocked_runtime(tmp_path: Path, monkeypatch):
             "experiment_name": "smoke",
             "seed": 1,
             "max_iterations": 1,
-            "env": {"name": "Isaac-Lift-Cube-Franka-v0", "device": "cpu", "num_envs": 1},
+            "env": {
+                "name": "Isaac-Lift-Cube-Franka-v0",
+                "device": "cpu",
+                "num_envs": 1,
+            },
             "reward": {
                 "type": "dense",
                 "hidden_dims": [16],
                 "is_linear": False,
                 "activation": "elu",
             },
-            "policy": {"actor_hidden_dims": [16], "critic_hidden_dims": [16], "activation": "elu"},
+            "policy": {
+                "actor_hidden_dims": [16],
+                "critic_hidden_dims": [16],
+                "activation": "elu",
+            },
             "algo": {"learning_rate": 1.0e-4, "gamma": 0.98, "lam": 0.95},
             "irl": {"expert_data_path": "expert.pt"},
             "runner": {
@@ -207,6 +221,7 @@ def test_train_irl_main_smoke_with_mocked_runtime(tmp_path: Path, monkeypatch):
             class _Spec:
                 dim = 2
                 names = ("feat_a", "feat_b")
+
             return _Spec()
 
         def features(self, env):
@@ -238,6 +253,7 @@ def test_train_irl_main_smoke_with_mocked_runtime(tmp_path: Path, monkeypatch):
         deps=fake_deps,
     )
     assert _FakeRunner.learn_calls == 1
+    assert _FakeGym.last_cfg["seed"] == 1
 
 
 def test_main_loads_runtime_deps_after_sim_app_init(monkeypatch):
@@ -284,6 +300,19 @@ def test_main_loads_runtime_deps_after_sim_app_init(monkeypatch):
     monkeypatch.setattr(module, "load_train_cfg", _fake_load_train_cfg)
 
     with pytest.raises(RuntimeError, match="stop-after-order-check"):
-        module.main(argv=["--task", "Isaac-Lift-Cube-Franka-v0", "--headless", "--device", "cpu"])
+        module.main(
+            argv=[
+                "--task",
+                "Isaac-Lift-Cube-Franka-v0",
+                "--headless",
+                "--device",
+                "cpu",
+            ]
+        )
 
-    assert call_order == ["load_app_launcher_cls", "app_launcher_init", "load_runtime_deps", "load_train_cfg"]
+    assert call_order == [
+        "load_app_launcher_cls",
+        "app_launcher_init",
+        "load_runtime_deps",
+        "load_train_cfg",
+    ]

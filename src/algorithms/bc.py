@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
+from algorithms.state_dependent_tanh_actor import TanhPolicyProtocol
 import torch.nn.functional as F
 
 from data import load_obs_action_episodes, split_holdout_episodes, subset_episodes
@@ -19,9 +20,9 @@ class BCCfg:
     """Behavioral cloning hyperparameters.
 
     Notes:
-        - ``alpha`` is the convex mixing weight on the policy loss when BC is
+        - ``weight`` is the convex mixing weight on the policy loss when BC is
           combined with PPO via :class:`algorithms.ppo_with_bc.PPOWithBC`.
-          ``alpha=0`` disables BC; ``alpha=1`` makes the policy update
+          ``weight=0`` disables BC; ``weight=1`` makes the policy update
           BC-only.
         - This config holds no learning-rate / weight-decay / grad-clip
           settings: the actor optimizer is owned by PPO.
@@ -30,7 +31,7 @@ class BCCfg:
           on) during validation passes. ``0`` disables the split.
     """
 
-    alpha: float = 0.0
+    weight: float = 0.0
     loss_type: str = "nll"  # "nll" | "mse"
     batch_size: int = 256
     val_fraction: float = 0.0
@@ -58,8 +59,8 @@ class BC:
             raise ValueError(
                 f"`cfg.loss_type` must be 'nll' or 'mse', got {cfg.loss_type!r}."
             )
-        if not (0.0 <= cfg.alpha <= 1.0):
-            raise ValueError(f"`cfg.alpha` must be in [0, 1], got {cfg.alpha}.")
+        if not (0.0 <= cfg.weight <= 1.0):
+            raise ValueError(f"`cfg.weight` must be in [0, 1], got {cfg.weight}.")
         if cfg.batch_size <= 0:
             raise ValueError(f"`cfg.batch_size` must be > 0, got {cfg.batch_size}.")
 
@@ -71,8 +72,8 @@ class BC:
         self.device = torch.device(device)
 
     @property
-    def alpha(self) -> float:
-        return self.cfg.alpha
+    def weight(self) -> float:
+        return self.cfg.weight
 
     def _compute_loss(self, actor: MLPModel, storage: ObsActionBuffer) -> torch.Tensor:
         """Sample a minibatch from ``storage`` and return the BC loss."""
@@ -106,6 +107,16 @@ class BC:
         """
         return self._compute_loss(actor, self.storage)
 
+    def compute_policy_loss(self, policy: TanhPolicyProtocol) -> torch.Tensor:
+        """Return BC loss for the bounded SAC/PMD policy."""
+        observations, expert_actions = self.storage.sample(
+            self.cfg.batch_size, self.device
+        )
+        if self.cfg.loss_type == "nll":
+            return -policy.log_probability(observations, expert_actions).mean()
+        predicted_actions = policy.deterministic_action(observations)
+        return F.mse_loss(predicted_actions, expert_actions)
+
     def compute_validation_loss(self, actor: MLPModel) -> float | None:
         """Return the BC loss on the held-out validation set, or ``None``.
 
@@ -130,18 +141,18 @@ def build_bc_alg(
     expert_subset_strategy: str = "first",
     seed: int = 42,
 ) -> BC | None:
-    """Return a configured :class:`BC` when ``cfg.alpha > 0``, else ``None``.
+    """Return configured BC when ``cfg.weight > 0``, else ``None``.
 
     Loads (obs, actions) demos from ``expert_data_path``, optionally subsets
     them, splits off a held-out validation set per ``cfg.val_fraction``, and
     wraps the result in ``ObsActionBuffer`` instances. Returns ``None`` when
-    BC is disabled (``cfg.alpha <= 0``) so the caller can short-circuit.
+    BC is disabled (``cfg.weight <= 0``) so the caller can short-circuit.
     """
-    if cfg.alpha <= 0.0:
+    if cfg.weight <= 0.0:
         return None
     if not expert_data_path:
         raise ValueError(
-            "`bc.alpha > 0` requires expert_data_path to point at an HDF5 file "
+            "`bc.weight > 0` requires expert_data_path to point at an HDF5 file "
             "with (obs, actions) demos."
         )
 

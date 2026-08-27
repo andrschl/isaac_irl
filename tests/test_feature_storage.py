@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 import pytest
 
 
@@ -7,7 +9,9 @@ from utils.runtime_context import RuntimeContext
 from storage.feature_storage import FeatureBufCfg, FeatureTrajectoryBuffer
 
 
-def _make_buffer(num_envs: int, feature_dim: int, gamma: float) -> FeatureTrajectoryBuffer:
+def _make_buffer(
+    num_envs: int, feature_dim: int, gamma: float
+) -> FeatureTrajectoryBuffer:
     cfg = FeatureBufCfg(min_ep_len=1, store_dtype=torch.float32)
     ctx = RuntimeContext(num_envs=num_envs, feature_dim=feature_dim, device="cpu")
     return FeatureTrajectoryBuffer(cfg=cfg, ctx=ctx, gamma=gamma)
@@ -44,7 +48,9 @@ def test_add_episode_and_discounted_feature_returns():
     )
     buffer.add_episode(episode_feats)
 
-    discounted_feats, lengths = buffer.sample_discounted_feature_returns(batch_size=1, device="cpu")
+    discounted_feats, lengths = buffer.sample_discounted_feature_returns(
+        batch_size=1, device="cpu"
+    )
     expected = torch.tensor(
         [[1.0 + gamma * 3.0 + (gamma**2) * 5.0, 2.0 + gamma * 4.0 + (gamma**2) * 6.0]],
         dtype=torch.float32,

@@ -19,7 +19,9 @@ class IRLCfg:
     """IRL-specific reward-learning hyperparameters/config."""
 
     expert_data_path: str = ""
-    expert_num_trajectories: int | None = None  # None = use all; int = max trajectories for ablations
+    expert_num_trajectories: int | None = (
+        None  # None = use all; int = max trajectories for ablations
+    )
     expert_subset_strategy: str = "first"  # "first" | "random"
     batch_size: int = 256
     num_learning_epochs: int = 1
@@ -82,7 +84,9 @@ class IrlAlgorithm:
                 float(self.cfg.discount_gamma),
                 name="cfg.discount_gamma",
             )
-        self.normalize_returns_by_episode_length = bool(self.cfg.normalize_returns_by_episode_length)
+        self.normalize_returns_by_episode_length = bool(
+            self.cfg.normalize_returns_by_episode_length
+        )
 
         if num_envs <= 0:
             raise ValueError(f"`num_envs` must be > 0, got {num_envs}.")
@@ -90,10 +94,14 @@ class IrlAlgorithm:
             raise ValueError(f"`expert_num_envs` must be > 0, got {expert_num_envs}.")
 
         imitator_ctx = RuntimeContext(
-            num_envs=int(num_envs), feature_dim=int(feature_spec.dim), device=str(self.device),
+            num_envs=int(num_envs),
+            feature_dim=int(feature_spec.dim),
+            device=str(self.device),
         )
         expert_ctx = RuntimeContext(
-            num_envs=int(expert_num_envs), feature_dim=int(feature_spec.dim), device=str(self.device),
+            num_envs=int(expert_num_envs),
+            feature_dim=int(feature_spec.dim),
+            device=str(self.device),
         )
         self.imitator_storage = FeatureTrajectoryBuffer(
             cfg=imitator_buffer_cfg or FeatureBufCfg(min_ep_len=1),
@@ -106,7 +114,11 @@ class IrlAlgorithm:
             gamma=self.gamma,
         )
 
-        lr = 1e-4 if self.cfg.reward_learning_rate is None else float(self.cfg.reward_learning_rate)
+        lr = (
+            1e-4
+            if self.cfg.reward_learning_rate is None
+            else float(self.cfg.reward_learning_rate)
+        )
 
         self.reward_optimizer = optim.RMSprop(
             self.reward_model.parameters(),
@@ -116,7 +128,10 @@ class IrlAlgorithm:
 
     @staticmethod
     def _validate_cfg(cfg: IRLCfg) -> None:
-        if cfg.expert_num_trajectories is not None and int(cfg.expert_num_trajectories) <= 0:
+        if (
+            cfg.expert_num_trajectories is not None
+            and int(cfg.expert_num_trajectories) <= 0
+        ):
             raise ValueError(
                 "`expert_num_trajectories` must be > 0 or None, "
                 f"got {cfg.expert_num_trajectories}."
@@ -129,14 +144,21 @@ class IrlAlgorithm:
         if cfg.batch_size <= 0:
             raise ValueError(f"`batch_size` must be > 0, got {cfg.batch_size}.")
         if cfg.num_learning_epochs <= 0:
-            raise ValueError(f"`num_learning_epochs` must be > 0, got {cfg.num_learning_epochs}.")
+            raise ValueError(
+                f"`num_learning_epochs` must be > 0, got {cfg.num_learning_epochs}."
+            )
         if cfg.weight_decay < 0.0:
             raise ValueError(f"`weight_decay` must be >= 0, got {cfg.weight_decay}.")
         if cfg.max_grad_norm <= 0.0:
             raise ValueError(f"`max_grad_norm` must be > 0, got {cfg.max_grad_norm}.")
         if cfg.reward_loss_coef < 0.0:
-            raise ValueError(f"`reward_loss_coef` must be >= 0, got {cfg.reward_loss_coef}.")
-        if cfg.reward_learning_rate is not None and float(cfg.reward_learning_rate) <= 0.0:
+            raise ValueError(
+                f"`reward_loss_coef` must be >= 0, got {cfg.reward_loss_coef}."
+            )
+        if (
+            cfg.reward_learning_rate is not None
+            and float(cfg.reward_learning_rate) <= 0.0
+        ):
             raise ValueError(
                 "`reward_learning_rate` must be > 0 or None, "
                 f"got {cfg.reward_learning_rate}."
@@ -160,6 +182,34 @@ class IrlAlgorithm:
     def add_expert_episode(self, features: torch.Tensor) -> None:
         """Append one complete expert episode. Shape: ``features [T, D]``. Single-env buffer only."""
         self.expert_storage.add_episode(features)
+
+    def replace_imitator_trajectories(
+        self,
+        features: torch.Tensor,
+        valid: torch.Tensor,
+    ) -> None:
+        """Replace current-policy data from one grouped collection.
+
+        Args:
+            features: [C,G,T,D] raw reward features
+            valid: [C,G,T] bool first-episode mask
+        """
+        if features.ndim != 4:
+            raise ValueError(
+                f"Expected features [C,G,T,D], got {tuple(features.shape)}."
+            )
+        if tuple(valid.shape) != tuple(features.shape[:3]) or valid.dtype != torch.bool:
+            raise ValueError(
+                f"Expected bool valid shape {tuple(features.shape[:3])}, got "
+                f"{tuple(valid.shape)} with dtype {valid.dtype}."
+            )
+        if features.shape[-1] != self.feature_spec.dim:
+            raise ValueError(
+                f"Expected feature dimension {self.feature_spec.dim}, got {features.shape[-1]}."
+            )
+        batch_features = rearrange(features, "c g t d -> (c g) t d")
+        batch_valid = rearrange(valid, "c g t -> (c g) t")
+        self.imitator_storage.replace_episode_batch(batch_features, batch_valid)
 
     def clear_imitator(self) -> None:
         self.imitator_storage.clear()
@@ -188,7 +238,9 @@ class IrlAlgorithm:
             outer mean.
         """
         discounted_feats = FeatureTrajectoryBuffer.discounted_feature_returns(
-            feats, mask, gamma=self.irl_discount_gamma,
+            feats,
+            mask,
+            gamma=self.irl_discount_gamma,
         )  # [B, D]
         if self.normalize_returns_by_episode_length:
             lengths = mask.to(dtype=discounted_feats.dtype).sum(dim=1).clamp_min(1.0)
@@ -202,7 +254,9 @@ class IrlAlgorithm:
         """Sample expert episodes and return per-feature mean returns [D]."""
         if len(self.expert_storage) == 0:
             return None
-        feats, mask, _ = self.expert_storage.sample_episodes(batch_size=self.batch_size, device=device)
+        feats, mask, _ = self.expert_storage.sample_episodes(
+            batch_size=self.batch_size, device=device
+        )
         return self.per_feature_return_mean(feats, mask)
 
     def eval_expected_return(
@@ -224,9 +278,11 @@ class IrlAlgorithm:
         )  # [B]
 
         if self.normalize_returns_by_episode_length:
-            lengths = mask.to(
-                device=scalar_returns.device, dtype=scalar_returns.dtype
-            ).sum(dim=1).clamp_min(1.0)  # [B]
+            lengths = (
+                mask.to(device=scalar_returns.device, dtype=scalar_returns.dtype)
+                .sum(dim=1)
+                .clamp_min(1.0)
+            )  # [B]
             scalar_returns = scalar_returns / lengths
 
         return scalar_returns.mean(), self.per_feature_return_mean(feats, mask)
@@ -255,14 +311,22 @@ class IrlAlgorithm:
             imitator_feats, imitator_mask, _ = self.imitator_storage.sample_episodes(
                 batch_size=batch_size, device=self.device
             )
-            current_returns, imitator_per_feat = self.eval_expected_return(imitator_feats, imitator_mask)
-            expert_returns, expert_per_feat = self.eval_expected_return(expert_feats, expert_mask)
-            reward_loss = float(self.cfg.reward_loss_coef) * (current_returns - expert_returns)
+            current_returns, imitator_per_feat = self.eval_expected_return(
+                imitator_feats, imitator_mask
+            )
+            expert_returns, expert_per_feat = self.eval_expected_return(
+                expert_feats, expert_mask
+            )
+            reward_loss = float(self.cfg.reward_loss_coef) * (
+                current_returns - expert_returns
+            )
 
             loss = reward_loss + self.reward_model.get_regularization_loss()
             self.reward_optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            nn.utils.clip_grad_norm_(self.reward_model.parameters(), float(self.cfg.max_grad_norm))
+            nn.utils.clip_grad_norm_(
+                self.reward_model.parameters(), float(self.cfg.max_grad_norm)
+            )
             self.reward_optimizer.step()
 
             self.reward_model.apply_proximal_step()
@@ -290,7 +354,7 @@ class IrlAlgorithm:
                 total_sq += float(param.detach().pow(2).sum().item())
                 max_abs = max(max_abs, float(param.detach().abs().max().item()))
         return {
-            "IRL/reward_param_norm": total_sq ** 0.5,
+            "IRL/reward_param_norm": total_sq**0.5,
             "IRL/reward_param_max_abs": max_abs,
         }
 
@@ -306,7 +370,9 @@ class IrlAlgorithm:
             "reward_optimizer_state_dict": self.reward_optimizer.state_dict(),
         }
 
-    def load_state(self, checkpoint: dict[str, Any], *, load_optimizer: bool = True) -> None:
+    def load_state(
+        self, checkpoint: dict[str, Any], *, load_optimizer: bool = True
+    ) -> None:
         reward_state = checkpoint.get("reward_model_state_dict")
         if reward_state is not None:
             self.reward_model.load_state_dict(reward_state)

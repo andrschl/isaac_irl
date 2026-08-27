@@ -66,64 +66,46 @@ Optional IRL discount override:
 - IRL return targets are normalized by episode length by default (`irl.normalize_returns_by_episode_length: true`).
 
 ### Mix Behavioral Cloning into the Policy Loss
-The PPO actor loss can be convex-combined with a BC term on the same expert
-demos:
+
+BC is an independent regularizer for PPO, SAC, and PMD:
 
 ```
-L_policy = (1 - α) · L_PPO  +  α · L_BC
+L_actor = (1 - bc_weight) * L_RL + bc_weight * L_BC
 ```
 
-Set `bc.alpha` in `configs/franka_lift/experiment.yaml` or pass `--bc_alpha`.
-The BC dataset is the same HDF5 written by `record_synthetic_demos.py` — the
-loader reads the `obs/<group>/<leaf>` and `actions` channels alongside the
-`features` channel already consumed by IRL, so no extra files are needed.
+Set `bc.weight` in `configs/franka_lift/experiment.yaml` or pass
+`--bc_weight`. The dataset is the same HDF5 written by
+`record_synthetic_demos.py`.
 
 ```bash
 python scripts/irl/train_irl.py \
   --task Isaac-Lift-Cube-Franka-v0 \
   --headless \
   --expert_data_path logs/demos/franka_lift/demos.hdf5 \
-  --bc_alpha 0.3
+  --bc_weight 0.3
 ```
 
-- `--bc_alpha 0` → pure PPO+IRL (default; identical to the IRL-only path).
-- `--bc_alpha 1` → pure offline BC: normal PPO/IRL passes are skipped;
-  periodic stochastic + inference validation rollouts may still run for logging,
-  while the policy is updated from expert (obs, action) pairs each iteration.
-- `--bc_loss_type nll|mse` selects the BC loss (default `nll` — log-likelihood
-  of the expert action under the actor's Gaussian).
+- `--bc_weight 0`: RL only; no BC loader, batch, or gradient is constructed.
+- `--bc_weight 1`: pure offline BC.
+- `--bc_loss_type nll|mse`: likelihood or mean-action regression.
 
-Logged metrics: `BC/loss`, `BC/alpha`.
+Use `scripts/irl/bc_weight_lr_sweep.sh` for the BC-weight/LR sweep. Its
+`BC_WEIGHTS`, `LR_MULTIPLIERS`, and `SEEDS` environment variables control
+the grid. Exact SAC, PMD, value-backend, and UTD semantics are documented in
+[docs/rl_algorithms.md](docs/rl_algorithms.md).
 
-### Sweep BC `alpha` Across Multiple Runs
-`scripts/irl/bc_alpha_sweep.sh` runs `train_irl.py` sequentially across a list
-of `bc.alpha` values (and optionally seeds). With the default `LOGGER=wandb`,
-each run is logged with proper metadata so you can compare runs cleanly in the UI:
-
-- `name`   = `alpha_<value>` (or `alpha_<value>_seed_<s>` when sweeping seeds)
-- `group`  = the sweep's `EXPERIMENT_NAME` (so the runs cluster together)
-- `tags`   = `alpha=...`, `seed=...`, `loss=...` (for filtering)
-- `config` = key hyperparams (`bc/alpha`, `bc/loss_type`, `ppo/learning_rate`,
-  `irl/discount_gamma`, ...) so you can plot any metric vs. any hyperparam
-
+### Compare RL Algorithms on Fixed-Reward Cartpole
 ```bash
-# Defaults: alphas = 0.0 0.1 0.3 0.5 0.7 1.0; seed = 42; logger = wandb.
-scripts/irl/bc_alpha_sweep.sh
-
-# Customize via env vars (see the script header for the full list):
-ALPHAS="0 0.5 1" SEEDS="1 2 3" \
-  EXPERIMENT_NAME=bc_ablation \
-  LOG_PROJECT_NAME=isaac_irl_bc_ablation \
-  scripts/irl/bc_alpha_sweep.sh
+python scripts/rl/cartpole_benchmark.py --algorithm pmd --value_backend direct --headless
+ISAAC_IRL_PYTHON=python scripts/rl/cartpole_benchmark.sh   # 5 variants x 3 seeds
+python scripts/rl/create_wandb_overview.py --group cartpole-fixed-reward-v4
 ```
 
-For W&B runs, make sure `WANDB_API_KEY` is set (put it in `.env` at the
-repo root — it's auto-loaded — or run `wandb login` once).
-
-Per-run local artifacts also land under
-`logs/irl/<EXPERIMENT_NAME>/<timestamp>_alpha_<value>/` (checkpoints, configs,
-videos when rollouts are active), so you keep a local copy alongside W&B.
-`alpha=1` is BC-only, so the sweep skips final-video recording for that run.
+The benchmark trains against the environment's own reward (fixed, non-learnable,
+checked every rollout against the reward features) and reports sample efficiency
+in simulator transitions with deterministic 250-step validation. `Overview/*` is
+the small cross-algorithm dashboard; per-algorithm diagnostics stay in their own
+namespaces. `create_wandb_overview.py` takes the entity from `$WANDB_ENTITY`.
 
 ### Train IRL + Record Video Every 50 Iterations
 ```bash
@@ -164,5 +146,5 @@ python scripts/irl/train_irl.py --task Isaac-Lift-Cube-Franka-v0 --headless --ex
 
 ## Tests
 ```bash
-PYTHONPATH=src pytest -q
+pytest -q
 ```

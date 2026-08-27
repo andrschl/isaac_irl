@@ -22,6 +22,12 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.pytest.ini_options]
+
+# `src` holds the packages under test; `.` lets tests import `scripts.*` helpers.
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+
 [tool.isort]
 
 atomic = true

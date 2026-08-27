@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -77,7 +79,9 @@ class _FakeMLPActor(nn.Module):
     def _features(self, obs):
         return obs["policy"]["x"] if isinstance(obs, dict) else obs
 
-    def forward(self, obs, masks=None, hidden_state=None, stochastic_output: bool = False):
+    def forward(
+        self, obs, masks=None, hidden_state=None, stochastic_output: bool = False
+    ):
         del masks, hidden_state
         mean = self.mean_net(self._features(obs))
         if not stochastic_output:
@@ -97,7 +101,7 @@ def _make_bc_setup(loss_type: str) -> tuple[BC, _FakeMLPActor]:
     buf.load_episodes([({"policy": {"x": expert_obs}}, expert_actions)])
 
     bc = BC(
-        cfg=BCCfg(alpha=1.0, loss_type=loss_type, batch_size=32),
+        cfg=BCCfg(weight=1.0, loss_type=loss_type, batch_size=32),
         storage=buf,
         device=torch.device("cpu"),
     )
@@ -118,7 +122,9 @@ def test_bc_loss_decreases_under_optimization(loss_type: str):
         loss.backward()
         opt.step()
     final = bc.compute_loss(actor).item()
-    assert final < initial - 0.1, f"BC {loss_type} loss did not decrease (init={initial}, final={final})"
+    assert final < initial - 0.1, (
+        f"BC {loss_type} loss did not decrease (init={initial}, final={final})"
+    )
 
 
 def test_bc_validation_loss_none_without_split():
@@ -131,12 +137,14 @@ def test_bc_validation_loss_none_without_split():
 def test_bc_validation_loss_is_float_and_gradless(loss_type: str):
     torch.manual_seed(0)
     train_buf = _make_buffer()
-    train_buf.load_episodes([({"policy": {"x": torch.randn(32, 3)}}, torch.randn(32, 2))])
+    train_buf.load_episodes(
+        [({"policy": {"x": torch.randn(32, 3)}}, torch.randn(32, 2))]
+    )
     val_buf = _make_buffer()
     val_buf.load_episodes([({"policy": {"x": torch.randn(16, 3)}}, torch.randn(16, 2))])
 
     bc = BC(
-        cfg=BCCfg(alpha=1.0, loss_type=loss_type, batch_size=8),
+        cfg=BCCfg(weight=1.0, loss_type=loss_type, batch_size=8),
         storage=train_buf,
         val_storage=val_buf,
     )
@@ -155,11 +163,11 @@ def test_bc_loss_rejects_unknown_loss_type():
         BC(cfg=BCCfg(loss_type="bogus"), storage=buf)
 
 
-def test_bc_alpha_validation():
+def test_bc_weight_validation():
     buf = _make_buffer()
     buf.load_episodes([({"policy": {"x": torch.zeros(2, 3)}}, torch.zeros(2, 2))])
-    with pytest.raises(ValueError, match="alpha"):
-        BC(cfg=BCCfg(alpha=1.5), storage=buf)
+    with pytest.raises(ValueError, match="weight"):
+        BC(cfg=BCCfg(weight=1.5), storage=buf)
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +209,9 @@ class _TinyActor(nn.Module):
         self.w = nn.Parameter(torch.zeros(3, 2))
         self._distribution: torch.distributions.Normal | None = None
 
-    def forward(self, obs, masks=None, hidden_state=None, stochastic_output: bool = False):
+    def forward(
+        self, obs, masks=None, hidden_state=None, stochastic_output: bool = False
+    ):
         del masks, hidden_state
         mean = obs["policy"]["x"] @ self.w
         if not stochastic_output:
@@ -238,7 +248,7 @@ def test_ppo_with_bc_gradient_is_convex_combination():
     A = expert_actions.shape[1]
     buf = _make_full_dataset_buffer(expert_x, expert_actions)
     # batch_size = N -> sample() returns a full permutation of the dataset.
-    bc = BC(cfg=BCCfg(alpha=0.5, loss_type="mse", batch_size=N), storage=buf)
+    bc = BC(cfg=BCCfg(weight=0.5, loss_type="mse", batch_size=N), storage=buf)
 
     policy = _TinyActor()
     # PPO "target" pulls w toward W_target.
@@ -268,13 +278,12 @@ def test_ppo_with_bc_gradient_is_convex_combination():
     )
 
 
-def test_ppo_with_bc_alpha_zero_passes_through():
-    """alpha=0 should behave exactly like the base PPO update."""
+def test_ppo_with_bc_weight_zero_passes_through():
+    """weight=0 should behave exactly like the base PPO update."""
     torch.manual_seed(0)
-    W_true = torch.eye(3, 2)
     buf = _make_buffer()
     buf.load_episodes([({"policy": {"x": torch.randn(4, 3)}}, torch.randn(4, 2))])
-    bc = BC(cfg=BCCfg(alpha=0.0, loss_type="mse", batch_size=4), storage=buf)
+    bc = BC(cfg=BCCfg(weight=0.0, loss_type="mse", batch_size=4), storage=buf)
 
     W_target = torch.tensor([[2.0, 0.0], [0.0, 0.0], [0.0, 0.0]])
     policy_a = _TinyActor()
@@ -298,7 +307,7 @@ def test_ppo_with_bc_bc_only_update_runs_bc_alone():
     N = expert_x.shape[0]
     A = expert_actions.shape[1]
     buf = _make_full_dataset_buffer(expert_x, expert_actions)
-    bc = BC(cfg=BCCfg(alpha=1.0, loss_type="mse", batch_size=N), storage=buf)
+    bc = BC(cfg=BCCfg(weight=1.0, loss_type="mse", batch_size=N), storage=buf)
 
     policy = _TinyActor()
     W_target = torch.tensor([[2.0, 0.0], [0.0, 0.0], [0.0, 0.0]])
@@ -327,12 +336,19 @@ def test_obs_action_hdf5_loader_round_trip(tmp_path: Path):
         demo = data.create_group("demo_0")
         obs_group = demo.create_group("obs")
         policy_group = obs_group.create_group("policy")
-        policy_group.create_dataset("x", data=torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3).numpy())
-        demo.create_dataset("actions", data=torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2).numpy())
+        policy_group.create_dataset(
+            "x", data=torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3).numpy()
+        )
+        demo.create_dataset(
+            "actions",
+            data=torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2).numpy(),
+        )
 
     episodes = load_obs_action_episodes(str(path))
     assert len(episodes) == 1
     obs, actions = episodes[0]
     assert actions.shape == (5, 2)
     assert obs["policy"]["x"].shape == (5, 3)
-    assert torch.allclose(actions, torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2))
+    assert torch.allclose(
+        actions, torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2)
+    )

@@ -19,10 +19,16 @@ from typing import Any, Callable
 
 import torch
 
-try:
-    from isaaclab_tasks.manager_based.manipulation.lift.mdp import object_reached_goal
-except Exception:  # pragma: no cover - isaac is optional at import time
-    object_reached_goal = None  # type: ignore[assignment]
+
+def _resolve_object_reached_goal() -> Callable[..., torch.Tensor] | None:
+    """Import the Isaac predicate only after SimulationApp has started."""
+    try:
+        from isaaclab_tasks.manager_based.manipulation.lift.mdp.terminations import (
+            object_reached_goal,
+        )
+    except Exception:  # pragma: no cover - Isaac is optional in unit tests
+        return None
+    return object_reached_goal
 
 
 def success_bonus_reward(
@@ -38,9 +44,12 @@ def success_bonus_reward(
     term is safe to inject for non-Lift tasks too — it just becomes a constant
     zero feature.
     """
+    object_reached_goal = _resolve_object_reached_goal()
     if object_reached_goal is None:
         return torch.zeros(int(env.num_envs), device=env.device, dtype=torch.float32)
-    return object_reached_goal(env, command_name=command_name, threshold=threshold).to(torch.float32)
+    return object_reached_goal(env, command_name=command_name, threshold=threshold).to(
+        torch.float32
+    )
 
 
 def add_success_bonus_term(
@@ -95,8 +104,11 @@ def build_success_fn(
     expose ``object_reached_goal``, or if a probe call fails. Best-effort:
     success logging must never break training.
     """
+    object_reached_goal = _resolve_object_reached_goal()
     if object_reached_goal is None:
-        print(f"[WARN] No success metric for task {task_name!r} (object_reached_goal unavailable).")
+        print(
+            f"[WARN] No success metric for task {task_name!r} (object_reached_goal unavailable)."
+        )
         return None
 
     def success_fn(env: Any) -> torch.Tensor:
@@ -105,9 +117,13 @@ def build_success_fn(
     try:
         probe = success_fn(probe_env)
         if not isinstance(probe, torch.Tensor):
-            raise TypeError(f"object_reached_goal returned {type(probe)}, expected Tensor.")
+            raise TypeError(
+                f"object_reached_goal returned {type(probe)}, expected Tensor."
+            )
     except Exception as exc:
-        print(f"[WARN] Disabling success metric for task {task_name!r} (probe failed): {exc}")
+        print(
+            f"[WARN] Disabling success metric for task {task_name!r} (probe failed): {exc}"
+        )
         return None
 
     print(f"[INFO] Success metric enabled: object within {threshold} m of goal pose.")
