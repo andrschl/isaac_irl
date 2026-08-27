@@ -71,7 +71,6 @@ class _OffPolicyAdapter:
                 "Data/replay_transitions": float(self.replay.transition_count),
                 "Data/simulator_transitions": float(rollout.transition_count),
                 "Data/policy_version": float(self.learner.policy_version),
-                "Diagnostics/non_finite_count": 0.0,
             }
         )
         oldest_version, newest_version = self.replay.policy_version_range()

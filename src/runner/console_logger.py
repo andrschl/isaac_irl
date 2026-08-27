@@ -46,7 +46,6 @@ class ConsoleLogger:
             ("no_bootstrap", "Overview/bootstrap_disabled_fraction"),
             ("clip", "Overview/action_clipped_fraction"),
             ("reward_error", "Overview/reward_reconstruction_error"),
-            ("non_finite", "Overview/non_finite_count"),
             ("policy_loss", "RL/policy_loss"),
             ("reward_loss", "IRL/reward_loss"),
             ("feat_diff_norm", "IRL/feature_exp_diff_norm"),

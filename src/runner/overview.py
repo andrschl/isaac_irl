@@ -30,7 +30,6 @@ _TRAINING_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Overview/reward_reconstruction_error",
         ("Reward/reconstruction_max_error",),
     ),
-    ("Overview/non_finite_count", ("Diagnostics/non_finite_count",)),
 )
 
 

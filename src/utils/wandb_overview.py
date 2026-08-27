@@ -167,13 +167,6 @@ def create_cartpole_overview_report(
                         y="Overview/reward_reconstruction_error",
                         groupby=variant,
                     ),
-                    _mean_line(
-                        wr,
-                        title="Non-finite count (must be zero)",
-                        x=transitions,
-                        y="Overview/non_finite_count",
-                        groupby=variant,
-                    ),
                 ],
             ),
         ],

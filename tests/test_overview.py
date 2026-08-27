@@ -17,7 +17,6 @@ def test_training_overview_selects_backend_independent_metrics() -> None:
             "Action/clipped_fraction": 0.0,
             "Data/actor_updates": 16.0,
             "Data/truncated_fraction": 0.003,
-            "Diagnostics/non_finite_count": 0.0,
         }
     )
 
@@ -29,7 +28,6 @@ def test_training_overview_selects_backend_independent_metrics() -> None:
         "Overview/action_clipped_fraction": 0.0,
         "Overview/policy_updates": 16.0,
         "Overview/timeout_fraction": 0.003,
-        "Overview/non_finite_count": 0.0,
     }
 
 
