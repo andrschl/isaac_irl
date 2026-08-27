@@ -210,9 +210,12 @@ class TransitionReplayBuffer:
         chunk_choices = torch.randint(
             len(self._rollouts), (batch_size,), generator=generator
         )
+        # One pass over the histogram instead of one comparison per stored chunk:
+        # replay holds hundreds of chunks and is sampled thousands of times.
+        chunk_counts = torch.bincount(chunk_choices, minlength=len(self._rollouts))
         pieces: list[TransitionBatch] = []
         for chunk_idx, rollout in enumerate(self._rollouts):
-            count = int((chunk_choices == chunk_idx).sum().item())
+            count = int(chunk_counts[chunk_idx].item())
             if count == 0:
                 continue
             flat_index = torch.randint(
