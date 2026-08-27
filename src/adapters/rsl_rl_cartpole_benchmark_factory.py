@@ -199,7 +199,9 @@ def build_cartpole_benchmark(
             validation_steps=cfg.evaluation_steps,
             validate_before_training=True,
             validation_interval_transitions=cfg.evaluation_interval_transitions,
-            return_per_step_thresholds=(0.0, 3.0 / 250.0),
+            # Break-even, "task solved", and near-optimal control: the last one
+            # is what separates algorithms once they all clear the first two.
+            return_per_step_thresholds=(0.0, 3.0 / 250.0, 3.9 / 250.0),
         ),
         device=cfg.device,
         log_dir=log_dir,
