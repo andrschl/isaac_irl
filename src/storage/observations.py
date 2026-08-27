@@ -135,6 +135,33 @@ def concat_observations(observations: list[Observation]) -> Observation:
     }
 
 
+def empty_observation_like(observation: Observation, leading_dim: int) -> Observation:
+    """Allocate an uninitialized tree with ``[leading_dim, *leaf.shape[1:]]`` leaves."""
+    if leading_dim <= 0:
+        raise ValueError("leading_dim must be > 0.")
+    return map_observation(
+        observation,
+        lambda leaf: torch.empty(
+            (leading_dim, *leaf.shape[1:]), dtype=leaf.dtype, device=leaf.device
+        ),
+    )
+
+
+def write_observation(
+    destination: Observation, source: Observation, index: torch.Tensor
+) -> None:
+    """Copy ``source`` leaves into ``destination`` rows selected by ``index`` [M]."""
+    if isinstance(destination, torch.Tensor):
+        if not isinstance(source, torch.Tensor):
+            raise ValueError("Observation structures must match.")
+        destination[index] = source.to(destination.dtype)
+        return
+    if not isinstance(source, Mapping) or tuple(destination) != tuple(source):
+        raise ValueError("Observation structures must match.")
+    for key in destination:
+        write_observation(destination[key], source[key], index)
+
+
 def stack_observations(observations: list[Observation], dim: int) -> Observation:
     if not observations:
         raise ValueError("Cannot stack an empty observation list.")

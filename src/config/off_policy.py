@@ -23,8 +23,8 @@ class TransitionReplayCfg:
     """Dense CPU transition replay limits.
 
     learning_starts is measured in simulator transitions. capacity is also a
-    transition count; complete rollout chunks are evicted until the capacity
-    is respected.
+    transition count: replay is a ring buffer, so the oldest transitions are
+    overwritten once it is full.
     """
 
     learning_starts: int = 4_096

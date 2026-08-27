@@ -134,7 +134,8 @@ These live under `algo.train`:
 - `target_polyak`: EMA interpolation coefficient; `0.005` means targets
   move 0.5% toward online parameters after each critic step.
 - `replay.learning_starts`: minimum stored transitions before any learning.
-- `replay.capacity`: maximum transitions, evicting complete rollout chunks.
+- `replay.capacity`: maximum stored transitions; replay is a ring buffer,
+  so the oldest transitions are overwritten once it is full.
 - `observation_epsilon`, `observation_clip`: running-normalization
   numerical floor and normalized observation bound.
 

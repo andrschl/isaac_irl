@@ -74,12 +74,13 @@ class _OffPolicyAdapter:
                 "Diagnostics/non_finite_count": 0.0,
             }
         )
-        ages = [
-            self.learner.policy_version - version
-            for version in self.replay.policy_versions
-        ]
-        metrics["Data/replay_policy_age_min"] = float(min(ages))
-        metrics["Data/replay_policy_age_max"] = float(max(ages))
+        oldest_version, newest_version = self.replay.policy_version_range()
+        metrics["Data/replay_policy_age_min"] = float(
+            self.learner.policy_version - newest_version
+        )
+        metrics["Data/replay_policy_age_max"] = float(
+            self.learner.policy_version - oldest_version
+        )
         return rollout, metrics
 
     def collect_generation(self) -> TransitionRollout:

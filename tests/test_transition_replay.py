@@ -42,16 +42,44 @@ def test_sample_draws_from_every_stored_chunk() -> None:
 
     assert batch.features.shape == (600, 2)
     assert replay.transition_count == 3 * 4 * 8
+    assert replay.policy_version_range() == (0, 0)
 
 
-def test_capacity_evicts_whole_chunks_in_arrival_order() -> None:
+def test_capacity_overwrites_the_oldest_transitions() -> None:
     replay = TransitionReplayBuffer(capacity_transitions=64)
     for index in range(3):
-        replay.add(build_rollout(num_envs=4, horizon=8, rollout_id=index, seed=index))
+        replay.add(
+            build_rollout(
+                num_envs=4,
+                horizon=8,
+                rollout_id=index,
+                policy_version=index,
+                seed=index,
+            )
+        )
 
     assert replay.transition_count == 64
-    assert replay.policy_versions == (0, 0)
-    assert len(replay) == 2
+    # 96 transitions were inserted into 64 slots, so generation 0 is gone.
+    assert replay.policy_version_range() == (1, 2)
+
+
+def test_wrapped_writes_stay_consistent_per_transition() -> None:
+    replay = TransitionReplayBuffer(capacity_transitions=48)
+    for index in range(3):
+        replay.add(build_rollout(num_envs=4, horizon=8, rollout_id=index, seed=index))
+    last = build_rollout(num_envs=4, horizon=8, rollout_id=3, seed=3)
+    replay.add(last)
+
+    batch = replay.sample(
+        512, generator=torch.Generator().manual_seed(2), device=torch.device("cpu")
+    )
+
+    # Whatever survived, every sampled row is a transition that was inserted:
+    # its features and reward must still agree.
+    torch.testing.assert_close(
+        batch.environment_rewards, batch.features.sum(dim=-1), rtol=1e-6, atol=1e-6
+    )
+    assert replay.transition_count == 48
 
 
 def _rebuilt(rollout: TransitionRollout, **overrides) -> TransitionRollout:
