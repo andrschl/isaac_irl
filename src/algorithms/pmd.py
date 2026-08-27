@@ -201,6 +201,8 @@ class Pmd:
 
         One optimizer step can overshoot the bound by orders of magnitude, so
         the bound is a guarantee only if the step that crossed it is shrunk.
+        The Adam moments of the discarded step are kept: the next projection
+        measures its own KL, so stale moments cost at most one more backtrack.
         Returns the realized KL and how many halvings were needed.
         """
         proposed = copy_parameters(self.policy.model)
