@@ -38,14 +38,15 @@ from storage.transition_replay import (
 class CandidateBatch:
     """One frozen exponential target over K candidates per replay state.
 
+    Candidates are kept as pre-squash latents: the projection scores them under
+    the fitted policy, and inverting tanh would lose the ones near the bound.
+
     Shapes:
-        actions: [B, K, A]
         latent_actions: [B, K, A]
         reference_log_probability: [B, K]
         value / target tensors: [B, K]
     """
 
-    actions: torch.Tensor
     latent_actions: torch.Tensor
     reference_log_probability: torch.Tensor
     value: ValueEstimate
@@ -147,9 +148,6 @@ class Pmd:
             bisection_steps=self.cfg.coefficient_bisection_steps,
         )
         return CandidateBatch(
-            actions=rearrange(
-                actions, "(b k) a -> b k a", b=batch_size, k=candidate_count
-            ),
             latent_actions=rearrange(
                 latent_actions, "(b k) a -> b k a", b=batch_size, k=candidate_count
             ),
