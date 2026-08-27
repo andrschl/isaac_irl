@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
-from dataclasses import dataclass
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import torch

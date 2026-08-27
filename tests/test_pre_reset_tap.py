@@ -7,7 +7,6 @@ torch = pytest.importorskip("torch")
 from adapters.rsl_rl_pre_reset_tap import IsaacPreResetTap  # noqa: E402
 from reward_model.fixed import FixedLinearReward  # noqa: E402
 
-
 NUM_ENVS = 4
 STEP_DT = 0.05
 

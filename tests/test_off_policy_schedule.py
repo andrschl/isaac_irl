@@ -6,10 +6,11 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from adapters.off_policy import PmdAdapter, SacAdapter  # noqa: E402
-from interfaces import PhasedOffPolicyAlgorithm  # noqa: E402
-from config.off_policy import OffPolicyTrainCfg, TransitionReplayCfg  # noqa: E402
 from conftest import build_rollout  # noqa: E402
+
+from adapters.off_policy import PmdAdapter, SacAdapter  # noqa: E402
+from config.off_policy import OffPolicyTrainCfg, TransitionReplayCfg  # noqa: E402
+from interfaces import PhasedOffPolicyAlgorithm  # noqa: E402
 from storage.transition_replay import TransitionReplayBuffer  # noqa: E402
 
 

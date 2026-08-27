@@ -6,6 +6,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from conftest import build_replay, build_rollout  # noqa: E402
+
 from algorithms.off_policy_common import latent_policy_kl  # noqa: E402
 from algorithms.pmd import Pmd  # noqa: E402
 from algorithms.state_dependent_tanh_actor import (  # noqa: E402
@@ -15,8 +17,6 @@ from algorithms.state_dependent_tanh_actor import (  # noqa: E402
 from algorithms.successor_ensemble import RunningStandardizer  # noqa: E402
 from algorithms.value_backends import ValueEstimate  # noqa: E402
 from config.off_policy import PmdCfg  # noqa: E402
-from conftest import build_replay, build_rollout  # noqa: E402
-
 
 PREFERRED_ACTION = torch.tensor([0.9, -0.6])
 

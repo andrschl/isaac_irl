@@ -20,12 +20,12 @@ import torch
 from einops import rearrange
 
 from ._hdf5 import iter_hdf5_demos
-from .sampling import subset_episodes
 from .feature_semantics import (
     FEATURE_CAPTURE_TIMING,
     FEATURE_SEMANTICS_VERSION,
     FEATURE_VALUE_SEMANTICS,
 )
+from .sampling import subset_episodes
 
 if TYPE_CHECKING:
     from algorithms.irl import IrlAlgorithm

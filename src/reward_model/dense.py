@@ -14,7 +14,6 @@ from reward_model.projections import (
     soft_threshold,
 )
 
-
 _REGULARIZATION_OPTIONS = frozenset({"none", "l1", "l2", "elastic"})
 _LINEAR_PROJECTION_OPTIONS = frozenset({"none", "l1_ball", "l2_ball"})
 

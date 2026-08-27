@@ -9,8 +9,8 @@ from algorithms.irl import IrlAlgorithm, IRLCfg
 from interfaces import FeatureSpec
 from reward_model import LinearFeatureRewardModel, RewardModelCfg
 from reward_model.base import BaseRewardModel
-from utils.runtime_context import RuntimeContext
 from storage.feature_storage import FeatureBufCfg, FeatureTrajectoryBuffer
+from utils.runtime_context import RuntimeContext
 
 
 class LinearFeatureReward(LinearFeatureRewardModel):

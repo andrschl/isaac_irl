@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 
-
 _TRAINING_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "Overview/critic_loss",

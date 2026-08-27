@@ -2,11 +2,10 @@
 
 import pytest
 
-
 torch = pytest.importorskip("torch")
 
-from utils.runtime_context import RuntimeContext
 from storage.feature_storage import FeatureBufCfg, FeatureTrajectoryBuffer
+from utils.runtime_context import RuntimeContext
 
 
 def _make_buffer(

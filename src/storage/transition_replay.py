@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-
 from einops import rearrange
 
 from storage.observations import (

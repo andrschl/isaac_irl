@@ -8,8 +8,8 @@ from typing import Any, cast
 
 import torch
 
-from adapters.rsl_rl_pre_reset_tap import IsaacPreResetTap
 from adapters.off_policy import PmdAdapter, SacAdapter
+from adapters.rsl_rl_pre_reset_tap import IsaacPreResetTap
 from adapters.rsl_rl_transition_collector import TransitionCollector
 from algorithms.off_policy_common import BehaviorCloningLoss
 from algorithms.pmd import Pmd

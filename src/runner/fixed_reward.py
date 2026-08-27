@@ -6,9 +6,9 @@ import os
 from typing import Any, Callable
 
 import torch
+
 from config.fixed_reward import FixedRewardRunnerCfg
 from interfaces import FixedRewardRlAlgorithm
-
 from runner.loggers import LogEvent, Logger, NoopLogger
 from runner.overview import SampleEfficiencyTracker, training_overview_metrics
 

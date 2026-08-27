@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-
 from isaaclab.app import AppLauncher
 
 # local imports
@@ -123,18 +122,17 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 
-import gymnasium as gym
-from rsl_rl.runners import OnPolicyRunner
-
 import importlib.metadata as _importlib_metadata
 
+import gymnasium as gym
 from isaaclab.utils.dict import print_dict
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
+from rsl_rl.runners import OnPolicyRunner
 
 try:
-    from collectors import RobomimicDataCollector
     from adapters.rsl_rl_pre_reset_tap import IsaacPreResetTap
+    from collectors import RobomimicDataCollector
     from data.feature_semantics import (
         FEATURE_CAPTURE_TIMING,
         FEATURE_SEMANTICS_VERSION,
@@ -144,8 +142,8 @@ try:
 except ModuleNotFoundError:
     repo_src = Path(__file__).resolve().parents[2] / "src"
     sys.path.insert(0, str(repo_src))
-    from collectors import RobomimicDataCollector
     from adapters.rsl_rl_pre_reset_tap import IsaacPreResetTap
+    from collectors import RobomimicDataCollector
     from data.feature_semantics import (
         FEATURE_CAPTURE_TIMING,
         FEATURE_SEMANTICS_VERSION,

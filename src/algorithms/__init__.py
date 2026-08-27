@@ -7,7 +7,7 @@ from .exponential_policy import (
     exponential_log_weights,
     exponential_target,
 )
-from .irl import IRLCfg, IrlAlgorithm
+from .irl import IrlAlgorithm, IRLCfg
 from .pmd import Pmd
 from .ppo_with_bc import make_ppo_with_bc_cls
 from .sac import Sac

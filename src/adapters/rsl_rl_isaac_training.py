@@ -40,9 +40,6 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from scripts.irl.cli_args import build_arg_parser
-from scripts._video_helpers import build_video_step_trigger, finalize_videos
-
 from adapters import (
     RslRlPpoAdapter,
     RslRlVecEnvAdapter,
@@ -70,8 +67,9 @@ from runner import (
     IrlRunner,
     WandbLogger,
 )
-from utils.run_output import dump_run_configs
-from utils.run_output import extract_ground_truth_reward_weights
+from scripts._video_helpers import build_video_step_trigger, finalize_videos
+from scripts.irl.cli_args import build_arg_parser
+from utils.run_output import dump_run_configs, extract_ground_truth_reward_weights
 from utils.runtime_context import RuntimeContext
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -129,10 +127,9 @@ def _load_app_launcher_cls() -> Any:
 def _load_runtime_deps(app_launcher_cls: Any) -> RuntimeDeps:
 
     import gymnasium as gym
-
     import isaaclab_tasks  # noqa: F401
-    from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
     from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
+    from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
     from rsl_rl.algorithms import PPO
     from rsl_rl.models import MLPModel
     from rsl_rl.storage import RolloutStorage

@@ -5,7 +5,11 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from conftest import build_replay, build_rollout  # noqa: E402
-from storage.transition_replay import TransitionReplayBuffer, TransitionRollout  # noqa: E402
+
+from storage.transition_replay import (  # noqa: E402
+    TransitionReplayBuffer,
+    TransitionRollout,
+)
 
 
 def test_sample_returns_paired_transitions_and_their_successors() -> None:

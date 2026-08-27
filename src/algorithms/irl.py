@@ -8,9 +8,9 @@ import torch.nn as nn
 import torch.optim as optim
 from einops import rearrange
 
-from storage.feature_storage import FeatureBufCfg, FeatureTrajectoryBuffer
-from reward_model.base import BaseRewardModel
 from interfaces import FeatureSpec, FeatureStep
+from reward_model.base import BaseRewardModel
+from storage.feature_storage import FeatureBufCfg, FeatureTrajectoryBuffer
 from utils.runtime_context import RuntimeContext
 
 

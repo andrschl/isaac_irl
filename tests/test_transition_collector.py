@@ -8,7 +8,6 @@ torch = pytest.importorskip("torch")
 
 from adapters.rsl_rl_transition_collector import TransitionCollector  # noqa: E402
 
-
 NUM_ENVS = 3
 OBSERVATION_DIM = 2
 ACTION_DIM = 1

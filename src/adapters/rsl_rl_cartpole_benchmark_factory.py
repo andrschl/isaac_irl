@@ -10,9 +10,9 @@ from typing import Any
 
 import torch
 
+from adapters.rsl_rl_actor_critic import make_actor_critic
 from adapters.rsl_rl_cartpole_ppo import FixedRewardPpoAdapter
 from adapters.rsl_rl_off_policy_factory import build_off_policy_stack
-from adapters.rsl_rl_actor_critic import make_actor_critic
 from adapters.rsl_rl_vec_env import RslRlVecEnvAdapter
 from config.cartpole_benchmark import CartpoleBenchmarkCfg
 from config.fixed_reward import FixedRewardRunnerCfg
@@ -40,8 +40,8 @@ def build_cartpole_benchmark(
     """Construct a seeded Cartpole env and one retained learner."""
     import gymnasium as gym
     import isaaclab_tasks  # noqa: F401
-    from isaaclab_tasks.utils import parse_env_cfg
     from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
+    from isaaclab_tasks.utils import parse_env_cfg
     from rsl_rl.algorithms import PPO
     from rsl_rl.models import MLPModel
     from rsl_rl.storage import RolloutStorage

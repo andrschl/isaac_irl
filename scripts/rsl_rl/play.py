@@ -57,17 +57,15 @@ if args_cli.video:
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-import gymnasium as gym
-from rsl_rl.runners import OnPolicyRunner
+import importlib.metadata as _importlib_metadata
 
+import gymnasium as gym
+import isaaclab_tasks  # noqa: F401
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
-import importlib.metadata as _importlib_metadata
-
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
-
-import isaaclab_tasks  # noqa: F401
+from rsl_rl.runners import OnPolicyRunner
 
 
 def main() -> None:

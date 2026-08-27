@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
-from algorithms.state_dependent_tanh_actor import TanhPolicyProtocol
 import torch.nn.functional as F
 
+from algorithms.state_dependent_tanh_actor import TanhPolicyProtocol
 from data import load_obs_action_episodes, split_holdout_episodes, subset_episodes
 from storage.obs_action_storage import ObsActionBufCfg, ObsActionBuffer
 from utils.runtime_context import RuntimeContext

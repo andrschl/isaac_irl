@@ -2,7 +2,6 @@
 
 import pytest
 
-
 torch = pytest.importorskip("torch")
 
 from reward_model import (
