@@ -14,6 +14,7 @@ _TRAINING_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Overview/policy_std", ("Actor/policy_std_mean", "RL/policy_std_mean")),
     ("Overview/pmd_actor_kl", ("PMD/actor_projection_kl",)),
     ("Overview/pmd_target_kl", ("PMD/candidate_target_kl",)),
+    ("Overview/pmd_spread_kl", ("PMD/actor_spread_kl",)),
     ("Overview/policy_updates", ("Data/actor_updates",)),
     ("Overview/timeout_fraction", ("Data/truncated_fraction",)),
     (

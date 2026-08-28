@@ -73,6 +73,13 @@ Important parameters:
   `pi_old`. A single optimizer step can overshoot it by orders of magnitude,
   so the step that crosses the bound is shrunk along its own displacement by
   up to `projection_backtrack_steps` halvings until the bound holds.
+- `actor_spread_projection_kl`: the same bound applied to the part of the KL
+  that only widens or narrows the action distribution. One bound on the whole
+  Gaussian cannot separate "moved the actions" from "made them noisier", and a
+  weighted fit to its own samples drifts outward: on Lift the unconstrained
+  version reached a latent standard deviation of 5 — saturated, bang-bang
+  actions — while its mean barely moved. `PMD/actor_mean_kl` and
+  `PMD/actor_spread_kl` report the two parts.
 - `projection_steps`: maximum weighted-NLL optimizer steps per projection.
 - `actor_learning_rate`, `actor_batch_size`: projection optimizer step size
   and the number of replay states carrying the candidate target.

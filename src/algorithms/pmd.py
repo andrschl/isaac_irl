@@ -15,9 +15,9 @@ from algorithms.exponential_policy import (
 from algorithms.off_policy_common import (
     BehaviorCloningLoss,
     copy_parameters,
+    decomposed_policy_kl,
     gradient_norm,
     interpolate_parameters,
-    latent_policy_kl,
     mix_actor_loss,
     parameter_delta,
     repeat_observations,
@@ -180,21 +180,28 @@ class Pmd:
         )
         return -(candidates.target.weights.detach() * log_probability).mean()
 
-    def _projection_kl(self, policy_observations: Observation) -> float:
-        """KL of the fitted actor from the frozen policy on the projection batch."""
+    def _projection_kl(self, policy_observations: Observation) -> tuple[float, float]:
+        """Mean and spread KL of the fitted actor from the frozen policy."""
         with torch.no_grad():
-            kl = latent_policy_kl(
+            mean_kl, spread_kl = decomposed_policy_kl(
                 self.previous_policy, self.policy, policy_observations
             )
-        if not torch.isfinite(kl):
+        if not torch.isfinite(mean_kl) or not torch.isfinite(spread_kl):
             raise FloatingPointError("PMD projection KL is non-finite.")
-        return float(kl.item())
+        return float(mean_kl.item()), float(spread_kl.item())
+
+    def _leaves_trust_region(self, mean_kl: float, spread_kl: float) -> bool:
+        """Whether either part of the step exceeds its own bound."""
+        return (
+            mean_kl + spread_kl > self.cfg.actor_projection_kl
+            or spread_kl > self.cfg.actor_spread_projection_kl
+        )
 
     def _backtrack_into_trust_region(
         self,
         start_parameters: dict[str, torch.Tensor],
         policy_observations: Observation,
-    ) -> tuple[float, int]:
+    ) -> tuple[float, float, int]:
         """Halve the accumulated displacement until the KL bound holds.
 
         One optimizer step can overshoot the bound by orders of magnitude, so
@@ -210,14 +217,13 @@ class Pmd:
             interpolate_parameters(
                 self.policy.model, start_parameters, proposed, factor
             )
-            projection_kl = self._projection_kl(policy_observations)
-            if projection_kl <= self.cfg.actor_projection_kl:
-                return projection_kl, backtracks
-        # Nothing on the ray satisfies the bound: keep the frozen policy.
+            mean_kl, spread_kl = self._projection_kl(policy_observations)
+            if not self._leaves_trust_region(mean_kl, spread_kl):
+                return mean_kl, spread_kl, backtracks
+        # Nothing on the ray satisfies the bounds: keep the frozen policy.
         interpolate_parameters(self.policy.model, start_parameters, proposed, 0.0)
-        return self._projection_kl(policy_observations), (
-            self.cfg.projection_backtrack_steps
-        )
+        mean_kl, spread_kl = self._projection_kl(policy_observations)
+        return mean_kl, spread_kl, self.cfg.projection_backtrack_steps
 
     def actor_update(self, replay: TransitionReplayBuffer) -> dict[str, float]:
         """Project the actor onto one frozen target, stopping at the KL bound."""
@@ -228,6 +234,7 @@ class Pmd:
         )
         before = copy_parameters(self.policy.model)
         projection_kl = 0.0
+        spread_kl = 0.0
         projection_steps_taken = 0
         projection_backtracks = 0
         last_gradient_norm = 0.0
@@ -261,9 +268,9 @@ class Pmd:
             self.actor_optimizer.step()
             projection_steps_taken += 1
             bc_loss_value = float(bc_loss.item())
-            projection_kl = self._projection_kl(batch.policy_observations)
-            if projection_kl > self.cfg.actor_projection_kl:
-                projection_kl, projection_backtracks = (
+            projection_kl, spread_kl = self._projection_kl(batch.policy_observations)
+            if self._leaves_trust_region(projection_kl, spread_kl):
+                projection_kl, spread_kl, projection_backtracks = (
                     self._backtrack_into_trust_region(before, batch.policy_observations)
                 )
                 break
@@ -294,7 +301,9 @@ class Pmd:
             "PMD/beta": float(self.cfg.beta),
             "PMD/q_coefficient": candidates.target.q_coefficient,
             "PMD/candidate_target_kl": candidates.target.candidate_kl,
-            "PMD/actor_projection_kl": projection_kl,
+            "PMD/actor_projection_kl": projection_kl + spread_kl,
+            "PMD/actor_mean_kl": projection_kl,
+            "PMD/actor_spread_kl": spread_kl,
             "PMD/effective_sample_size": candidates.target.effective_sample_size,
             "PMD/candidate_entropy": float(candidate_entropy.item()),
             "PMD/projection_loss_before": initial_loss,

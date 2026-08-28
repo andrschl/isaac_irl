@@ -233,6 +233,10 @@ class PmdCfg:
     of critic steps that evaluate the frozen pi_k before it is replaced. It is
     the actor-side analogue of OffPolicyTrainCfg.updates_per_transition, and it
     decides how much trust-region budget PMD spends per simulator transition.
+
+    actor_spread_projection_kl bounds the part of the step that only widens or
+    narrows the action distribution. Without it a projection can spend its whole
+    trust region on variance and drift towards saturated, bang-bang actions.
     """
 
     type: ClassVar[str] = "pmd"
@@ -244,6 +248,7 @@ class PmdCfg:
     candidate_actions: int = 32
     candidate_target_kl: float = 0.05
     actor_projection_kl: float = 0.02
+    actor_spread_projection_kl: float = 0.002
     q_coefficient_min: float = 1.0e-6
     q_coefficient_max: float = 1.0e3
     coefficient_bisection_steps: int = 32
@@ -272,6 +277,11 @@ class PmdCfg:
         if not 0.0 < self.actor_projection_kl < self.candidate_target_kl:
             raise ValueError(
                 "actor_projection_kl must be positive and below candidate_target_kl."
+            )
+        if not 0.0 < self.actor_spread_projection_kl <= self.actor_projection_kl:
+            raise ValueError(
+                "actor_spread_projection_kl must be positive and at most "
+                "actor_projection_kl."
             )
         if not 0.0 < self.q_coefficient_min < self.q_coefficient_max:
             raise ValueError("Expected 0 < q_coefficient_min < q_coefficient_max.")

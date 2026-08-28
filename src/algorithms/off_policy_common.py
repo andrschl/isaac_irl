@@ -131,6 +131,37 @@ def latent_policy_kl(
     )
 
 
+def decomposed_policy_kl(
+    reference: TanhPolicyProtocol,
+    current: TanhPolicyProtocol,
+    observations: Observation,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split KL(reference || current) into its mean and spread parts.
+
+    One bound on the whole Gaussian cannot tell "moved the actions" from "made
+    the actions noisier": a policy can spend its entire trust region widening
+    its standard deviation, a step at a time, and never commit to an action.
+    Holding one factor fixed at the reference isolates the other:
+
+        mean part:   sum_i (mu_ref - mu_cur)^2 / (2 sigma_cur^2)
+        spread part: sum_i [log(sigma_cur/sigma_ref)
+                            + sigma_ref^2 / (2 sigma_cur^2) - 1/2]
+
+    Both are averaged over states and sum to the full KL.
+    """
+    reference_mean, reference_std = reference.distribution_parameters(observations)
+    current_mean, current_std = current.distribution_parameters(observations)
+    mean_kl = (
+        (reference_mean - current_mean).square() / (2.0 * current_std.square())
+    ).sum(dim=-1)
+    spread_kl = (
+        (current_std / reference_std).log()
+        + reference_std.square() / (2.0 * current_std.square())
+        - 0.5
+    ).sum(dim=-1)
+    return mean_kl.mean(), spread_kl.mean()
+
+
 @torch.no_grad()
 def interpolate_parameters(
     module: nn.Module,

@@ -115,6 +115,7 @@ def test_projection_respects_the_actor_kl_bound() -> None:
 
     assert metrics["PMD/actor_projection_kl"] > 0.0
     assert metrics["PMD/actor_projection_kl"] <= learner.cfg.actor_projection_kl
+    assert metrics["PMD/actor_spread_kl"] <= learner.cfg.actor_spread_projection_kl
     # States outside the projection batch may differ, but not by orders.
     held_out_kl = float(
         latent_policy_kl(reference, learner.policy, observations).item()
@@ -195,3 +196,31 @@ def test_projection_moves_the_actor_every_update() -> None:
         metrics = learner.actor_update(replay)
         assert metrics["Actor/parameter_delta"] > 0.0
         assert metrics["PMD/projection_steps_taken"] >= 1.0
+
+
+def test_projection_bounds_the_spread_separately_from_the_mean() -> None:
+    learner = _learner()
+    replay = _replay()
+
+    for _ in range(30):
+        metrics = learner.actor_update(replay)
+        assert metrics["PMD/actor_spread_kl"] <= learner.cfg.actor_spread_projection_kl
+        assert metrics["PMD/actor_mean_kl"] + metrics["PMD/actor_spread_kl"] <= (
+            learner.cfg.actor_projection_kl
+        )
+
+
+def test_repeated_projections_cannot_inflate_the_policy_spread() -> None:
+    learner = _learner()
+    replay = _replay()
+    observations = torch.randn(128, 3)
+    _, initial_std = learner.policy.distribution_parameters(observations)
+
+    for _ in range(30):
+        learner.actor_update(replay)
+
+    _, final_std = learner.policy.distribution_parameters(observations)
+    growth = float((final_std / initial_std).max().item())
+    # A spread bound of 0.002 nats per projection over 30 projections cannot
+    # take the policy anywhere near the saturated regime.
+    assert growth < 1.5
