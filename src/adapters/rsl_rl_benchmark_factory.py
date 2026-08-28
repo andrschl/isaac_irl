@@ -40,10 +40,11 @@ def build_fixed_reward_benchmark(cfg: FixedRewardBenchmarkCfg) -> BuiltBenchmark
 
     task = cfg.task
     torch.manual_seed(cfg.seed)
+    num_envs = _environment_count(cfg)
     env_cfg = parse_env_cfg(
         task.task_id,
         device=cfg.device,
-        num_envs=task.num_envs,
+        num_envs=num_envs,
         use_fabric=True,
     )
     env_cfg.seed = cfg.seed
@@ -124,7 +125,7 @@ def build_fixed_reward_benchmark(cfg: FixedRewardBenchmarkCfg) -> BuiltBenchmark
                     "seed": cfg.seed,
                     "task": task.task_id,
                     "task_profile": task.name,
-                    "num_envs": task.num_envs,
+                    "num_envs": num_envs,
                     "transition_budget": task.transition_budget,
                     "evaluation_steps": task.evaluation_steps,
                     "variant": variant,
@@ -164,6 +165,13 @@ def build_fixed_reward_benchmark(cfg: FixedRewardBenchmarkCfg) -> BuiltBenchmark
     )
 
 
+def _environment_count(cfg: FixedRewardBenchmarkCfg) -> int:
+    """Environments to simulate: PPO may run at its own tuned parallelism."""
+    if cfg.algorithm == "ppo" and cfg.task.ppo.num_envs is not None:
+        return int(cfg.task.ppo.num_envs)
+    return int(cfg.task.num_envs)
+
+
 def _build_ppo(
     cfg: FixedRewardBenchmarkCfg, observations: Any, env: Any
 ) -> tuple[Any, dict[str, Any]]:
@@ -195,7 +203,7 @@ def _build_ppo(
     )
     storage = RolloutStorage(
         "rl",
-        task.num_envs,
+        _environment_count(cfg),
         baseline.rollout_steps,
         observations,
         [env.action_dim],

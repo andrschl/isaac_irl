@@ -24,7 +24,14 @@ AlgorithmName = Literal["ppo", "sac", "pmd"]
 
 @dataclass(slots=True)
 class PpoBaselineCfg:
-    """On-policy baseline hyperparameters, one tuned set per task."""
+    """On-policy baseline hyperparameters, one tuned set per task.
+
+    ``num_envs`` is the parallelism the baseline is tuned for and may differ
+    from the off-policy one: an on-policy update is a batch of
+    ``num_envs * rollout_steps`` transitions, and starving it distorts the
+    baseline rather than making the comparison fair. Sample efficiency is
+    reported in simulator transitions either way.
+    """
 
     rollout_steps: int
     hidden_dims: tuple[int, ...]
@@ -39,10 +46,13 @@ class PpoBaselineCfg:
     init_noise_std: float = 1.0
     max_grad_norm: float = 1.0
     value_loss_coef: float = 1.0
+    num_envs: int | None = None
 
     def __post_init__(self) -> None:
         if self.rollout_steps <= 0:
             raise ValueError("ppo.rollout_steps must be > 0.")
+        if self.num_envs is not None and self.num_envs <= 0:
+            raise ValueError("ppo.num_envs must be > 0 when set.")
         if not self.hidden_dims or any(value <= 0 for value in self.hidden_dims):
             raise ValueError("ppo.hidden_dims must contain positive values.")
         for name, value in (
@@ -68,7 +78,7 @@ class BenchmarkTask:
 
     name: str
     task_id: str
-    num_envs: int
+    num_envs: int  # off-policy parallelism; PPO may use its own
     transition_budget: int
     evaluation_interval_transitions: int
     evaluation_steps: int
@@ -217,6 +227,10 @@ def lift_task() -> BenchmarkTask:
             learning_rate=1.0e-4,
             gamma=0.98,
             entropy_coef=0.006,
+            # IsaacLab tunes this baseline at 4096 environments; at 512 its
+            # policy standard deviation collapses from 1.0 to 0.08 before it
+            # ever reaches the cube.
+            num_envs=4096,
         ),
         sac=_sac_cfg(
             train=_lift_off_policy_train(),
