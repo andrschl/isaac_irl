@@ -98,14 +98,8 @@ class DirectActionValue:
         self.optimizer = torch.optim.Adam(
             self.online.parameters(), lr=train_cfg.critic_learning_rate
         )
-        self.replay_generators = [
-            torch.Generator(device="cpu").manual_seed(seed + 1009 * (head + 1))
-            for head in range(cfg.num_heads)
-        ]
-        self.action_generators = [
-            torch.Generator(device=device).manual_seed(seed + 2003 * (head + 1))
-            for head in range(cfg.num_heads)
-        ]
+        self.replay_generator = torch.Generator(device="cpu").manual_seed(seed + 1009)
+        self.action_generator = torch.Generator(device=device).manual_seed(seed + 2003)
 
     def fit_feature_scale(self, rollout: TransitionRollout) -> None:
         del rollout
@@ -117,40 +111,49 @@ class DirectActionValue:
         target_policy: TanhPolicyProtocol,
         entropy_temperature: float,
     ) -> dict[str, float]:
-        """Apply one averaged optimizer step over independently sampled heads."""
+        """Apply one averaged optimizer step over disjoint per-head batches.
+
+        Heads learn from disjoint slices of a single draw rather than from one
+        replay sample each: the data stays independent across heads and the
+        update costs one sample and one next-action pass instead of ``M``.
+        """
+        batch_size = self.train_cfg.critic_batch_size
+        batch = replay.sample(
+            self.num_heads * batch_size,
+            generator=self.replay_generator,
+            device=self.device,
+        )
+        with torch.no_grad():
+            next_actions, next_log_probability = (
+                target_policy.sample_with_log_probability(
+                    batch.next_policy_observations,
+                    generator=self.action_generator,
+                )
+            )
+            rewards = self.reward.score(batch.features)
+            normalized_next = self.observation_normalizer(
+                batch.next_critic_observations
+            )
+        normalized_current = self.observation_normalizer(batch.critic_observations)
+
         losses: list[torch.Tensor] = []
         targets: list[torch.Tensor] = []
         for head_index in range(self.num_heads):
-            batch = replay.sample(
-                self.train_cfg.critic_batch_size,
-                generator=self.replay_generators[head_index],
-                device=self.device,
-            )
+            rows = slice(head_index * batch_size, (head_index + 1) * batch_size)
             with torch.no_grad():
-                next_actions, next_log_probability = (
-                    target_policy.sample_with_log_probability(
-                        batch.next_policy_observations,
-                        generator=self.action_generators[head_index],
-                    )
-                )
                 next_q = self.target.head(
-                    head_index,
-                    self.observation_normalizer(batch.next_critic_observations),
-                    next_actions,
+                    head_index, normalized_next[rows], next_actions[rows]
                 )
-                rewards = self.reward.score(batch.features).to(next_q)
                 target = soft_task_q_td_target(
-                    rewards,
-                    next_log_probability,
+                    rewards[rows].to(next_q),
+                    next_log_probability[rows],
                     next_q,
-                    batch.bootstrap_valid,
+                    batch.bootstrap_valid[rows],
                     gamma=self.train_cfg.gamma,
                     entropy_coefficient=entropy_temperature,
                 )
             prediction = self.online.head(
-                head_index,
-                self.observation_normalizer(batch.critic_observations),
-                batch.actions,
+                head_index, normalized_current[rows], batch.actions[rows]
             )
             losses.append(F.huber_loss(prediction, target))
             targets.append(target.mean())
@@ -198,8 +201,8 @@ class DirectActionValue:
             "online": self.online.state_dict(),
             "target": self.target.state_dict(),
             "optimizer": self.optimizer.state_dict(),
-            "replay_rng": [item.get_state() for item in self.replay_generators],
-            "action_rng": [item.get_state() for item in self.action_generators],
+            "replay_rng": self.replay_generator.get_state(),
+            "action_rng": self.action_generator.get_state(),
         }
 
     def load_state(self, state: dict[str, Any], *, load_optimizer: bool) -> None:
@@ -207,14 +210,8 @@ class DirectActionValue:
             raise ValueError("Checkpoint value backend is not direct Q.")
         self.online.load_state_dict(state["online"], strict=True)
         self.target.load_state_dict(state["target"], strict=True)
-        for generator, generator_state in zip(
-            self.replay_generators, state["replay_rng"], strict=True
-        ):
-            generator.set_state(generator_state.cpu())
-        for generator, generator_state in zip(
-            self.action_generators, state["action_rng"], strict=True
-        ):
-            generator.set_state(generator_state.cpu())
+        self.replay_generator.set_state(state["replay_rng"].cpu())
+        self.action_generator.set_state(state["action_rng"].cpu())
         if load_optimizer:
             self.optimizer.load_state_dict(state["optimizer"])
 
@@ -284,14 +281,8 @@ class SuccessorActionValue:
         self.scale_refits = 0
         self._feature_square_sum = torch.zeros(feature_dim, device=device)
         self._feature_count = 0
-        self.replay_generators = [
-            torch.Generator(device="cpu").manual_seed(seed + 1009 * (head + 1))
-            for head in range(cfg.num_heads)
-        ]
-        self.action_generators = [
-            torch.Generator(device=device).manual_seed(seed + 2003 * (head + 1))
-            for head in range(cfg.num_heads)
-        ]
+        self.replay_generator = torch.Generator(device="cpu").manual_seed(seed + 1009)
+        self.action_generator = torch.Generator(device=device).manual_seed(seed + 2003)
         self.entropy_replay_generator = torch.Generator(device="cpu").manual_seed(
             seed + 47
         )
@@ -345,35 +336,38 @@ class SuccessorActionValue:
     ) -> dict[str, float]:
         if not self.scale_fitted:
             raise RuntimeError("Fit successor feature scales before TD updates.")
+        batch_size = self.train_cfg.critic_batch_size
+        batch = replay.sample(
+            self.num_heads * batch_size,
+            generator=self.replay_generator,
+            device=self.device,
+        )
+        with torch.no_grad():
+            next_actions, _ = target_policy.sample_with_log_probability(
+                batch.next_policy_observations,
+                generator=self.action_generator,
+            )
+            # One trunk pass for the whole batch; each head reads its own slice.
+            next_latent = self.target.latent(
+                self.observation_normalizer(batch.next_critic_observations),
+                next_actions,
+            )
+        current_latent = self.online.latent(
+            self.observation_normalizer(batch.critic_observations), batch.actions
+        )
+
         losses: list[torch.Tensor] = []
         feature_losses: list[torch.Tensor] = []
         for head_index in range(self.num_heads):
-            batch = replay.sample(
-                self.train_cfg.critic_batch_size,
-                generator=self.replay_generators[head_index],
-                device=self.device,
-            )
+            rows = slice(head_index * batch_size, (head_index + 1) * batch_size)
             with torch.no_grad():
-                next_actions, _ = target_policy.sample_with_log_probability(
-                    batch.next_policy_observations,
-                    generator=self.action_generators[head_index],
-                )
-                next_successors = self.target.head(
-                    head_index,
-                    self.observation_normalizer(batch.next_critic_observations),
-                    next_actions,
-                )
                 target = successor_ensemble_td_target(
-                    batch.features,
-                    next_successors,
-                    batch.bootstrap_valid,
+                    batch.features[rows],
+                    self.target.apply_head(head_index, next_latent[rows]),
+                    batch.bootstrap_valid[rows],
                     self.train_cfg.gamma,
                 )
-            prediction = self.online.head(
-                head_index,
-                self.observation_normalizer(batch.critic_observations),
-                batch.actions,
-            )
+            prediction = self.online.apply_head(head_index, current_latent[rows])
             residual = (prediction - target) / self.return_scale.unsqueeze(0)
             by_feature = F.huber_loss(
                 residual, torch.zeros_like(residual), reduction="none"
@@ -515,8 +509,8 @@ class SuccessorActionValue:
             "scale_refits": self.scale_refits,
             "feature_square_sum": self._feature_square_sum.detach().cpu(),
             "feature_count": self._feature_count,
-            "replay_rng": [item.get_state() for item in self.replay_generators],
-            "action_rng": [item.get_state() for item in self.action_generators],
+            "replay_rng": self.replay_generator.get_state(),
+            "action_rng": self.action_generator.get_state(),
             "entropy_replay_rng": self.entropy_replay_generator.get_state(),
             "entropy_action_rng": self.entropy_action_generator.get_state(),
         }
@@ -549,14 +543,8 @@ class SuccessorActionValue:
             self._feature_square_sum
         )
         self._feature_count = int(state["feature_count"])
-        for generator, generator_state in zip(
-            self.replay_generators, state["replay_rng"], strict=True
-        ):
-            generator.set_state(generator_state.cpu())
-        for generator, generator_state in zip(
-            self.action_generators, state["action_rng"], strict=True
-        ):
-            generator.set_state(generator_state.cpu())
+        self.replay_generator.set_state(state["replay_rng"].cpu())
+        self.action_generator.set_state(state["action_rng"].cpu())
         self.entropy_replay_generator.set_state(state["entropy_replay_rng"].cpu())
         self.entropy_action_generator.set_state(state["entropy_action_rng"].cpu())
         if self.entropy_online is not None:

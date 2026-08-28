@@ -254,3 +254,19 @@ def test_return_scale_tracks_features_that_only_appear_later() -> None:
     # The absent feature sits at the floor until it is observed at all.
     assert float(early_scale[1].item()) == pytest.approx(1.0)
     assert float(later_scale[1].item()) > 50.0
+
+
+def test_apply_head_matches_recomputing_the_trunk() -> None:
+    ensemble = SuccessorFeatureEnsemble(
+        3, 2, 4, num_heads=3, trunk_hidden_dims=(8,), latent_dim=6, head_hidden_dim=5
+    )
+    observations = torch.randn(9, 3)
+    actions = torch.randn(9, 2)
+
+    latent = ensemble.latent(observations, actions)
+
+    for head_index in range(3):
+        torch.testing.assert_close(
+            ensemble.apply_head(head_index, latent),
+            ensemble.head(head_index, observations, actions),
+        )

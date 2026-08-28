@@ -112,6 +112,7 @@ def build_off_policy_stack(
         action_bound=policy_cfg.action_bound,
         initial_std=policy_cfg.initial_std,
         minimum_log_std=math.log(policy_cfg.minimum_std),
+        maximum_log_std=math.log(policy_cfg.maximum_std),
         observation_normalizer=actor_normalizer,
     ).to(compute_device)
     policy = StateDependentTanhPolicy(actor_model)
@@ -155,7 +156,8 @@ def build_off_policy_stack(
         raise TypeError(f"Unsupported value config {type(algorithm_cfg.value)!r}.")
 
     replay = TransitionReplayBuffer(
-        capacity_transitions=algorithm_cfg.train.replay.capacity
+        capacity_transitions=algorithm_cfg.train.replay.capacity,
+        device=algorithm_cfg.train.replay.resolve_storage_device(compute_device),
     )
     collector = TransitionCollector(
         env,

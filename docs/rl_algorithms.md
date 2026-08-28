@@ -98,9 +98,11 @@ The direct backend learns scalar soft action values:
 
 `target = reward + gamma * mask * (target_Q - entropy_temperature * log pi)`.
 
-Every ensemble head uses an independent replay resample and its paired EMA
-target. Control uses the ensemble mean; there is no clipped minimum or
-pessimistic reduction.
+Every ensemble head learns from a disjoint slice of one replay draw and
+bootstraps from its paired EMA target. Control uses the ensemble mean; there is
+no clipped minimum or pessimistic reduction. Drawing once and splitting keeps
+the per-head data independent while costing one sample and one next-action pass
+per update instead of one per head.
 
 ### Successor Q
 
@@ -143,6 +145,14 @@ These live under `algo.train`:
 - `replay.learning_starts`: minimum stored transitions before any learning.
 - `replay.capacity`: maximum stored transitions; replay is a ring buffer,
   so the oldest transitions are overwritten once it is full.
+- `replay.storage_device`: `auto` keeps the ring on the training device, which
+  removes a host-to-device copy from every sample; `cpu` trades that back for
+  host memory. A ring that would not fit is refused with the measured bytes
+  per transition.
+- `policy.maximum_std`: ceiling on the actor's latent spread. A weighted fit to
+  a policy's own samples inflates variance while the critic is uninformative,
+  and a per-step trust region cannot stop the drift compounding: on Lift the
+  unbounded policy reached a spread of 4.7 and flailed.
 - `observation_epsilon`, `observation_clip`: running-normalization
   numerical floor and normalized observation bound.
 

@@ -508,6 +508,7 @@ def _parse_tanh_policy_cfg(
         hidden_dims=_to_tuple_ints(section.get("hidden_dims"), defaults.hidden_dims),
         initial_std=float(section.get("initial_std", defaults.initial_std)),
         minimum_std=float(section.get("minimum_std", defaults.minimum_std)),
+        maximum_std=float(section.get("maximum_std", defaults.maximum_std)),
         action_bound=float(section.get("action_bound", defaults.action_bound)),
     )
 

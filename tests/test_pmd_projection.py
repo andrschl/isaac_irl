@@ -16,7 +16,7 @@ from algorithms.state_dependent_tanh_actor import (  # noqa: E402
 )
 from algorithms.successor_ensemble import RunningStandardizer  # noqa: E402
 from algorithms.value_backends import ValueEstimate  # noqa: E402
-from config.off_policy import PmdCfg  # noqa: E402
+from config.off_policy import PmdCfg, TanhGaussianPolicyCfg  # noqa: E402
 
 PREFERRED_ACTION = torch.tensor([0.9, -0.6])
 
@@ -64,7 +64,7 @@ class _ConstantBehaviorCloning:
         return policy.deterministic_action(observations).square().mean()
 
 
-def _learner(cfg: PmdCfg | None = None, bc: Any = None) -> Pmd:
+def _learner(cfg: PmdCfg | None = None, bc: Any = None, value: Any = None) -> Pmd:
     torch.manual_seed(0)
     cfg = cfg or PmdCfg(
         actor_batch_size=64,
@@ -79,13 +79,14 @@ def _learner(cfg: PmdCfg | None = None, bc: Any = None) -> Pmd:
         2,
         hidden_dims=(16,),
         action_bound=1.0,
-        initial_std=1.0,
+        initial_std=cfg.policy.initial_std,
         minimum_log_std=float(torch.tensor(cfg.policy.minimum_std).log()),
+        maximum_log_std=float(torch.tensor(cfg.policy.maximum_std).log()),
         observation_normalizer=normalizer,
     )
     return Pmd(
         StateDependentTanhPolicy(model),
-        _QuadraticValue(),
+        value or _QuadraticValue(),
         actor_observation_normalizer=normalizer,
         critic_observation_normalizer=RunningStandardizer(3, epsilon=1.0e-6, clip=10.0),
         cfg=cfg,
@@ -224,3 +225,30 @@ def test_repeated_projections_cannot_inflate_the_policy_spread() -> None:
     # A spread bound of 0.002 nats per projection over 30 projections cannot
     # take the policy anywhere near the saturated regime.
     assert growth < 1.5
+
+
+def test_noise_weighted_projections_stay_inside_the_spread_ceiling() -> None:
+    class _NoisyValue(_QuadraticValue):
+        """A critic with no signal: weights are pure noise, as early training."""
+
+        def mean(self, observations, actions, *, entropy_temperature):
+            del observations, entropy_temperature
+            q = torch.randn(actions.shape[0], generator=None)
+            return ValueEstimate(q=q, reward_q=q, entropy_q=torch.zeros_like(q))
+
+    cfg = PmdCfg(
+        actor_batch_size=64,
+        candidate_actions=16,
+        projection_steps=6,
+        actor_learning_rate=1.0e-2,
+        policy=TanhGaussianPolicyCfg(initial_std=1.0, maximum_std=1.5),
+    )
+    learner = _learner(cfg, value=_NoisyValue())
+    replay = _replay()
+    observations = torch.randn(64, 3)
+
+    for _ in range(60):
+        learner.actor_update(replay)
+
+    _, std = learner.policy.distribution_parameters(observations)
+    assert float(std.max().item()) <= cfg.policy.maximum_std + 1.0e-6

@@ -20,21 +20,38 @@ from typing import ClassVar, TypeAlias
 
 @dataclass(slots=True)
 class TransitionReplayCfg:
-    """Dense CPU transition replay limits.
+    """Dense transition replay limits and where the ring lives.
 
     learning_starts is measured in simulator transitions. capacity is also a
     transition count: replay is a ring buffer, so the oldest transitions are
     overwritten once it is full.
+
+    storage_device chooses where those transitions sit. "auto" keeps them on
+    the training device when it is a GPU, which removes a host-to-device copy
+    from every critic update; "cpu" trades that for host memory when the ring
+    would not fit.
     """
 
     learning_starts: int = 4_096
     capacity: int = 1_000_000
+    storage_device: str = "auto"
 
     def __post_init__(self) -> None:
         if self.learning_starts <= 0:
             raise ValueError("replay.learning_starts must be > 0.")
         if self.capacity < self.learning_starts:
             raise ValueError("replay.capacity must be at least replay.learning_starts.")
+        if self.storage_device not in {"auto", "cpu"}:
+            raise ValueError(
+                "replay.storage_device must be 'auto' or 'cpu', got "
+                f"{self.storage_device!r}."
+            )
+
+    def resolve_storage_device(self, compute_device: str | object) -> str:
+        """Return the device the ring should be allocated on."""
+        if self.storage_device == "cpu":
+            return "cpu"
+        return "cpu" if "cpu" in str(compute_device) else str(compute_device)
 
 
 @dataclass(slots=True)
@@ -160,13 +177,17 @@ class TanhGaussianPolicyCfg:
     """Shared bounded actor architecture and distribution limits.
 
     initial_std controls the random policy at startup. minimum_std prevents
-    the learned policy from becoming numerically deterministic. Actions are
+    the learned policy from becoming numerically deterministic, and maximum_std
+    keeps it out of the saturated regime: a weighted fit to a policy's own
+    samples inflates variance while the critic is still uninformative, and a
+    per-step trust region cannot stop that drift from compounding. Actions are
     produced by tanh and sent to the environment unchanged.
     """
 
     hidden_dims: tuple[int, ...] = (512, 256, 128)
     initial_std: float = 1.0
     minimum_std: float = 0.05
+    maximum_std: float = 2.0
     action_bound: float = 1.0
 
     def __post_init__(self) -> None:
@@ -174,8 +195,11 @@ class TanhGaussianPolicyCfg:
             raise ValueError("policy.hidden_dims must contain positive values.")
         if self.initial_std <= 0.0:
             raise ValueError("policy.initial_std must be > 0.")
-        if not 0.0 < self.minimum_std <= self.initial_std:
-            raise ValueError("Expected 0 < policy.minimum_std <= policy.initial_std.")
+        if not 0.0 < self.minimum_std <= self.initial_std <= self.maximum_std:
+            raise ValueError(
+                "Expected 0 < policy.minimum_std <= policy.initial_std <= "
+                "policy.maximum_std."
+            )
         if self.action_bound <= 0.0:
             raise ValueError("policy.action_bound must be > 0.")
 

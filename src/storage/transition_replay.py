@@ -118,9 +118,11 @@ class TransitionRollout:
                 bad = (~torch.isfinite(tensor)).nonzero(as_tuple=False)[:8].tolist()
                 raise ValueError(f"Non-finite {name} at indices {bad}.")
 
-    def to_cpu(self) -> "TransitionRollout":
+    def to_device(self, device: torch.device | str) -> "TransitionRollout":
+        """Return a detached copy of this chunk on ``device``."""
+
         def copy(tensor: torch.Tensor) -> torch.Tensor:
-            return tensor.detach().to("cpu").clone()
+            return tensor.detach().to(device).clone()
 
         return TransitionRollout(
             policy_observations=map_observation(self.policy_observations, copy),
@@ -161,18 +163,25 @@ class TransitionBatch:
 
 
 class TransitionReplayBuffer:
-    """Flat CPU ring buffer of transitions, sampled uniformly.
+    """Flat ring buffer of transitions, sampled uniformly.
 
     Storage is allocated once from the first rollout's structure and then
     reused: later inserts overwrite the oldest transitions, so sampling cost is
     independent of how many rollouts have been collected and of how the data
-    was chunked.
+    was chunked. ``device`` decides where the ring lives; keeping it on the
+    training device removes a host-to-device copy from every sample.
     """
 
-    def __init__(self, *, capacity_transitions: int) -> None:
+    def __init__(
+        self,
+        *,
+        capacity_transitions: int,
+        device: str | torch.device = "cpu",
+    ) -> None:
         if capacity_transitions <= 0:
             raise ValueError("capacity_transitions must be > 0.")
         self.capacity_transitions = int(capacity_transitions)
+        self.device = torch.device(device)
         self._storage: TransitionBatch | None = None
         self._policy_versions = torch.empty(0, dtype=torch.int64)
         self._transition_count = 0
@@ -203,15 +212,20 @@ class TransitionReplayBuffer:
                 "One rollout contains more transitions than replay capacity: "
                 f"{rollout.transition_count} > {self.capacity_transitions}."
             )
-        flat = _flatten_rollout(rollout.to_cpu())
+        flat = _flatten_rollout(rollout.to_device(self.device))
         if self._storage is None:
-            self._storage = _allocate_storage(flat, self.capacity_transitions)
+            _require_capacity_fits(flat, self.capacity_transitions, self.device)
+            self._storage = _allocate_storage(
+                flat, self.capacity_transitions, self.device
+            )
             self._policy_versions = torch.empty(
-                self.capacity_transitions, dtype=torch.int64
+                self.capacity_transitions, dtype=torch.int64, device=self.device
             )
         count = rollout.transition_count
         # Contiguous ring write: rows cursor..cursor+count-1, wrapping around.
-        rows = (self._cursor + torch.arange(count)) % self.capacity_transitions
+        rows = (
+            self._cursor + torch.arange(count, device=self.device)
+        ) % self.capacity_transitions
         _write_storage(self._storage, flat, rows)
         self._policy_versions[rows] = rollout.policy_version
         self._cursor = int((self._cursor + count) % self.capacity_transitions)
@@ -234,7 +248,7 @@ class TransitionReplayBuffer:
             raise ValueError("batch_size must be > 0.")
         index = torch.randint(
             self._transition_count, (batch_size,), generator=generator
-        )
+        ).to(self.device)
         return _gather_transitions(self._storage, index, device)
 
 
@@ -260,11 +274,54 @@ def _flatten_rollout(rollout: TransitionRollout) -> TransitionBatch:
     )
 
 
-def _allocate_storage(example: TransitionBatch, capacity: int) -> TransitionBatch:
+def _require_capacity_fits(
+    example: TransitionBatch, capacity: int, device: torch.device
+) -> None:
+    """Fail before allocating a ring that does not fit on ``device``."""
+    if device.type != "cuda":
+        return
+    per_transition = sum(
+        tensor[0].numel() * tensor.element_size() for tensor in _batch_tensors(example)
+    )
+    required = per_transition * capacity
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    if required >= free_bytes:
+        raise ValueError(
+            f"Replay of {capacity:,} transitions needs "
+            f"{required / 2**30:.1f} GiB on {device} at "
+            f"{per_transition} B per transition, but only "
+            f"{free_bytes / 2**30:.1f} GiB is free. Lower replay.capacity or "
+            "set replay.storage_device to 'cpu'."
+        )
+
+
+def _batch_tensors(batch: TransitionBatch):
+    """Yield every stored tensor of one batch, observations included."""
+    for observation in (batch.policy_observations, batch.next_policy_observations):
+        for _, leaf in observation_leaves(observation):
+            yield leaf
+    for name in (
+        "critic_observations",
+        "next_critic_observations",
+        "actions",
+        "features",
+        "environment_rewards",
+        "terminated",
+        "truncated",
+        "bootstrap_valid",
+    ):
+        yield getattr(batch, name)
+
+
+def _allocate_storage(
+    example: TransitionBatch, capacity: int, device: torch.device
+) -> TransitionBatch:
     """Allocate ring storage shaped like one flattened rollout."""
 
     def allocate(tensor: torch.Tensor) -> torch.Tensor:
-        return torch.empty((capacity, *tensor.shape[1:]), dtype=tensor.dtype)
+        return torch.empty(
+            (capacity, *tensor.shape[1:]), dtype=tensor.dtype, device=device
+        )
 
     return TransitionBatch(
         policy_observations=empty_observation_like(

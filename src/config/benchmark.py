@@ -182,18 +182,19 @@ def cartpole_task() -> BenchmarkTask:
 
 def _lift_policy() -> TanhGaussianPolicyCfg:
     """Match the actor capacity of the task's tuned on-policy baseline."""
-    return TanhGaussianPolicyCfg(hidden_dims=(256, 128, 64))
+    return TanhGaussianPolicyCfg(hidden_dims=(256, 128, 64), maximum_std=2.0)
 
 
 def _lift_off_policy_train() -> OffPolicyTrainCfg:
-    """Lift trades update-to-data ratio for wall-clock.
+    """Lift runs off-policy where off-policy is strong: few environments, many
+    updates per transition.
 
-    Manipulation runs need millions of transitions, and every critic step costs
-    an ensemble of forward/backward passes, so the profile halves the Cartpole
-    UTD. It is the same setting for SAC and PMD, so the comparison between them
-    is unaffected; only their distance to the compute frontier is.
+    With 128 environments a rollout is 1,024 transitions and this ratio spends
+    128 critic steps on them — one gradient step per eight transitions, four
+    times the Cartpole ratio, because manipulation is where sample efficiency
+    has to show.
     """
-    return OffPolicyTrainCfg(updates_per_transition=1.0 / 32.0)
+    return OffPolicyTrainCfg(updates_per_transition=1.0 / 8.0)
 
 
 def lift_task() -> BenchmarkTask:
@@ -206,11 +207,11 @@ def lift_task() -> BenchmarkTask:
     return BenchmarkTask(
         name="lift",
         task_id="Isaac-Lift-Cube-Franka-v0",
-        num_envs=512,
-        transition_budget=3_000_000,
+        num_envs=128,
+        transition_budget=1_500_000,
         # Above one full episode per environment (300 steps), so training sees
         # episodes end instead of being reset by every validation.
-        evaluation_interval_transitions=204_800,
+        evaluation_interval_transitions=51_200,
         evaluation_steps=250,
         # The arm action is a joint-position offset scaled by 0.5, so a bound of
         # 1.0 pins the Franka within +-0.5 rad of its default pose and puts the

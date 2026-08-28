@@ -138,3 +138,29 @@ def test_sampling_an_empty_replay_is_an_error() -> None:
         replay.sample(
             8, generator=torch.Generator().manual_seed(0), device=torch.device("cpu")
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_gpu_replay_returns_the_same_transitions() -> None:
+    rollout = build_rollout(num_envs=3, horizon=5)
+    replay = TransitionReplayBuffer(capacity_transitions=1_000, device="cuda:0")
+    replay.add(rollout)
+
+    batch = replay.sample(
+        32, generator=torch.Generator().manual_seed(0), device=torch.device("cuda:0")
+    )
+
+    assert batch.critic_observations.device.type == "cuda"
+    stored = rollout.critic_observations.reshape(-1, 3).to("cuda:0")
+    for row in range(batch.critic_observations.shape[0]):
+        assert (stored == batch.critic_observations[row]).all(dim=1).any()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_a_replay_larger_than_the_device_is_refused() -> None:
+    replay = TransitionReplayBuffer(
+        capacity_transitions=10_000_000_000, device="cuda:0"
+    )
+
+    with pytest.raises(ValueError, match="Lower replay.capacity"):
+        replay.add(build_rollout(num_envs=2, horizon=2))

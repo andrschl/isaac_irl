@@ -143,11 +143,19 @@ class SuccessorFeatureEnsemble(nn.Module):
     def head(
         self, head_index: int, observations: torch.Tensor, actions: torch.Tensor
     ) -> torch.Tensor:
+        return self.apply_head(head_index, self.latent(observations, actions))
+
+    def apply_head(self, head_index: int, latent: torch.Tensor) -> torch.Tensor:
+        """Score one head on an already-computed latent ``[B,L] -> [B,D]``.
+
+        The trunk is shared, so a multi-head update evaluates it once for the
+        whole batch and hands each head its own slice.
+        """
         if not 0 <= head_index < self.num_heads:
             raise ValueError(
                 f"head_index must be in [0,{self.num_heads}), got {head_index}."
             )
-        normalized = self.heads[head_index](self.latent(observations, actions))
+        normalized = self.heads[head_index](latent)
         return normalized * self.output_scale.reshape(1, self.feature_dim)
 
     def mean(self, observations: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
