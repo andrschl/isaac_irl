@@ -12,6 +12,8 @@ _TRAINING_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Overview/actor_parameter_delta", ("Actor/parameter_delta",)),
     ("Overview/actor_gradient_norm", ("Actor/gradient_norm",)),
     ("Overview/policy_std", ("Actor/policy_std_mean", "RL/policy_std_mean")),
+    ("Overview/q_mean", ("Value/q_mean",)),
+    ("Overview/entropy_temperature", ("SAC/entropy_temperature",)),
     ("Overview/pmd_actor_kl", ("PMD/actor_projection_kl",)),
     ("Overview/pmd_target_kl", ("PMD/candidate_target_kl",)),
     ("Overview/pmd_spread_kl", ("PMD/actor_spread_kl",)),

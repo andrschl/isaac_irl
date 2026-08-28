@@ -40,6 +40,8 @@ class ConsoleLogger:
             ("critic_loss", "Overview/critic_loss"),
             ("actor_delta", "Overview/actor_parameter_delta"),
             ("policy_std", "Overview/policy_std"),
+            ("q_mean", "Overview/q_mean"),
+            ("alpha", "Overview/entropy_temperature"),
             ("actor_kl", "Overview/pmd_actor_kl"),
             ("policy_updates", "Overview/policy_updates"),
             ("timeout", "Overview/timeout_fraction"),

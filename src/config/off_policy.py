@@ -110,17 +110,21 @@ class OffPolicyTrainCfg:
 class DirectQCfg:
     """Five-head scalar action-value ensemble used by direct SAC/PMD.
 
-    Every head uses an independent replay resample and bootstraps only from its
-    paired EMA target. The ensemble mean is used for control; no clipped
-    minimum or pessimistic reduction is applied.
+    Every head learns from a disjoint slice of one replay draw and bootstraps
+    only from its paired EMA target. control_reduction decides what the actor
+    optimizes: the ensemble mean, or the pessimistic minimum that keeps an
+    over-estimating head from pulling the policy towards actions no head can
+    justify.
     """
 
     type: ClassVar[str] = "direct"
     num_heads: int = 5
     hidden_dims: tuple[int, ...] = (512, 256, 128)
+    control_reduction: str = "mean"
 
     def __post_init__(self) -> None:
         _validate_network(self.num_heads, self.hidden_dims, name="direct Q")
+        _validate_reduction(self.control_reduction)
 
 
 @dataclass(slots=True)
@@ -129,7 +133,8 @@ class SuccessorQCfg:
 
     Successor TD targets contain features and dynamics only. Reward weights
     are applied when actions are scored, so changing a linear IRL reward never
-    changes these Bellman targets.
+    changes these Bellman targets. control_reduction applies to the scalarized
+    per-head values only; feature occupancy is always the ensemble mean.
 
     scale_refit_ratio guards the output scale against features that are absent
     early: a feature only a competent policy ever produces looks like zero in
@@ -139,6 +144,7 @@ class SuccessorQCfg:
 
     type: ClassVar[str] = "successor"
     num_heads: int = 5
+    control_reduction: str = "mean"
     trunk_hidden_dims: tuple[int, ...] = (512, 256)
     latent_dim: int = 128
     head_hidden_dim: int = 128
@@ -149,6 +155,7 @@ class SuccessorQCfg:
 
     def __post_init__(self) -> None:
         _validate_network(self.num_heads, self.trunk_hidden_dims, name="successor Q")
+        _validate_reduction(self.control_reduction)
         for name, value in (
             ("latent_dim", self.latent_dim),
             ("head_hidden_dim", self.head_hidden_dim),
@@ -313,6 +320,13 @@ class PmdCfg:
 
 
 OffPolicyAlgorithmCfg: TypeAlias = SacCfg | PmdCfg
+
+
+def _validate_reduction(reduction: str) -> None:
+    if reduction not in {"mean", "min"}:
+        raise ValueError(
+            f"control_reduction must be 'mean' or 'min', got {reduction!r}."
+        )
 
 
 def _validate_network(

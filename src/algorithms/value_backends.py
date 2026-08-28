@@ -84,6 +84,7 @@ class DirectActionValue:
         seed: int,
     ) -> None:
         self.num_heads = cfg.num_heads
+        self.control_reduction = cfg.control_reduction
         self.reward = reward
         self.observation_normalizer = observation_normalizer
         self.train_cfg = train_cfg
@@ -187,8 +188,10 @@ class DirectActionValue:
         *,
         entropy_temperature: float,
     ) -> ValueEstimate:
+        """Score actions [B,A] for control, reducing the ensemble as configured."""
         del entropy_temperature
-        q = self.online.mean(self.observation_normalizer(observations), actions)
+        per_head = self.online(self.observation_normalizer(observations), actions)
+        q = _reduce_heads(per_head, self.control_reduction)
         zeros = torch.zeros_like(q)
         return ValueEstimate(q=q, reward_q=q, entropy_q=zeros)
 
@@ -236,6 +239,7 @@ class SuccessorActionValue:
         if reward.feature_dim != feature_dim:
             raise ValueError("Reward and successor feature dimensions must match.")
         self.num_heads = cfg.num_heads
+        self.control_reduction = cfg.control_reduction
         self.reward = reward
         self.cfg = cfg
         self.observation_normalizer = observation_normalizer
@@ -473,11 +477,13 @@ class SuccessorActionValue:
         entropy_temperature: float,
     ) -> ValueEstimate:
         normalized_observations = self.observation_normalizer(observations)
-        successors = self.online.mean(normalized_observations, actions)
+        # [M,B,D] successor features -> one scalar per head -> reduction.
+        successors = self.online(normalized_observations, actions)
         reward_weights = self.reward.weights.detach().to(successors)
-        reward_q = self.reward.step_dt.to(successors) * torch.einsum(
-            "bd,d->b", successors, reward_weights
+        per_head_reward_q = self.reward.step_dt.to(successors) * torch.einsum(
+            "mbd,d->mb", successors, reward_weights
         )
+        reward_q = _reduce_heads(per_head_reward_q, self.control_reduction)
         if self.entropy_online is None:
             entropy_q = torch.zeros_like(reward_q)
         else:
@@ -556,6 +562,15 @@ class SuccessorActionValue:
                 self.entropy_optimizer.load_state_dict(state["entropy_optimizer"])
         if load_optimizer:
             self.optimizer.load_state_dict(state["optimizer"])
+
+
+def _reduce_heads(per_head: torch.Tensor, reduction: str) -> torch.Tensor:
+    """Reduce per-head values ``[M,B]`` to the value control acts on ``[B]``."""
+    if reduction == "mean":
+        return per_head.mean(dim=0)
+    if reduction == "min":
+        return per_head.min(dim=0).values
+    raise ValueError(f"Unknown control reduction {reduction!r}.")
 
 
 def _require_finite(value: torch.Tensor, *, name: str) -> None:

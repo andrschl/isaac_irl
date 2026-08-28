@@ -270,3 +270,25 @@ def test_apply_head_matches_recomputing_the_trunk() -> None:
             ensemble.apply_head(head_index, latent),
             ensemble.head(head_index, observations, actions),
         )
+
+
+def test_control_reduction_selects_mean_or_pessimistic_minimum() -> None:
+    from algorithms.value_backends import _reduce_heads
+
+    per_head = torch.tensor([[1.0, 4.0], [3.0, 2.0], [8.0, 0.0]])
+
+    torch.testing.assert_close(
+        _reduce_heads(per_head, "mean"), torch.tensor([4.0, 2.0])
+    )
+    torch.testing.assert_close(_reduce_heads(per_head, "min"), torch.tensor([1.0, 0.0]))
+    with pytest.raises(ValueError, match="Unknown control reduction"):
+        _reduce_heads(per_head, "median")
+
+
+def test_control_reduction_is_configured_not_hardcoded() -> None:
+    from config.off_policy import DirectQCfg, SuccessorQCfg
+
+    assert DirectQCfg().control_reduction == "mean"
+    assert SuccessorQCfg(control_reduction="min").control_reduction == "min"
+    with pytest.raises(ValueError, match="control_reduction"):
+        DirectQCfg(control_reduction="min-of-two")
