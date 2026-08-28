@@ -113,6 +113,11 @@ class SuccessorQCfg:
     Successor TD targets contain features and dynamics only. Reward weights
     are applied when actions are scored, so changing a linear IRL reward never
     changes these Bellman targets.
+
+    scale_refit_ratio guards the output scale against features that are absent
+    early: a feature only a competent policy ever produces looks like zero in
+    the first rollouts. When the running feature scale outgrows the fitted one
+    by this factor, the scale is refitted with predictions preserved.
     """
 
     type: ClassVar[str] = "successor"
@@ -121,6 +126,7 @@ class SuccessorQCfg:
     latent_dim: int = 128
     head_hidden_dim: int = 128
     return_scale_min: float = 1.0
+    scale_refit_ratio: float = 2.0
     entropy_critic_hidden_dims: tuple[int, ...] = (512, 256, 128)
     entropy_critic_learning_rate: float = 3.0e-4
 
@@ -140,6 +146,8 @@ class SuccessorQCfg:
             )
         if self.return_scale_min <= 0.0:
             raise ValueError("return_scale_min must be > 0.")
+        if self.scale_refit_ratio <= 1.0:
+            raise ValueError("scale_refit_ratio must be > 1.")
         if self.entropy_critic_learning_rate <= 0.0:
             raise ValueError("entropy_critic_learning_rate must be > 0.")
 

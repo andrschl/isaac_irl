@@ -19,6 +19,7 @@ from algorithms.successor_ensemble import (
     SuccessorFeatureEnsemble,
     estimate_successor_return_scale,
     successor_ensemble_td_target,
+    successor_return_scale_from_second_moment,
 )
 from config.off_policy import OffPolicyTrainCfg, SacCfg
 from reward_model.fixed import FixedLinearReward
@@ -200,3 +201,56 @@ def test_sac_constructs_no_previous_policy_snapshot() -> None:
     )
 
     assert not hasattr(learner, "previous_policy")
+
+
+def test_output_scale_refit_preserves_successor_predictions() -> None:
+    ensemble = SuccessorFeatureEnsemble(
+        3, 2, 4, num_heads=2, trunk_hidden_dims=(8,), latent_dim=6, head_hidden_dim=5
+    )
+    for head in ensemble.heads:
+        torch.nn.init.normal_(head[-1].weight, std=0.3)
+        torch.nn.init.normal_(head[-1].bias, std=0.3)
+    observations = torch.randn(7, 3)
+    actions = torch.randn(7, 2)
+    before = ensemble(observations, actions).clone()
+
+    ensemble.set_output_scale(
+        torch.tensor([5.0, 0.5, 20.0, 1.0]), preserve_predictions=True
+    )
+
+    torch.testing.assert_close(
+        ensemble(observations, actions), before, atol=1.0e-5, rtol=1.0e-5
+    )
+    torch.testing.assert_close(
+        ensemble.output_scale, torch.tensor([5.0, 0.5, 20.0, 1.0])
+    )
+
+
+def test_output_scale_without_preservation_rescales_predictions() -> None:
+    ensemble = SuccessorFeatureEnsemble(
+        3, 2, 2, num_heads=1, trunk_hidden_dims=(8,), latent_dim=6, head_hidden_dim=5
+    )
+    torch.nn.init.constant_(ensemble.heads[0][-1].bias, 1.0)
+    observations = torch.randn(4, 3)
+    actions = torch.randn(4, 2)
+    before = ensemble(observations, actions).clone()
+
+    ensemble.set_output_scale(torch.tensor([3.0, 3.0]))
+
+    torch.testing.assert_close(ensemble(observations, actions), 3.0 * before)
+
+
+def test_return_scale_tracks_features_that_only_appear_later() -> None:
+    early = torch.zeros(64, 2)
+    early[:, 0] = 1.0
+    late = torch.ones(64, 2)
+
+    early_scale = estimate_successor_return_scale(early, gamma=0.99, minimum_scale=1.0)
+    combined_second_moment = torch.cat((early, late)).square().mean(dim=0)
+    later_scale = successor_return_scale_from_second_moment(
+        combined_second_moment, gamma=0.99, minimum_scale=1.0
+    )
+
+    # The absent feature sits at the floor until it is observed at all.
+    assert float(early_scale[1].item()) == pytest.approx(1.0)
+    assert float(later_scale[1].item()) > 50.0

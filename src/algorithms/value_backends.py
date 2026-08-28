@@ -20,8 +20,8 @@ from algorithms.state_dependent_tanh_actor import TanhPolicyProtocol
 from algorithms.successor_ensemble import (
     RunningStandardizer,
     SuccessorFeatureEnsemble,
-    estimate_successor_return_scale,
     successor_ensemble_td_target,
+    successor_return_scale_from_second_moment,
     update_ensemble_target,
 )
 from config.off_policy import DirectQCfg, OffPolicyTrainCfg, SuccessorQCfg
@@ -281,6 +281,9 @@ class SuccessorActionValue:
         )
         self.return_scale = torch.ones(feature_dim, device=device)
         self.scale_fitted = False
+        self.scale_refits = 0
+        self._feature_square_sum = torch.zeros(feature_dim, device=device)
+        self._feature_count = 0
         self.replay_generators = [
             torch.Generator(device="cpu").manual_seed(seed + 1009 * (head + 1))
             for head in range(cfg.num_heads)
@@ -298,17 +301,40 @@ class SuccessorActionValue:
 
     @torch.no_grad()
     def fit_feature_scale(self, rollout: TransitionRollout) -> None:
-        if self.scale_fitted:
-            return
+        """Keep the successor output scale matched to the observed features.
+
+        Features a competent policy produces (a lifted object, a reached goal)
+        are identically zero in the first rollouts, so a scale fitted once there
+        stays at its floor and those heads have to emit values orders of
+        magnitude off their unit range. The running second moment tracks them,
+        and a refit rescales the heads so predictions are unchanged.
+        """
         features = rollout.features.flatten(0, 1).to(self.device)
-        self.return_scale = estimate_successor_return_scale(
-            features,
+        self._feature_square_sum += features.square().sum(dim=0)
+        self._feature_count += features.shape[0]
+        observed_scale = successor_return_scale_from_second_moment(
+            self._feature_square_sum / self._feature_count,
             gamma=self.train_cfg.gamma,
             minimum_scale=self.cfg.return_scale_min,
         )
-        self.online.set_output_scale(self.return_scale)
-        self.target.set_output_scale(self.return_scale)
-        self.scale_fitted = True
+        if not self.scale_fitted:
+            self._apply_return_scale(observed_scale, preserve_predictions=False)
+            self.scale_fitted = True
+            return
+        if float((observed_scale / self.return_scale).max().item()) > (
+            self.cfg.scale_refit_ratio
+        ):
+            self._apply_return_scale(observed_scale, preserve_predictions=True)
+            self.scale_refits += 1
+
+    @torch.no_grad()
+    def _apply_return_scale(
+        self, scale: torch.Tensor, *, preserve_predictions: bool
+    ) -> None:
+        """Set the scale on the online and target ensembles together."""
+        self.online.set_output_scale(scale, preserve_predictions=preserve_predictions)
+        self.target.set_output_scale(scale, preserve_predictions=preserve_predictions)
+        self.return_scale = scale
 
     def update(
         self,
@@ -369,6 +395,7 @@ class SuccessorActionValue:
             "SuccessorQ/gradient_norm": online_gradient_norm,
             "SuccessorQ/return_scale_min": float(self.return_scale.min().item()),
             "SuccessorQ/return_scale_max": float(self.return_scale.max().item()),
+            "SuccessorQ/scale_refits": float(self.scale_refits),
         }
         per_head = torch.stack(feature_losses)
         for head_index in range(self.num_heads):
@@ -485,6 +512,9 @@ class SuccessorActionValue:
             "optimizer": self.optimizer.state_dict(),
             "return_scale": self.return_scale.detach().cpu(),
             "scale_fitted": self.scale_fitted,
+            "scale_refits": self.scale_refits,
+            "feature_square_sum": self._feature_square_sum.detach().cpu(),
+            "feature_count": self._feature_count,
             "replay_rng": [item.get_state() for item in self.replay_generators],
             "action_rng": [item.get_state() for item in self.action_generators],
             "entropy_replay_rng": self.entropy_replay_generator.get_state(),
@@ -510,8 +540,15 @@ class SuccessorActionValue:
             raise ValueError("Checkpoint entropy-critic configuration differs.")
         self.online.load_state_dict(state["online"], strict=True)
         self.target.load_state_dict(state["target"], strict=True)
-        self.return_scale.copy_(state["return_scale"].to(self.return_scale))
+        self.return_scale = state["return_scale"].to(self.return_scale)
+        self.online.set_output_scale(self.return_scale)
+        self.target.set_output_scale(self.return_scale)
         self.scale_fitted = bool(state["scale_fitted"])
+        self.scale_refits = int(state["scale_refits"])
+        self._feature_square_sum = state["feature_square_sum"].to(
+            self._feature_square_sum
+        )
+        self._feature_count = int(state["feature_count"])
         for generator, generator_state in zip(
             self.replay_generators, state["replay_rng"], strict=True
         ):

@@ -154,8 +154,16 @@ class SuccessorFeatureEnsemble(nn.Module):
         return self.forward(observations, actions).mean(dim=0)
 
     @torch.no_grad()
-    def set_output_scale(self, scale: torch.Tensor) -> None:
-        """Set positive raw-unit scale [D] for normalized network outputs."""
+    def set_output_scale(
+        self, scale: torch.Tensor, *, preserve_predictions: bool = False
+    ) -> None:
+        """Set positive raw-unit scale [D] for normalized network outputs.
+
+        A prediction is ``head_output * output_scale``, so rescaling every head's
+        output layer by ``old / new`` leaves the represented function untouched
+        while changing the magnitude the network has to produce. That is what
+        makes a later refit safe: only the conditioning moves, not the values.
+        """
         scale_tensor = torch.as_tensor(
             scale,
             device=self.output_scale.device,
@@ -168,6 +176,13 @@ class SuccessorFeatureEnsemble(nn.Module):
             )
         if not torch.isfinite(scale_tensor).all() or torch.any(scale_tensor <= 0.0):
             raise ValueError("Successor output scale must be finite and positive.")
+        if preserve_predictions:
+            ratio = self.output_scale / scale_tensor
+            for head in self.heads:
+                output_layer = head[-1]
+                # weight is [D, H] and bias [D]: one ratio per output feature.
+                output_layer.weight.mul_(ratio.unsqueeze(1))
+                output_layer.bias.mul_(ratio)
         self.output_scale.copy_(scale_tensor)
 
     def target_copy(self) -> "SuccessorFeatureEnsemble":
@@ -210,27 +225,50 @@ def successor_ensemble_td_target(
     return features + float(gamma) * mask * next_successors
 
 
+def successor_return_scale_from_second_moment(
+    feature_second_moment: torch.Tensor,
+    *,
+    gamma: float,
+    minimum_scale: float,
+) -> torch.Tensor:
+    """Return a per-feature scale ``[D]`` in return units.
+
+    The per-step feature RMS is divided by ``1-gamma``, the horizon a discounted
+    sum spans, so a normalized successor output sits near unit scale. Reward
+    weights never enter, so the scale stays a property of the features alone.
+    """
+    if feature_second_moment.ndim != 1:
+        raise ValueError(
+            "Expected a feature second moment [D], got "
+            f"{tuple(feature_second_moment.shape)}."
+        )
+    if not torch.isfinite(feature_second_moment).all():
+        raise ValueError("Cannot fit successor scale on non-finite features.")
+    if torch.any(feature_second_moment < 0.0):
+        raise ValueError("A feature second moment cannot be negative.")
+    if not 0.0 <= gamma < 1.0:
+        raise ValueError("gamma must be in [0,1) when estimating return scale.")
+    if minimum_scale <= 0.0:
+        raise ValueError("minimum_scale must be > 0.")
+    return (feature_second_moment.sqrt() / (1.0 - float(gamma))).clamp_min(
+        minimum_scale
+    )
+
+
 def estimate_successor_return_scale(
     features: torch.Tensor,
     *,
     gamma: float,
     minimum_scale: float,
 ) -> torch.Tensor:
-    """Estimate a fixed per-feature scale ``[D]`` in return units.
-
-    The one-step feature RMS is divided by ``1-gamma``. This keeps normalized
-    successor outputs near unit scale without placing reward weights in TD.
-    """
+    """Estimate the per-feature scale ``[D]`` from one batch of features [B,D]."""
     if features.ndim != 2 or features.shape[0] == 0:
         raise ValueError(f"Expected non-empty features [B,D], got {features.shape}.")
-    if not torch.isfinite(features).all():
-        raise ValueError("Cannot fit successor scale on non-finite features.")
-    if not 0.0 <= gamma < 1.0:
-        raise ValueError("gamma must be in [0,1) when estimating return scale.")
-    if minimum_scale <= 0.0:
-        raise ValueError("minimum_scale must be > 0.")
-    feature_rms = features.square().mean(dim=0).sqrt()
-    return (feature_rms / (1.0 - float(gamma))).clamp_min(minimum_scale)
+    return successor_return_scale_from_second_moment(
+        features.square().mean(dim=0),
+        gamma=gamma,
+        minimum_scale=minimum_scale,
+    )
 
 
 @torch.no_grad()
