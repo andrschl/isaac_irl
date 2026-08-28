@@ -60,9 +60,10 @@ class PpoBaselineCfg:
 class BenchmarkTask:
     """Everything the benchmark needs to know about one task.
 
-    ``action_clip`` is the environment's action bound and the tanh policies'
-    bound at once: the off-policy actors can never reach it, and the on-policy
-    baseline is clipped to it, so all three algorithms act in the same space.
+    ``policy_action_bound`` bounds the tanh actors by construction. The
+    environment itself never clips: an on-policy Gaussian keeps the unbounded
+    action space its tuning assumes, and clipping can never silently rewrite
+    what any algorithm asked for.
     """
 
     name: str
@@ -71,7 +72,7 @@ class BenchmarkTask:
     transition_budget: int
     evaluation_interval_transitions: int
     evaluation_steps: int
-    action_clip: float
+    policy_action_bound: float
     ppo: PpoBaselineCfg
     sac: SacCfg
     pmd: PmdCfg
@@ -91,8 +92,8 @@ class BenchmarkTask:
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be > 0.")
-        if self.action_clip <= 0.0:
-            raise ValueError("action_clip must be > 0.")
+        if self.policy_action_bound <= 0.0:
+            raise ValueError("policy_action_bound must be > 0.")
         if any(
             not 0.0 < threshold <= 1.0 for threshold in self.success_rate_thresholds
         ):
@@ -103,10 +104,12 @@ class BenchmarkTask:
             )
         # The bounded actors are built at the task's action bound.
         self.sac = replace(
-            self.sac, policy=replace(self.sac.policy, action_bound=self.action_clip)
+            self.sac,
+            policy=replace(self.sac.policy, action_bound=self.policy_action_bound),
         )
         self.pmd = replace(
-            self.pmd, policy=replace(self.pmd.policy, action_bound=self.action_clip)
+            self.pmd,
+            policy=replace(self.pmd.policy, action_bound=self.policy_action_bound),
         )
 
 
@@ -151,7 +154,7 @@ def cartpole_task() -> BenchmarkTask:
         transition_budget=150_000,
         evaluation_interval_transitions=4_096,
         evaluation_steps=250,
-        action_clip=1.0,
+        policy_action_bound=1.0,
         # Break-even, "task solved", and near-optimal control.
         return_per_step_thresholds=(0.0, 3.0 / 250.0, 3.9 / 250.0),
         ignored_reward_terms=frozenset({"success_bonus"}),
@@ -201,9 +204,9 @@ def lift_task() -> BenchmarkTask:
         evaluation_steps=250,
         # The arm action is a joint-position offset scaled by 0.5, so a bound of
         # 1.0 pins the Franka within +-0.5 rad of its default pose and puts the
-        # cube out of reach for every algorithm. 3.0 covers the range the
-        # unclipped on-policy baseline actually uses.
-        action_clip=3.0,
+        # cube out of reach. 3.0 covers the range the unclipped on-policy
+        # baseline actually uses.
+        policy_action_bound=3.0,
         success_rate_thresholds=(0.25, 0.5, 0.9),
         success_threshold=0.08,
         add_success_bonus=True,

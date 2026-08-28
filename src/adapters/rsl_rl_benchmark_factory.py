@@ -79,9 +79,9 @@ def build_fixed_reward_benchmark(cfg: FixedRewardBenchmarkCfg) -> BuiltBenchmark
         )
         video_recorder = native_env
 
-    env = RslRlVecEnvAdapter(
-        RslRlVecEnvWrapper(native_env, clip_actions=task.action_clip)
-    )
+    # No environment clipping: the tanh actors are bounded by construction and
+    # the on-policy baseline keeps the action space its tuning assumes.
+    env = RslRlVecEnvAdapter(RslRlVecEnvWrapper(native_env, clip_actions=None))
     env.seed(cfg.seed)
     observations = env.get_observations()
     success_fn = (

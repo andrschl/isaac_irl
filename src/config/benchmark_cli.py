@@ -32,7 +32,7 @@ def _apply_task_overrides(task: BenchmarkTask, args: Any) -> BenchmarkTask:
                 args, "evaluation_interval_transitions"
             ),
             "evaluation_steps": _override(args, "evaluation_steps"),
-            "action_clip": _override(args, "action_clip"),
+            "policy_action_bound": _override(args, "policy_action_bound"),
         }.items()
         if value is not None
     }

@@ -28,7 +28,7 @@ def _add_override_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--transition_budget", type=int)
     parser.add_argument("--evaluation_interval_transitions", type=int)
     parser.add_argument("--evaluation_steps", type=int)
-    parser.add_argument("--action_clip", type=float)
+    parser.add_argument("--policy_action_bound", type=float)
     parser.add_argument("--value_backend", choices=("direct", "successor"))
     parser.add_argument("--num_heads", type=int)
     parser.add_argument("--updates_per_transition", type=float)

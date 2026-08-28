@@ -41,11 +41,19 @@ class FixedRewardPpoAdapter:
         done_count = 0
         raw_action_steps: list[torch.Tensor] = []
         executed_action_steps: list[torch.Tensor] = []
-        action_bound = float(self.env.clip_actions)
+        # None means the environment executes what the policy asked for; the
+        # surrogate then optimizes the action that was actually taken.
+        environment_clip = getattr(self.env, "clip_actions", None)
         with torch.no_grad():
             for _ in range(self.steps_per_env):
                 actions = self.algorithm.act(observations)
-                executed_actions = actions.clamp(-action_bound, action_bound)
+                executed_actions = (
+                    actions
+                    if environment_clip is None
+                    else actions.clamp(
+                        -float(environment_clip), float(environment_clip)
+                    )
+                )
                 raw_action_steps.append(actions.detach())
                 executed_action_steps.append(executed_actions.detach())
                 next_observations, rewards, done, extras = self.env.step(
@@ -76,11 +84,16 @@ class FixedRewardPpoAdapter:
             ),
             "Train/episodes_completed": float(done_count),
         }
+        raw_actions = torch.stack(raw_action_steps)
         metrics.update(
             clipping_metrics(
-                torch.stack(raw_action_steps),
+                raw_actions,
                 torch.stack(executed_action_steps),
-                bound=action_bound,
+                bound=(
+                    float(environment_clip)
+                    if environment_clip is not None
+                    else float(raw_actions.abs().max().item()) or 1.0
+                ),
             )
         )
         distribution = self.algorithm.actor.distribution
