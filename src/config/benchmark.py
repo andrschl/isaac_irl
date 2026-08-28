@@ -185,6 +185,22 @@ def _lift_policy() -> TanhGaussianPolicyCfg:
     return TanhGaussianPolicyCfg(hidden_dims=(256, 128, 64), maximum_std=2.0)
 
 
+def _lift_pmd_cfg(*, value: DirectQCfg | SuccessorQCfg) -> PmdCfg:
+    """PMD needs far more trust-region budget in eight action dimensions.
+
+    Cartpole is solved with a projection every eight critic steps at 0.02 nats.
+    On Lift the same setting leaves the policy where it started: its Q stays at
+    0.09 while SAC climbs past 0.6. A projection per critic step at 0.05 nats —
+    forty times the policy movement per transition — is what makes it learn.
+    """
+    return replace(
+        _pmd_cfg(train=_lift_off_policy_train(), policy=_lift_policy(), value=value),
+        critic_updates_per_projection=1,
+        actor_projection_kl=0.05,
+        candidate_target_kl=0.15,
+    )
+
+
 def _lift_off_policy_train() -> OffPolicyTrainCfg:
     """Lift runs off-policy where off-policy is strong: few environments, many
     updates per transition.
@@ -240,9 +256,7 @@ def lift_task() -> BenchmarkTask:
             policy=_lift_policy(),
             value=DirectQCfg(num_heads=3, hidden_dims=(256, 128, 64)),
         ),
-        pmd=_pmd_cfg(
-            train=_lift_off_policy_train(),
-            policy=_lift_policy(),
+        pmd=_lift_pmd_cfg(
             value=SuccessorQCfg(
                 num_heads=3,
                 trunk_hidden_dims=(256, 128),

@@ -41,6 +41,8 @@ class ConsoleLogger:
             ("actor_delta", "Overview/actor_parameter_delta"),
             ("policy_std", "Overview/policy_std"),
             ("q_mean", "Overview/q_mean"),
+            ("psi_scale", "Overview/successor_scale_max"),
+            ("psi_refits", "Overview/successor_scale_refits"),
             ("alpha", "Overview/entropy_temperature"),
             ("actor_kl", "Overview/pmd_actor_kl"),
             ("policy_updates", "Overview/policy_updates"),

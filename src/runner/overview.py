@@ -13,6 +13,8 @@ _TRAINING_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Overview/actor_gradient_norm", ("Actor/gradient_norm",)),
     ("Overview/policy_std", ("Actor/policy_std_mean", "RL/policy_std_mean")),
     ("Overview/q_mean", ("Value/q_mean",)),
+    ("Overview/successor_scale_max", ("SuccessorQ/return_scale_max",)),
+    ("Overview/successor_scale_refits", ("SuccessorQ/scale_refits",)),
     ("Overview/entropy_temperature", ("SAC/entropy_temperature",)),
     ("Overview/pmd_actor_kl", ("PMD/actor_projection_kl",)),
     ("Overview/pmd_target_kl", ("PMD/candidate_target_kl",)),
