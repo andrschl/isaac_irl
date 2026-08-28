@@ -10,7 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
-from config.off_policy import DirectQCfg, PmdCfg, SacCfg, SuccessorQCfg
+from config.off_policy import (
+    DirectQCfg,
+    OffPolicyTrainCfg,
+    PmdCfg,
+    SacCfg,
+    SuccessorQCfg,
+    TanhGaussianPolicyCfg,
+)
 
 AlgorithmName = Literal["ppo", "sac", "pmd"]
 
@@ -103,18 +110,36 @@ class BenchmarkTask:
         )
 
 
-def _sac_cfg() -> SacCfg:
+def _sac_cfg(
+    *,
+    train: OffPolicyTrainCfg | None = None,
+    policy: TanhGaussianPolicyCfg | None = None,
+    value: DirectQCfg | SuccessorQCfg | None = None,
+) -> SacCfg:
     """Maximum-entropy SAC with the scalar direct-Q ensemble."""
     return SacCfg(
-        value=DirectQCfg(num_heads=5),
+        train=train or OffPolicyTrainCfg(),
+        policy=policy or TanhGaussianPolicyCfg(),
+        value=value or DirectQCfg(num_heads=5),
         initial_entropy_temperature=0.006,
         automatic_entropy_tuning=True,
     )
 
 
-def _pmd_cfg() -> PmdCfg:
+def _pmd_cfg(
+    *,
+    train: OffPolicyTrainCfg | None = None,
+    policy: TanhGaussianPolicyCfg | None = None,
+    value: DirectQCfg | SuccessorQCfg | None = None,
+) -> PmdCfg:
     """Exponential PMD; the value backend is selected per run."""
-    return PmdCfg(value=SuccessorQCfg(num_heads=5), beta=1.0, entropy_temperature=0.0)
+    return PmdCfg(
+        train=train or OffPolicyTrainCfg(),
+        policy=policy or TanhGaussianPolicyCfg(),
+        value=value or SuccessorQCfg(num_heads=5),
+        beta=1.0,
+        entropy_temperature=0.0,
+    )
 
 
 def cartpole_task() -> BenchmarkTask:
@@ -142,6 +167,22 @@ def cartpole_task() -> BenchmarkTask:
     )
 
 
+def _lift_policy() -> TanhGaussianPolicyCfg:
+    """Match the actor capacity of the task's tuned on-policy baseline."""
+    return TanhGaussianPolicyCfg(hidden_dims=(256, 128, 64))
+
+
+def _lift_off_policy_train() -> OffPolicyTrainCfg:
+    """Lift trades update-to-data ratio for wall-clock.
+
+    Manipulation runs need millions of transitions, and every critic step costs
+    an ensemble of forward/backward passes, so the profile halves the Cartpole
+    UTD. It is the same setting for SAC and PMD, so the comparison between them
+    is unaffected; only their distance to the compute frontier is.
+    """
+    return OffPolicyTrainCfg(updates_per_transition=1.0 / 32.0)
+
+
 def lift_task() -> BenchmarkTask:
     """Franka cube lift: sparse-ish manipulation with a real success metric.
 
@@ -154,7 +195,9 @@ def lift_task() -> BenchmarkTask:
         task_id="Isaac-Lift-Cube-Franka-v0",
         num_envs=512,
         transition_budget=3_000_000,
-        evaluation_interval_transitions=131_072,
+        # Above one full episode per environment (300 steps), so training sees
+        # episodes end instead of being reset by every validation.
+        evaluation_interval_transitions=204_800,
         evaluation_steps=250,
         action_clip=1.0,
         success_rate_thresholds=(0.25, 0.5, 0.9),
@@ -168,8 +211,22 @@ def lift_task() -> BenchmarkTask:
             gamma=0.98,
             entropy_coef=0.006,
         ),
-        sac=_sac_cfg(),
-        pmd=_pmd_cfg(),
+        sac=_sac_cfg(
+            train=_lift_off_policy_train(),
+            policy=_lift_policy(),
+            value=DirectQCfg(num_heads=3, hidden_dims=(256, 128, 64)),
+        ),
+        pmd=_pmd_cfg(
+            train=_lift_off_policy_train(),
+            policy=_lift_policy(),
+            value=SuccessorQCfg(
+                num_heads=3,
+                trunk_hidden_dims=(256, 128),
+                latent_dim=64,
+                head_hidden_dim=64,
+                entropy_critic_hidden_dims=(256, 128, 64),
+            ),
+        ),
     )
 
 
