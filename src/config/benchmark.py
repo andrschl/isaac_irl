@@ -199,7 +199,11 @@ def lift_task() -> BenchmarkTask:
         # episodes end instead of being reset by every validation.
         evaluation_interval_transitions=204_800,
         evaluation_steps=250,
-        action_clip=1.0,
+        # The arm action is a joint-position offset scaled by 0.5, so a bound of
+        # 1.0 pins the Franka within +-0.5 rad of its default pose and puts the
+        # cube out of reach for every algorithm. 3.0 covers the range the
+        # unclipped on-policy baseline actually uses.
+        action_clip=3.0,
         success_rate_thresholds=(0.25, 0.5, 0.9),
         success_threshold=0.08,
         add_success_bonus=True,
