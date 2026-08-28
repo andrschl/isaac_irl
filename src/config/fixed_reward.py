@@ -15,6 +15,7 @@ class FixedRewardRunnerCfg:
     validate_before_training: bool = False
     validation_interval_transitions: int | None = None
     return_per_step_thresholds: tuple[float, ...] = ()
+    success_rate_thresholds: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if self.save_interval <= 0:
@@ -37,3 +38,7 @@ class FixedRewardRunnerCfg:
             self.return_per_step_thresholds
         ):
             raise ValueError("return_per_step_thresholds must be unique.")
+        if any(not 0.0 < value <= 1.0 for value in self.success_rate_thresholds):
+            raise ValueError("success_rate_thresholds must lie in (0, 1].")
+        if len(set(self.success_rate_thresholds)) != len(self.success_rate_thresholds):
+            raise ValueError("success_rate_thresholds must be unique.")

@@ -164,13 +164,16 @@ state. Consequently:
 Fixed-reward runs emit a deliberately small `Overview/*` contract in addition
 to detailed algorithm diagnostics. The primary performance metric is
 `Overview/return_per_step`, which makes evaluation horizons directly
-comparable. Cartpole runs use deterministic 250-step validation by default.
+comparable; tasks with a success metric add `Overview/success_rate` and
+`Overview/transitions_to_success_rate_*`. Every task uses deterministic
+250-step validation by default, and its profile
+(`src/config/benchmark.py`) fixes the environment count, transition budget,
+thresholds, and the tuned PPO baseline it is compared against.
 
 Create the curated report with:
 
 ```bash
-python scripts/rl/create_wandb_overview.py \
-  --group cartpole-fixed-reward-v3
+python scripts/rl/create_wandb_overview.py --group lift-fixed-reward-v4
 ```
 
 The report groups seeds by the explicit `variant` config value: `ppo`,

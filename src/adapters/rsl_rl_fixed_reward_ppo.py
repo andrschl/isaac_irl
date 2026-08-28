@@ -1,4 +1,4 @@
-"""Stock RSL-RL PPO adapter for fixed-reward Cartpole."""
+"""Fixed-reward rsl-rl PPO adapter used by the sample-efficiency benchmark."""
 
 from __future__ import annotations
 

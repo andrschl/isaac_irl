@@ -40,6 +40,7 @@ class FixedRewardRunner:
         self._sample_efficiency = SampleEfficiencyTracker(
             validation_steps=cfg.validation_steps,
             return_per_step_thresholds=cfg.return_per_step_thresholds,
+            success_rate_thresholds=cfg.success_rate_thresholds,
         )
 
     def learn(self, num_iterations: int) -> None:

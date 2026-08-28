@@ -94,12 +94,18 @@ Use `scripts/irl/bc_weight_lr_sweep.sh` for the BC-weight/LR sweep. Its
 the grid. Exact SAC, PMD, value-backend, and UTD semantics are documented in
 [docs/rl_algorithms.md](docs/rl_algorithms.md).
 
-### Compare RL Algorithms on Fixed-Reward Cartpole
+### Compare RL Algorithms on a Fixed Reward
 ```bash
-python scripts/rl/cartpole_benchmark.py --algorithm pmd --value_backend direct --headless
-ISAAC_IRL_PYTHON=python scripts/rl/cartpole_benchmark.sh   # 5 variants x 3 seeds
-python scripts/rl/create_wandb_overview.py --group cartpole-fixed-reward-v4
+python scripts/rl/benchmark.py --task cartpole --algorithm pmd --value_backend direct --headless
+python scripts/rl/benchmark.py --task lift --algorithm pmd --value_backend successor --headless
+TASK=lift ISAAC_IRL_PYTHON=python scripts/rl/benchmark.sh   # 5 variants x 3 seeds
+python scripts/rl/create_wandb_overview.py --group lift-fixed-reward-v4
 ```
+
+`--task` selects a profile in [src/config/benchmark.py](src/config/benchmark.py):
+environment, environment count, transition budget, evaluation protocol, task
+thresholds, and the tuned PPO baseline for that task. Everything else is shared,
+so the algorithms differ only in how they learn.
 
 The benchmark trains against the environment's own reward (fixed, non-learnable,
 checked every rollout against the reward features) and reports sample efficiency

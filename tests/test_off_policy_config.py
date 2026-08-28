@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from config import DirectQCfg, PmdCfg, SacCfg, SuccessorQCfg, load_train_cfg
-from config.cartpole_cli import build_cartpole_benchmark_cfg
+from config.benchmark_cli import build_benchmark_cfg
 
 
 def _train_args(**overrides):
@@ -119,39 +119,50 @@ def test_removed_algorithm_names_are_rejected(tmp_path) -> None:
         )
 
 
-def test_cartpole_exposes_only_algorithm_and_value_axes() -> None:
+def test_benchmark_cli_overrides_only_the_named_axes() -> None:
     args = SimpleNamespace(
         algorithm="pmd",
+        task="cartpole",
         seed=1,
         num_envs=16,
         transition_budget=10_000,
-        evaluation_interval_transitions=2_000,
-        evaluation_steps=100,
-        device="cpu",
-        project="test",
-        group="test",
-        run_name=None,
-        log_root="logs/test",
-        video=False,
-        video_length=32,
-        action_clip=None,
         value_backend="direct",
         num_heads=1,
         updates_per_transition=0.25,
-        initial_critic_updates=10,
-        critic_learning_rate=None,
-        actor_learning_rate=1.0e-3,
-        entropy_temperature=0.0,
         pmd_beta=0.0,
-        pmd_candidate_target_kl=0.05,
-        pmd_actor_projection_kl=0.02,
-        pmd_projection_steps=8,
+        pmd_critic_updates_per_projection=4,
     )
 
-    cfg = build_cartpole_benchmark_cfg(args)
+    cfg = build_benchmark_cfg(args)
 
     assert cfg.algorithm == "pmd"
-    assert isinstance(cfg.pmd.value, DirectQCfg)
-    assert cfg.pmd.value.num_heads == 1
-    assert cfg.pmd.beta == 0.0
-    assert cfg.pmd.train.updates_per_transition == pytest.approx(0.25)
+    assert cfg.task.name == "cartpole"
+    assert cfg.task.num_envs == 16
+    assert cfg.task.transition_budget == 10_000
+    assert isinstance(cfg.task.pmd.value, DirectQCfg)
+    assert cfg.task.pmd.value.num_heads == 1
+    assert cfg.task.pmd.beta == 0.0
+    assert cfg.task.pmd.critic_updates_per_projection == 4
+    assert cfg.task.pmd.train.updates_per_transition == pytest.approx(0.25)
+    # Untouched axes keep the task profile.
+    assert cfg.task.evaluation_steps == 250
+    assert cfg.task.pmd.policy.action_bound == pytest.approx(1.0)
+
+
+def test_lift_profile_carries_its_own_baseline_and_success_metric() -> None:
+    args = SimpleNamespace(algorithm="ppo", task="lift")
+
+    cfg = build_benchmark_cfg(args)
+
+    assert cfg.task.task_id == "Isaac-Lift-Cube-Franka-v0"
+    assert cfg.task.ppo.rollout_steps == 24
+    assert cfg.task.ppo.hidden_dims == (256, 128, 64)
+    assert cfg.task.success_threshold == pytest.approx(0.08)
+    assert cfg.task.success_rate_thresholds == (0.25, 0.5, 0.9)
+    assert "success_bonus" in cfg.task.force_include_reward_terms
+    assert cfg.group == "lift-fixed-reward-v4"
+
+
+def test_unknown_benchmark_task_is_rejected() -> None:
+    with pytest.raises(ValueError, match="Unknown benchmark task"):
+        build_benchmark_cfg(SimpleNamespace(algorithm="ppo", task="pendulum"))

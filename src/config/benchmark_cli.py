@@ -1,15 +1,11 @@
-"""Pure-Python CLI override mapping for the Cartpole benchmark."""
+"""Pure-Python CLI override mapping for the fixed-reward benchmark."""
 
 from __future__ import annotations
 
 from dataclasses import replace
 from typing import Any
 
-from config.cartpole_benchmark import (
-    CartpoleBenchmarkCfg,
-    cartpole_pmd_cfg,
-    cartpole_sac_cfg,
-)
+from config.benchmark import BenchmarkTask, FixedRewardBenchmarkCfg, build_task
 from config.off_policy import DirectQCfg, SuccessorQCfg
 
 
@@ -26,10 +22,25 @@ def _value_cfg(name: str | None, *, num_heads: int | None):
     return None
 
 
-def build_cartpole_benchmark_cfg(args: Any) -> CartpoleBenchmarkCfg:
-    """Apply a small orthogonal override set without discarding nested defaults."""
-    sac = cartpole_sac_cfg()
-    pmd = cartpole_pmd_cfg()
+def _apply_task_overrides(task: BenchmarkTask, args: Any) -> BenchmarkTask:
+    overrides = {
+        name: value
+        for name, value in {
+            "num_envs": _override(args, "num_envs"),
+            "transition_budget": _override(args, "transition_budget"),
+            "evaluation_interval_transitions": _override(
+                args, "evaluation_interval_transitions"
+            ),
+            "evaluation_steps": _override(args, "evaluation_steps"),
+            "action_clip": _override(args, "action_clip"),
+        }.items()
+        if value is not None
+    }
+    return replace(task, **overrides) if overrides else task
+
+
+def _apply_algorithm_overrides(task: BenchmarkTask, args: Any) -> BenchmarkTask:
+    sac, pmd = task.sac, task.pmd
     value = _value_cfg(
         _override(args, "value_backend"), num_heads=_override(args, "num_heads")
     )
@@ -44,12 +55,14 @@ def build_cartpole_benchmark_cfg(args: Any) -> CartpoleBenchmarkCfg:
             "initial_critic_updates": _override(args, "initial_critic_updates"),
             "critic_learning_rate": _override(args, "critic_learning_rate"),
             "rollout_steps": _override(args, "rollout_steps"),
+            "gamma": _override(args, "gamma"),
         }.items()
         if value is not None
     }
     if train_overrides:
         sac = replace(sac, train=replace(sac.train, **train_overrides))
         pmd = replace(pmd, train=replace(pmd.train, **train_overrides))
+
     actor_learning_rate = _override(args, "actor_learning_rate")
     if actor_learning_rate is not None:
         sac = replace(sac, actor_learning_rate=actor_learning_rate)
@@ -62,6 +75,7 @@ def build_cartpole_benchmark_cfg(args: Any) -> CartpoleBenchmarkCfg:
             automatic_entropy_tuning=False,
         )
         pmd = replace(pmd, entropy_temperature=entropy_temperature)
+
     pmd_overrides = {
         name: value
         for name, value in {
@@ -80,23 +94,24 @@ def build_cartpole_benchmark_cfg(args: Any) -> CartpoleBenchmarkCfg:
     if pmd_overrides:
         pmd = replace(pmd, **pmd_overrides)
 
-    return CartpoleBenchmarkCfg(
+    gamma = _override(args, "gamma")
+    ppo = replace(task.ppo, gamma=gamma) if gamma is not None else task.ppo
+    return replace(task, sac=sac, pmd=pmd, ppo=ppo)
+
+
+def build_benchmark_cfg(args: Any) -> FixedRewardBenchmarkCfg:
+    """Resolve a task profile and apply a small orthogonal override set."""
+    task = build_task(getattr(args, "task", "cartpole"))
+    task = _apply_algorithm_overrides(_apply_task_overrides(task, args), args)
+    return FixedRewardBenchmarkCfg(
         algorithm=args.algorithm,
-        seed=args.seed,
-        num_envs=args.num_envs,
-        transition_budget=args.transition_budget,
-        evaluation_interval_transitions=args.evaluation_interval_transitions,
-        evaluation_steps=args.evaluation_steps,
-        device=args.device,
-        project=args.project,
-        group=args.group,
-        run_name=args.run_name,
-        log_root=args.log_root,
-        record_video=args.video,
-        video_length=args.video_length,
-        action_clip=(
-            1.0 if _override(args, "action_clip") is None else args.action_clip
-        ),
-        sac=sac,
-        pmd=pmd,
+        task=task,
+        seed=_override(args, "seed") or 1,
+        device=_override(args, "device") or "cuda:0",
+        project=_override(args, "project") or "isaac-irl-sample-efficiency",
+        group=_override(args, "group") or f"{task.name}-fixed-reward-v4",
+        run_name=_override(args, "run_name"),
+        log_root=_override(args, "log_root") or "logs/benchmark",
+        record_video=bool(_override(args, "video")),
+        video_length=_override(args, "video_length") or 250,
     )

@@ -51,11 +51,16 @@ class SampleEfficiencyTracker:
         *,
         validation_steps: int,
         return_per_step_thresholds: tuple[float, ...] = (),
+        success_rate_thresholds: tuple[float, ...] = (),
     ) -> None:
         if validation_steps <= 0:
             raise ValueError("validation_steps must be > 0.")
         self._validation_steps = int(validation_steps)
         self._thresholds = tuple(float(value) for value in return_per_step_thresholds)
+        self._success_thresholds = tuple(
+            float(value) for value in success_rate_thresholds
+        )
+        self._success_threshold_steps: dict[float, int] = {}
         self._first_step: int | None = None
         self._previous_step: int | None = None
         self._previous_return_per_step: float | None = None
@@ -125,9 +130,26 @@ class SampleEfficiencyTracker:
             self._best_success_rate = max(self._best_success_rate, success_rate)
             overview["Overview/success_rate"] = float(success_rate)
             overview["Overview/best_success_rate"] = float(self._best_success_rate)
+            for threshold in self._success_thresholds:
+                if (
+                    success_rate >= threshold
+                    and threshold not in self._success_threshold_steps
+                ):
+                    self._success_threshold_steps[threshold] = simulator_transitions
+                if threshold in self._success_threshold_steps:
+                    overview[_success_metric_name(threshold)] = float(
+                        self._success_threshold_steps[threshold]
+                    )
         return overview
 
 
+def _success_metric_name(threshold: float) -> str:
+    return f"Overview/transitions_to_success_rate_{_threshold_label(threshold)}"
+
+
+def _threshold_label(threshold: float) -> str:
+    return format(threshold, ".6g").replace("-", "minus_").replace(".", "_")
+
+
 def _threshold_metric_name(threshold: float) -> str:
-    label = format(threshold, ".6g").replace("-", "minus_").replace(".", "_")
-    return f"Overview/transitions_to_return_per_step_{label}"
+    return f"Overview/transitions_to_return_per_step_{_threshold_label(threshold)}"
