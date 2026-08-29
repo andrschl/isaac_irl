@@ -21,10 +21,8 @@ from algorithms.off_policy_common import (
     mix_actor_loss,
     parameter_delta,
     repeat_observations,
-    update_observation_normalizers,
 )
 from algorithms.state_dependent_tanh_actor import TanhPolicyProtocol
-from algorithms.successor_ensemble import RunningStandardizer
 from algorithms.value_backends import ActionValueBackend, ValueEstimate
 from config.off_policy import PmdCfg
 from storage.transition_replay import (
@@ -61,8 +59,6 @@ class Pmd:
         policy: TanhPolicyProtocol,
         value: ActionValueBackend,
         *,
-        actor_observation_normalizer: RunningStandardizer,
-        critic_observation_normalizer: RunningStandardizer,
         cfg: PmdCfg,
         device: torch.device,
         bc: BehaviorCloningLoss | None = None,
@@ -71,8 +67,6 @@ class Pmd:
         self.policy = policy
         self.previous_policy = policy.snapshot()
         self.value = value
-        self.actor_observation_normalizer = actor_observation_normalizer
-        self.critic_observation_normalizer = critic_observation_normalizer
         self.cfg = cfg
         self.device = device
         self.bc = bc
@@ -88,11 +82,7 @@ class Pmd:
         return float(self.cfg.entropy_temperature)
 
     def observe_rollout(self, rollout: TransitionRollout) -> None:
-        update_observation_normalizers(
-            rollout,
-            actor=self.actor_observation_normalizer,
-            critic=self.critic_observation_normalizer,
-        )
+        """Fit/update value-side statistics from one newly collected rollout."""
         self.value.fit_feature_scale(rollout)
 
     def critic_update(self, replay: TransitionReplayBuffer) -> dict[str, float]:
@@ -332,8 +322,6 @@ class Pmd:
             "previous_policy": self.previous_policy.model.state_dict(),
             "actor_optimizer": self.actor_optimizer.state_dict(),
             "value": self.value.save_state(),
-            "actor_normalizer": self.actor_observation_normalizer.state_dict(),
-            "critic_normalizer": self.critic_observation_normalizer.state_dict(),
             "replay_rng": self.replay_generator.get_state(),
             "action_rng": self.action_generator.get_state(),
             "policy_version": self.policy_version,
@@ -343,20 +331,11 @@ class Pmd:
         if state.get("algorithm") != "pmd":
             raise ValueError("Checkpoint does not contain the PMD learner.")
         self.policy.model.load_state_dict(state["policy"], strict=True)
-        # The snapshot shares the live normalizer module, so restoring pi_old
-        # also writes normalizer buffers; the authoritative moments are loaded
-        # from "actor_normalizer" immediately below.
         self.previous_policy = self.policy.snapshot()
         self.previous_policy.model.load_state_dict(
             state["previous_policy"], strict=True
         )
         self.value.load_state(state["value"], load_optimizer=load_optimizer)
-        self.actor_observation_normalizer.load_state_dict(
-            state["actor_normalizer"], strict=True
-        )
-        self.critic_observation_normalizer.load_state_dict(
-            state["critic_normalizer"], strict=True
-        )
         self.replay_generator.set_state(state["replay_rng"].cpu())
         self.action_generator.set_state(state["action_rng"].cpu())
         self.policy_version = int(state["policy_version"])

@@ -7,11 +7,8 @@ from typing import Any, Iterator, Protocol
 
 import torch
 import torch.nn as nn
-from einops import rearrange
 
 from algorithms.state_dependent_tanh_actor import TanhPolicyProtocol
-from algorithms.successor_ensemble import RunningStandardizer
-from storage.observations import actor_observation
 from storage.transition_replay import (
     Observation,
     TransitionReplayBuffer,
@@ -53,22 +50,6 @@ class BehaviorCloningLoss(Protocol):
     def weight(self) -> float: ...
 
     def compute_policy_loss(self, policy: TanhPolicyProtocol) -> torch.Tensor: ...
-
-
-def update_observation_normalizers(
-    rollout: TransitionRollout,
-    *,
-    actor: RunningStandardizer,
-    critic: RunningStandardizer,
-) -> None:
-    """Update moments from the raw visited observations [N,T,O] of one rollout."""
-    actor_values = actor_observation(rollout.policy_observations)
-    actor.update(rearrange(actor_values, "n t o -> (n t) o").to(actor.mean.device))
-    critic.update(
-        rearrange(rollout.critic_observations, "n t o -> (n t) o").to(
-            critic.mean.device
-        )
-    )
 
 
 def repeat_observations(observations: Observation, repeats: int) -> Observation:

@@ -13,10 +13,8 @@ from algorithms.off_policy_common import (
     gradient_norm,
     mix_actor_loss,
     parameter_delta,
-    update_observation_normalizers,
 )
 from algorithms.state_dependent_tanh_actor import TanhPolicyProtocol
-from algorithms.successor_ensemble import RunningStandardizer
 from algorithms.value_backends import ActionValueBackend
 from config.off_policy import SacCfg
 from storage.transition_replay import TransitionReplayBuffer, TransitionRollout
@@ -30,8 +28,6 @@ class Sac:
         policy: TanhPolicyProtocol,
         value: ActionValueBackend,
         *,
-        actor_observation_normalizer: RunningStandardizer,
-        critic_observation_normalizer: RunningStandardizer,
         cfg: SacCfg,
         action_dim: int,
         device: torch.device,
@@ -40,8 +36,6 @@ class Sac:
     ) -> None:
         self.policy = policy
         self.value = value
-        self.actor_observation_normalizer = actor_observation_normalizer
-        self.critic_observation_normalizer = critic_observation_normalizer
         self.cfg = cfg
         self.device = device
         self.bc = bc
@@ -84,12 +78,7 @@ class Sac:
         return float(self.log_entropy_temperature.detach().exp().item())
 
     def observe_rollout(self, rollout: TransitionRollout) -> None:
-        """Fit/update statistics from one newly collected rollout."""
-        update_observation_normalizers(
-            rollout,
-            actor=self.actor_observation_normalizer,
-            critic=self.critic_observation_normalizer,
-        )
+        """Fit/update value-side statistics from one newly collected rollout."""
         self.value.fit_feature_scale(rollout)
 
     def critic_update(self, replay: TransitionReplayBuffer) -> dict[str, float]:
@@ -181,8 +170,6 @@ class Sac:
             "policy": self.policy.model.state_dict(),
             "actor_optimizer": self.actor_optimizer.state_dict(),
             "value": self.value.save_state(),
-            "actor_normalizer": self.actor_observation_normalizer.state_dict(),
-            "critic_normalizer": self.critic_observation_normalizer.state_dict(),
             "actor_replay_rng": self.actor_replay_generator.get_state(),
             "actor_action_rng": self.actor_action_generator.get_state(),
             "policy_version": self.policy_version,
@@ -201,12 +188,6 @@ class Sac:
             raise ValueError("Checkpoint does not contain the SAC learner.")
         self.policy.model.load_state_dict(state["policy"], strict=True)
         self.value.load_state(state["value"], load_optimizer=load_optimizer)
-        self.actor_observation_normalizer.load_state_dict(
-            state["actor_normalizer"], strict=True
-        )
-        self.critic_observation_normalizer.load_state_dict(
-            state["critic_normalizer"], strict=True
-        )
         self.actor_replay_generator.set_state(state["actor_replay_rng"].cpu())
         self.actor_action_generator.set_state(state["actor_action_rng"].cpu())
         self.policy_version = int(state["policy_version"])

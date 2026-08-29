@@ -8,8 +8,19 @@ The training API exposes exactly three policy algorithms:
   actor projection.
 
 SAC and PMD share the same bounded tanh-Gaussian actor, transition replay,
-observation normalization, data collector, and selectable value backend. This
-keeps sample-efficiency comparisons controlled.
+data collector, and selectable value backend. This keeps sample-efficiency
+comparisons controlled.
+
+Observations are consumed as the environment reports them. A running
+standardizer was removed after it caused a Lift failure worth recording: its
+statistics accumulate over the whole run, so by a million transitions a new
+rollout moves them by 0.1% and the transform is frozen on the distribution the
+policy has already left. On Lift that froze the object-height scale at a
+standard deviation of 0.01 m — collected while the cube never left the table —
+so lifting the cube 10 cm landed exactly on the +-10 clip, and the one
+observation that reports task progress saturated at the moment it started to
+matter. Isaac's observation terms are already O(1); the tuned on-policy
+baseline runs on them unnormalized.
 
 ## Actor losses and BC
 
@@ -153,8 +164,6 @@ These live under `algo.train`:
   a policy's own samples inflates variance while the critic is uninformative,
   and a per-step trust region cannot stop the drift compounding: on Lift the
   unbounded policy reached a spread of 4.7 and flailed.
-- `observation_epsilon`, `observation_clip`: running-normalization
-  numerical floor and normalized observation bound.
 
 All sample-efficiency reports should use simulator transitions on the x-axis.
 Increasing UTD changes compute per transition, not the transition count.

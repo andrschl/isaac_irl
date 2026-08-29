@@ -18,7 +18,6 @@ from algorithms.scalar_action_value import (
 from algorithms.soft_value import entropy_return_td_target, soft_task_q_td_target
 from algorithms.state_dependent_tanh_actor import TanhPolicyProtocol
 from algorithms.successor_ensemble import (
-    RunningStandardizer,
     SuccessorFeatureEnsemble,
     successor_ensemble_td_target,
     successor_return_scale_from_second_moment,
@@ -77,7 +76,6 @@ class DirectActionValue:
         observation_dim: int,
         action_dim: int,
         reward: RewardScorer,
-        observation_normalizer: RunningStandardizer,
         cfg: DirectQCfg,
         train_cfg: OffPolicyTrainCfg,
         device: torch.device,
@@ -86,7 +84,6 @@ class DirectActionValue:
         self.num_heads = cfg.num_heads
         self.control_reduction = cfg.control_reduction
         self.reward = reward
-        self.observation_normalizer = observation_normalizer
         self.train_cfg = train_cfg
         self.device = device
         self.online = ScalarActionValueEnsemble(
@@ -132,10 +129,6 @@ class DirectActionValue:
                 )
             )
             rewards = self.reward.score(batch.features)
-            normalized_next = self.observation_normalizer(
-                batch.next_critic_observations
-            )
-        normalized_current = self.observation_normalizer(batch.critic_observations)
 
         losses: list[torch.Tensor] = []
         targets: list[torch.Tensor] = []
@@ -143,7 +136,9 @@ class DirectActionValue:
             rows = slice(head_index * batch_size, (head_index + 1) * batch_size)
             with torch.no_grad():
                 next_q = self.target.head(
-                    head_index, normalized_next[rows], next_actions[rows]
+                    head_index,
+                    batch.next_critic_observations[rows],
+                    next_actions[rows],
                 )
                 target = soft_task_q_td_target(
                     rewards[rows].to(next_q),
@@ -154,7 +149,7 @@ class DirectActionValue:
                     entropy_coefficient=entropy_temperature,
                 )
             prediction = self.online.head(
-                head_index, normalized_current[rows], batch.actions[rows]
+                head_index, batch.critic_observations[rows], batch.actions[rows]
             )
             losses.append(F.huber_loss(prediction, target))
             targets.append(target.mean())
@@ -190,7 +185,7 @@ class DirectActionValue:
     ) -> ValueEstimate:
         """Score actions [B,A] for control, reducing the ensemble as configured."""
         del entropy_temperature
-        per_head = self.online(self.observation_normalizer(observations), actions)
+        per_head = self.online(observations, actions)
         q = _reduce_heads(per_head, self.control_reduction)
         zeros = torch.zeros_like(q)
         return ValueEstimate(q=q, reward_q=q, entropy_q=zeros)
@@ -228,7 +223,6 @@ class SuccessorActionValue:
         observation_dim: int,
         action_dim: int,
         feature_dim: int,
-        observation_normalizer: RunningStandardizer,
         reward: LinearRewardScorer,
         cfg: SuccessorQCfg,
         train_cfg: OffPolicyTrainCfg,
@@ -242,7 +236,6 @@ class SuccessorActionValue:
         self.control_reduction = cfg.control_reduction
         self.reward = reward
         self.cfg = cfg
-        self.observation_normalizer = observation_normalizer
         self.train_cfg = train_cfg
         self.device = device
         self.online = SuccessorFeatureEnsemble(
@@ -353,12 +346,9 @@ class SuccessorActionValue:
             )
             # One trunk pass for the whole batch; each head reads its own slice.
             next_latent = self.target.latent(
-                self.observation_normalizer(batch.next_critic_observations),
-                next_actions,
+                batch.next_critic_observations, next_actions
             )
-        current_latent = self.online.latent(
-            self.observation_normalizer(batch.critic_observations), batch.actions
-        )
+        current_latent = self.online.latent(batch.critic_observations, batch.actions)
 
         losses: list[torch.Tensor] = []
         feature_losses: list[torch.Tensor] = []
@@ -437,8 +427,7 @@ class SuccessorActionValue:
                 )
             )
             next_entropy_q = self.entropy_target(
-                self.observation_normalizer(batch.next_critic_observations),
-                next_actions,
+                batch.next_critic_observations, next_actions
             )
             target = entropy_return_td_target(
                 next_log_probability,
@@ -446,10 +435,7 @@ class SuccessorActionValue:
                 batch.bootstrap_valid,
                 self.train_cfg.gamma,
             )
-        prediction = self.entropy_online(
-            self.observation_normalizer(batch.critic_observations),
-            batch.actions,
-        )
+        prediction = self.entropy_online(batch.critic_observations, batch.actions)
         loss = F.huber_loss(prediction, target)
         _require_finite(loss, name="entropy-return TD loss")
         self.entropy_optimizer.zero_grad(set_to_none=True)
@@ -476,9 +462,8 @@ class SuccessorActionValue:
         *,
         entropy_temperature: float,
     ) -> ValueEstimate:
-        normalized_observations = self.observation_normalizer(observations)
         # [M,B,D] successor features -> one scalar per head -> reduction.
-        successors = self.online(normalized_observations, actions)
+        successors = self.online(observations, actions)
         reward_weights = self.reward.weights.detach().to(successors)
         per_head_reward_q = self.reward.step_dt.to(successors) * torch.einsum(
             "mbd,d->mb", successors, reward_weights
@@ -487,7 +472,7 @@ class SuccessorActionValue:
         if self.entropy_online is None:
             entropy_q = torch.zeros_like(reward_q)
         else:
-            entropy_q = self.entropy_online(normalized_observations, actions)
+            entropy_q = self.entropy_online(observations, actions)
         combined_q = reward_q + float(entropy_temperature) * entropy_q
         _require_finite(combined_q, name="successor scalarized Q")
         return ValueEstimate(

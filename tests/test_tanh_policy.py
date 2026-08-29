@@ -11,12 +11,9 @@ from algorithms.state_dependent_tanh_actor import (  # noqa: E402
     StateDependentTanhGaussianActor,
     StateDependentTanhPolicy,
 )
-from algorithms.successor_ensemble import RunningStandardizer  # noqa: E402
 
 
-def _policy(
-    *, action_bound: float = 1.0, normalizer: RunningStandardizer | None = None
-) -> StateDependentTanhPolicy:
+def _policy(*, action_bound: float = 1.0) -> StateDependentTanhPolicy:
     torch.manual_seed(0)
     model = StateDependentTanhGaussianActor(
         3,
@@ -24,7 +21,6 @@ def _policy(
         hidden_dims=(8,),
         action_bound=action_bound,
         initial_std=0.5,
-        observation_normalizer=normalizer,
     )
     return StateDependentTanhPolicy(model)
 
@@ -60,26 +56,20 @@ def test_latent_log_probability_matches_the_inverted_one_inside_the_bound() -> N
     torch.testing.assert_close(from_latent, from_actions, atol=1.0e-4, rtol=1.0e-4)
 
 
-def test_snapshot_freezes_weights_but_tracks_the_live_normalizer() -> None:
-    normalizer = RunningStandardizer(3, epsilon=1.0e-6, clip=10.0)
-    normalizer.update(torch.randn(64, 3))
-    policy = _policy(normalizer=normalizer)
+def test_snapshot_freezes_the_weights_it_was_taken_from() -> None:
+    policy = _policy()
     snapshot = policy.snapshot()
     observations = torch.randn(6, 3)
 
-    # Moving the shared moments must not open a KL gap by itself.
-    normalizer.update(4.0 + 3.0 * torch.randn(256, 3))
-
-    assert snapshot.model.observation_normalizer is normalizer
     torch.testing.assert_close(
         snapshot.deterministic_action(observations),
         policy.deterministic_action(observations),
     )
     assert float(latent_policy_kl(snapshot, policy, observations).item()) == 0.0
 
-    # Weights are genuinely frozen: training the live policy moves only it.
     with torch.no_grad():
         policy.model.mean_head.bias.add_(0.5)
+
     assert float(latent_policy_kl(snapshot, policy, observations).item()) > 0.0
     assert all(not parameter.requires_grad for parameter in snapshot.parameters())
 

@@ -15,7 +15,6 @@ from algorithms.exponential_policy import (
 from algorithms.sac import Sac
 from algorithms.soft_value import entropy_return_td_target, soft_task_q_td_target
 from algorithms.successor_ensemble import (
-    RunningStandardizer,
     SuccessorFeatureEnsemble,
     estimate_successor_return_scale,
     successor_ensemble_td_target,
@@ -189,12 +188,9 @@ def test_sac_constructs_no_previous_policy_snapshot() -> None:
         initial_entropy_temperature=0.0,
         automatic_entropy_tuning=False,
     )
-    normalizer = RunningStandardizer(2, epsilon=1.0e-6, clip=10.0)
     learner = Sac(
         policy,
         object(),
-        actor_observation_normalizer=normalizer,
-        critic_observation_normalizer=normalizer,
         cfg=cfg,
         action_dim=1,
         device=torch.device("cpu"),

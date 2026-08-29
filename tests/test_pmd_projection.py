@@ -14,7 +14,6 @@ from algorithms.state_dependent_tanh_actor import (  # noqa: E402
     StateDependentTanhGaussianActor,
     StateDependentTanhPolicy,
 )
-from algorithms.successor_ensemble import RunningStandardizer  # noqa: E402
 from algorithms.value_backends import ValueEstimate  # noqa: E402
 from config.off_policy import PmdCfg, TanhGaussianPolicyCfg  # noqa: E402
 
@@ -72,8 +71,6 @@ def _learner(cfg: PmdCfg | None = None, bc: Any = None, value: Any = None) -> Pm
         projection_steps=6,
         actor_learning_rate=1.0e-2,
     )
-    normalizer = RunningStandardizer(3, epsilon=1.0e-6, clip=10.0)
-    normalizer.update(torch.randn(128, 3))
     model = StateDependentTanhGaussianActor(
         3,
         2,
@@ -82,13 +79,10 @@ def _learner(cfg: PmdCfg | None = None, bc: Any = None, value: Any = None) -> Pm
         initial_std=cfg.policy.initial_std,
         minimum_log_std=float(torch.tensor(cfg.policy.minimum_std).log()),
         maximum_log_std=float(torch.tensor(cfg.policy.maximum_std).log()),
-        observation_normalizer=normalizer,
     )
     return Pmd(
         StateDependentTanhPolicy(model),
         value or _QuadraticValue(),
-        actor_observation_normalizer=normalizer,
-        critic_observation_normalizer=RunningStandardizer(3, epsilon=1.0e-6, clip=10.0),
         cfg=cfg,
         device=torch.device("cpu"),
         bc=bc,

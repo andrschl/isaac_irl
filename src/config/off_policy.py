@@ -72,8 +72,6 @@ class OffPolicyTrainCfg:
     initial_critic_updates: int = 1_000
     target_polyak: float = 0.005
     max_grad_norm: float = 1.0
-    observation_epsilon: float = 1.0e-6
-    observation_clip: float = 10.0
     replay: TransitionReplayCfg = field(default_factory=TransitionReplayCfg)
 
     def __post_init__(self) -> None:
@@ -91,8 +89,6 @@ class OffPolicyTrainCfg:
             ("critic_learning_rate", self.critic_learning_rate),
             ("updates_per_transition", self.updates_per_transition),
             ("max_grad_norm", self.max_grad_norm),
-            ("observation_epsilon", self.observation_epsilon),
-            ("observation_clip", self.observation_clip),
         ):
             if value <= 0.0:
                 raise ValueError(f"{name} must be > 0.")

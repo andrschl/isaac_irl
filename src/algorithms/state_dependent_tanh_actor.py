@@ -18,7 +18,12 @@ def policy_observation_tensor(observations: Any) -> torch.Tensor:
 
 
 class StateDependentTanhGaussianActor(nn.Module):
-    """Map normalized observations ``[B,O]`` to bounded Gaussian actions ``[B,A]``."""
+    """Map observations ``[B,O]`` to bounded Gaussian actions ``[B,A]``.
+
+    Observations are consumed as the environment reports them: Isaac's terms are
+    already O(1), and a running standardizer fitted to the policy's own early
+    data ends up frozen on a distribution the policy has since left.
+    """
 
     def __init__(
         self,
@@ -31,7 +36,6 @@ class StateDependentTanhGaussianActor(nn.Module):
         initial_std: float = 1.0,
         maximum_log_std: float = 2.0,
         log_probability_epsilon: float = 1.0e-6,
-        observation_normalizer: nn.Module | None = None,
     ) -> None:
         super().__init__()
         if min(observation_dim, action_dim) <= 0:
@@ -50,7 +54,6 @@ class StateDependentTanhGaussianActor(nn.Module):
         self.minimum_log_std = float(minimum_log_std)
         self.maximum_log_std = float(maximum_log_std)
         self.log_probability_epsilon = float(log_probability_epsilon)
-        self.observation_normalizer = observation_normalizer or nn.Identity()
 
         dimensions = (observation_dim, *hidden_dims)
         layers: list[nn.Module] = []
@@ -71,8 +74,7 @@ class StateDependentTanhGaussianActor(nn.Module):
                 f"Expected observations [B,{self.observation_dim}], "
                 f"got {tuple(observations.shape)}."
             )
-        normalized = self.observation_normalizer(observations)
-        latent = self.trunk(normalized)
+        latent = self.trunk(observations)
         mean = self.mean_head(latent)
         log_std = self.log_std_head(latent).clamp(
             self.minimum_log_std, self.maximum_log_std
@@ -190,17 +192,10 @@ class StateDependentTanhPolicy:
         return self._parameters(observations)
 
     def snapshot(self) -> "StateDependentTanhPolicy":
-        """Freeze the network weights while sharing the live normalizer.
-
-        The observation normalizer keeps absorbing new rollouts, and a frozen
-        copy of it would make the snapshot normalize with stale moments: its
-        actions and its KL from the live policy would then move whenever the
-        moments move, not only when the weights do.
-        """
+        """Return a frozen copy of this policy's weights."""
         frozen_model = copy.deepcopy(self.model)
         frozen_model.eval()
         frozen_model.requires_grad_(False)
-        frozen_model.observation_normalizer = self.model.observation_normalizer
         return StateDependentTanhPolicy(frozen_model)
 
     def act(self, observations: Any) -> torch.Tensor:

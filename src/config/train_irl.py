@@ -490,12 +490,6 @@ def _parse_off_policy_train_cfg(
         ),
         target_polyak=float(section.get("target_polyak", defaults.target_polyak)),
         max_grad_norm=float(section.get("max_grad_norm", defaults.max_grad_norm)),
-        observation_epsilon=float(
-            section.get("observation_epsilon", defaults.observation_epsilon)
-        ),
-        observation_clip=float(
-            section.get("observation_clip", defaults.observation_clip)
-        ),
         replay=replay,
     )
 

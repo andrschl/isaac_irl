@@ -19,7 +19,6 @@ from algorithms.state_dependent_tanh_actor import (
     StateDependentTanhPolicy,
     policy_observation_tensor,
 )
-from algorithms.successor_ensemble import RunningStandardizer
 from algorithms.value_backends import (
     ActionValueBackend,
     DirectActionValue,
@@ -95,16 +94,6 @@ def build_off_policy_stack(
     if policy_values.ndim != 2 or critic_values.ndim != 2:
         raise ValueError("Expected initial actor and critic observations [N,O].")
     policy_cfg = algorithm_cfg.policy
-    actor_normalizer = RunningStandardizer(
-        int(policy_values.shape[-1]),
-        epsilon=algorithm_cfg.train.observation_epsilon,
-        clip=algorithm_cfg.train.observation_clip,
-    ).to(compute_device)
-    critic_normalizer = RunningStandardizer(
-        int(critic_values.shape[-1]),
-        epsilon=algorithm_cfg.train.observation_epsilon,
-        clip=algorithm_cfg.train.observation_clip,
-    ).to(compute_device)
     actor_model = StateDependentTanhGaussianActor(
         int(policy_values.shape[-1]),
         int(env.action_dim),
@@ -113,7 +102,6 @@ def build_off_policy_stack(
         initial_std=policy_cfg.initial_std,
         minimum_log_std=math.log(policy_cfg.minimum_std),
         maximum_log_std=math.log(policy_cfg.maximum_std),
-        observation_normalizer=actor_normalizer,
     ).to(compute_device)
     policy = StateDependentTanhPolicy(actor_model)
 
@@ -123,7 +111,6 @@ def build_off_policy_stack(
             observation_dim=int(critic_values.shape[-1]),
             action_dim=int(env.action_dim),
             reward=reward,
-            observation_normalizer=critic_normalizer,
             cfg=algorithm_cfg.value,
             train_cfg=algorithm_cfg.train,
             device=compute_device,
@@ -145,7 +132,6 @@ def build_off_policy_stack(
             action_dim=int(env.action_dim),
             feature_dim=reward.feature_dim,
             reward=linear_reward,
-            observation_normalizer=critic_normalizer,
             cfg=algorithm_cfg.value,
             train_cfg=algorithm_cfg.train,
             use_entropy_critic=entropy_enabled,
@@ -172,8 +158,6 @@ def build_off_policy_stack(
         learner = Sac(
             policy,
             value,
-            actor_observation_normalizer=actor_normalizer,
-            critic_observation_normalizer=critic_normalizer,
             cfg=algorithm_cfg,
             action_dim=int(env.action_dim),
             device=compute_device,
@@ -191,8 +175,6 @@ def build_off_policy_stack(
         learner = Pmd(
             policy,
             value,
-            actor_observation_normalizer=actor_normalizer,
-            critic_observation_normalizer=critic_normalizer,
             cfg=algorithm_cfg,
             device=compute_device,
             bc=bc,

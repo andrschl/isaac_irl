@@ -8,63 +8,6 @@ import torch
 import torch.nn as nn
 
 
-class RunningStandardizer(nn.Module):
-    """Online observation normalization with checkpointed population moments."""
-
-    def __init__(self, dimension: int, *, epsilon: float, clip: float) -> None:
-        super().__init__()
-        if dimension <= 0:
-            raise ValueError("dimension must be > 0.")
-        self.epsilon = float(epsilon)
-        self.clip = float(clip)
-        self.register_buffer("mean", torch.zeros(dimension))
-        self.register_buffer("variance", torch.ones(dimension))
-        self.register_buffer("count", torch.zeros((), dtype=torch.float64))
-
-    @torch.no_grad()
-    def update(self, values: torch.Tensor) -> None:
-        """Incorporate raw observations ``[B,O]`` exactly once."""
-        if values.ndim != 2 or values.shape[1] != self.mean.numel():
-            raise ValueError(
-                f"Expected values [B,{self.mean.numel()}], got {tuple(values.shape)}."
-            )
-        if values.shape[0] == 0 or not torch.isfinite(values).all():
-            raise ValueError("Running normalization requires finite non-empty values.")
-        batch = values.to(device=self.mean.device, dtype=self.mean.dtype)
-        batch_count = float(batch.shape[0])
-        batch_mean = batch.mean(dim=0)
-        batch_variance = batch.var(dim=0, unbiased=False)
-        old_count = float(self.count.item())
-        if old_count == 0.0:
-            self.mean.copy_(batch_mean)
-            self.variance.copy_(batch_variance.clamp_min(self.epsilon**2))
-            self.count.fill_(batch_count)
-            return
-        total_count = old_count + batch_count
-        delta = batch_mean - self.mean
-        combined_mean = self.mean + delta * (batch_count / total_count)
-        old_m2 = self.variance * old_count
-        batch_m2 = batch_variance * batch_count
-        correction = delta.square() * (old_count * batch_count / total_count)
-        self.mean.copy_(combined_mean)
-        self.variance.copy_(
-            ((old_m2 + batch_m2 + correction) / total_count).clamp_min(self.epsilon**2)
-        )
-        self.count.fill_(total_count)
-
-    @property
-    def is_fitted(self) -> bool:
-        return bool(self.count.item() > 0.0)
-
-    def forward(self, values: torch.Tensor) -> torch.Tensor:
-        if values.ndim != 2 or values.shape[1] != self.mean.numel():
-            raise ValueError(
-                f"Expected values [B,{self.mean.numel()}], got {tuple(values.shape)}."
-            )
-        standard_deviation = self.variance.sqrt().clamp_min(self.epsilon)
-        return ((values - self.mean) / standard_deviation).clamp(-self.clip, self.clip)
-
-
 class SuccessorFeatureEnsemble(nn.Module):
     """Shared trunk and independent nonlinear successor-feature heads.
 
