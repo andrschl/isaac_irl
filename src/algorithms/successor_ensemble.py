@@ -7,9 +7,20 @@ import copy
 import torch
 import torch.nn as nn
 
+from algorithms.bro_network import BroNet, reset_module_parameters
+
+
+def _zero_output_layer(head: nn.Module) -> None:
+    """Start a successor head at zero, so an untrained head predicts no return."""
+    output_layer = head[-1]
+    if not isinstance(output_layer, nn.Linear):
+        raise TypeError("Successor head must end in a linear output layer.")
+    nn.init.zeros_(output_layer.weight)
+    nn.init.zeros_(output_layer.bias)
+
 
 class SuccessorFeatureEnsemble(nn.Module):
-    """Shared trunk and independent nonlinear successor-feature heads.
+    """Shared residual trunk and independent successor-feature heads.
 
     Shapes:
         observations: [B,O]
@@ -25,36 +36,35 @@ class SuccessorFeatureEnsemble(nn.Module):
         feature_dim: int,
         *,
         num_heads: int = 5,
-        trunk_hidden_dims: tuple[int, ...] = (256, 256),
-        latent_dim: int = 256,
+        width: int = 512,
+        residual_blocks: int = 2,
+        latent_dim: int = 128,
         head_hidden_dim: int = 128,
     ) -> None:
         super().__init__()
         if min(observation_dim, action_dim, feature_dim, num_heads) <= 0:
             raise ValueError("All dimensions and num_heads must be positive.")
-        if not trunk_hidden_dims or any(value <= 0 for value in trunk_hidden_dims):
-            raise ValueError("trunk_hidden_dims must contain positive dimensions.")
-        trunk_dims = (observation_dim + action_dim, *trunk_hidden_dims, latent_dim)
-        trunk_layers: list[nn.Module] = []
-        for input_dim, output_dim in zip(trunk_dims[:-1], trunk_dims[1:], strict=True):
-            trunk_layers.extend((nn.Linear(input_dim, output_dim), nn.ELU()))
-        self.trunk = nn.Sequential(*trunk_layers)
+        if min(latent_dim, head_hidden_dim) <= 0:
+            raise ValueError("latent_dim and head_hidden_dim must be positive.")
+        self.trunk = BroNet(
+            observation_dim + action_dim,
+            latent_dim,
+            width=width,
+            residual_blocks=residual_blocks,
+        )
         self.heads = nn.ModuleList(
             [
                 nn.Sequential(
                     nn.Linear(latent_dim, head_hidden_dim),
-                    nn.ELU(),
+                    nn.LayerNorm(head_hidden_dim),
+                    nn.ReLU(),
                     nn.Linear(head_hidden_dim, feature_dim),
                 )
                 for _ in range(num_heads)
             ]
         )
         for head in self.heads:
-            output_layer = head[-1]
-            if not isinstance(output_layer, nn.Linear):
-                raise TypeError("Successor head must end in a linear output layer.")
-            nn.init.zeros_(output_layer.weight)
-            nn.init.zeros_(output_layer.bias)
+            _zero_output_layer(head)
         self.observation_dim = int(observation_dim)
         self.action_dim = int(action_dim)
         self.feature_dim = int(feature_dim)
@@ -141,6 +151,18 @@ class SuccessorFeatureEnsemble(nn.Module):
         target.requires_grad_(False)
         target.eval()
         return target
+
+    def reset_parameters(self) -> None:
+        """Reinitialize the trunk and every head, keeping the output scale.
+
+        The scale is a property of the features, not of what the network has
+        learned, so a reset leaves it alone; the heads return to their
+        zero-initialized output as at construction.
+        """
+        reset_module_parameters(self.trunk)
+        for head in self.heads:
+            reset_module_parameters(head)
+            _zero_output_layer(head)
 
 
 def successor_ensemble_td_target(

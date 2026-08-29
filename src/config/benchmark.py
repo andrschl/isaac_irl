@@ -175,8 +175,8 @@ def cartpole_task() -> BenchmarkTask:
             gamma=0.99,
             entropy_coef=0.005,
         ),
-        sac=_sac_cfg(),
-        pmd=_pmd_cfg(),
+        sac=_sac_cfg(value=DirectQCfg(num_heads=5, width=256, residual_blocks=1)),
+        pmd=_pmd_cfg(value=SuccessorQCfg(num_heads=5, width=256, residual_blocks=1)),
     )
 
 
@@ -210,7 +210,12 @@ def _lift_off_policy_train() -> OffPolicyTrainCfg:
     times the Cartpole ratio, because manipulation is where sample efficiency
     has to show.
     """
-    return OffPolicyTrainCfg(updates_per_transition=1.0 / 8.0)
+    return OffPolicyTrainCfg(
+        updates_per_transition=1.0 / 8.0,
+        # Roughly every 160k transitions at this ratio: enough gradient steps to
+        # lose plasticity, few enough resets that each one has time to recover.
+        reset_interval_updates=20_000,
+    )
 
 
 def lift_task() -> BenchmarkTask:
@@ -254,15 +259,15 @@ def lift_task() -> BenchmarkTask:
         sac=_sac_cfg(
             train=_lift_off_policy_train(),
             policy=_lift_policy(),
-            value=DirectQCfg(num_heads=3, hidden_dims=(256, 128, 64)),
+            value=DirectQCfg(num_heads=3, width=512, residual_blocks=2),
         ),
         pmd=_lift_pmd_cfg(
             value=SuccessorQCfg(
                 num_heads=3,
-                trunk_hidden_dims=(256, 128),
-                latent_dim=64,
-                head_hidden_dim=64,
-                entropy_critic_hidden_dims=(256, 128, 64),
+                width=512,
+                residual_blocks=2,
+                latent_dim=128,
+                head_hidden_dim=128,
             ),
         ),
     )

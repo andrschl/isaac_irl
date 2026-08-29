@@ -1,4 +1,4 @@
-"""Scalar action-value models for entropy and fixed-task references."""
+"""Scalar action-value models built on the normalized residual value network."""
 
 from __future__ import annotations
 
@@ -7,23 +7,7 @@ import copy
 import torch
 import torch.nn as nn
 
-
-def _action_value_mlp(
-    observation_dim: int,
-    action_dim: int,
-    hidden_dims: tuple[int, ...],
-    output_dim: int,
-) -> nn.Sequential:
-    if min(observation_dim, action_dim, output_dim) <= 0:
-        raise ValueError("Action-value dimensions must be positive.")
-    if not hidden_dims or any(hidden_dim <= 0 for hidden_dim in hidden_dims):
-        raise ValueError("hidden_dims must contain positive dimensions.")
-    dimensions = (observation_dim + action_dim, *hidden_dims, output_dim)
-    layers: list[nn.Module] = []
-    for input_dim, next_dim in zip(dimensions[:-2], dimensions[1:-1], strict=True):
-        layers.extend((nn.Linear(input_dim, next_dim), nn.ELU()))
-    layers.append(nn.Linear(dimensions[-2], dimensions[-1]))
-    return nn.Sequential(*layers)
+from algorithms.bro_network import BroNet, reset_module_parameters
 
 
 class ScalarActionValue(nn.Module):
@@ -34,12 +18,20 @@ class ScalarActionValue(nn.Module):
         observation_dim: int,
         action_dim: int,
         *,
-        hidden_dims: tuple[int, ...] = (512, 256, 128),
+        width: int = 512,
+        residual_blocks: int = 2,
     ) -> None:
         super().__init__()
+        if min(observation_dim, action_dim) <= 0:
+            raise ValueError("Action-value dimensions must be positive.")
         self.observation_dim = int(observation_dim)
         self.action_dim = int(action_dim)
-        self.network = _action_value_mlp(observation_dim, action_dim, hidden_dims, 1)
+        self.network = BroNet(
+            observation_dim + action_dim,
+            1,
+            width=width,
+            residual_blocks=residual_blocks,
+        )
 
     def forward(
         self, observations: torch.Tensor, actions: torch.Tensor
@@ -61,6 +53,9 @@ class ScalarActionValue(nn.Module):
         target.eval()
         return target
 
+    def reset_parameters(self) -> None:
+        reset_module_parameters(self.network)
+
 
 class ScalarActionValueEnsemble(nn.Module):
     """Independent scalar action-value heads, returning all values ``[M,B]``."""
@@ -71,14 +66,20 @@ class ScalarActionValueEnsemble(nn.Module):
         action_dim: int,
         *,
         num_heads: int,
-        hidden_dims: tuple[int, ...] = (512, 256, 128),
+        width: int = 512,
+        residual_blocks: int = 2,
     ) -> None:
         super().__init__()
         if num_heads <= 0:
             raise ValueError("num_heads must be > 0.")
         self.heads = nn.ModuleList(
             [
-                ScalarActionValue(observation_dim, action_dim, hidden_dims=hidden_dims)
+                ScalarActionValue(
+                    observation_dim,
+                    action_dim,
+                    width=width,
+                    residual_blocks=residual_blocks,
+                )
                 for _ in range(num_heads)
             ]
         )
@@ -106,6 +107,11 @@ class ScalarActionValueEnsemble(nn.Module):
         target.requires_grad_(False)
         target.eval()
         return target
+
+    def reset_parameters(self) -> None:
+        """Reinitialize every head independently."""
+        for head in self.heads:
+            head.reset_parameters()
 
 
 @torch.no_grad()

@@ -62,6 +62,12 @@ class OffPolicyTrainCfg:
     critic optimizer step per sixteen newly collected simulator transitions.
     Increasing it spends more compute on the same data; it does not increase
     the simulator sample count.
+
+    reset_interval_updates periodically reinitializes the learner - critics,
+    actor, optimizers, entropy temperature - while keeping the replay. Networks
+    trained at a high update-to-data ratio lose plasticity long before their
+    data stops being informative, and relearning from the same replay is what
+    recovers it. Zero disables resets.
     """
 
     gamma: float = 0.99
@@ -72,6 +78,7 @@ class OffPolicyTrainCfg:
     initial_critic_updates: int = 1_000
     target_polyak: float = 0.005
     max_grad_norm: float = 1.0
+    reset_interval_updates: int = 0
     replay: TransitionReplayCfg = field(default_factory=TransitionReplayCfg)
 
     def __post_init__(self) -> None:
@@ -85,6 +92,8 @@ class OffPolicyTrainCfg:
                 raise ValueError(f"{name} must be > 0.")
         if self.initial_critic_updates < 0:
             raise ValueError("initial_critic_updates must be >= 0.")
+        if self.reset_interval_updates < 0:
+            raise ValueError("reset_interval_updates must be >= 0.")
         for name, value in (
             ("critic_learning_rate", self.critic_learning_rate),
             ("updates_per_transition", self.updates_per_transition),
@@ -115,11 +124,14 @@ class DirectQCfg:
 
     type: ClassVar[str] = "direct"
     num_heads: int = 5
-    hidden_dims: tuple[int, ...] = (512, 256, 128)
+    width: int = 512
+    residual_blocks: int = 2
     control_reduction: str = "mean"
 
     def __post_init__(self) -> None:
-        _validate_network(self.num_heads, self.hidden_dims, name="direct Q")
+        _validate_value_network(
+            self.num_heads, self.width, self.residual_blocks, name="direct Q"
+        )
         _validate_reduction(self.control_reduction)
 
 
@@ -141,16 +153,18 @@ class SuccessorQCfg:
     type: ClassVar[str] = "successor"
     num_heads: int = 5
     control_reduction: str = "mean"
-    trunk_hidden_dims: tuple[int, ...] = (512, 256)
+    width: int = 512
+    residual_blocks: int = 2
     latent_dim: int = 128
     head_hidden_dim: int = 128
     return_scale_min: float = 1.0
     scale_refit_ratio: float = 2.0
-    entropy_critic_hidden_dims: tuple[int, ...] = (512, 256, 128)
     entropy_critic_learning_rate: float = 3.0e-4
 
     def __post_init__(self) -> None:
-        _validate_network(self.num_heads, self.trunk_hidden_dims, name="successor Q")
+        _validate_value_network(
+            self.num_heads, self.width, self.residual_blocks, name="successor Q"
+        )
         _validate_reduction(self.control_reduction)
         for name, value in (
             ("latent_dim", self.latent_dim),
@@ -158,12 +172,6 @@ class SuccessorQCfg:
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be > 0.")
-        if not self.entropy_critic_hidden_dims or any(
-            hidden_dim <= 0 for hidden_dim in self.entropy_critic_hidden_dims
-        ):
-            raise ValueError(
-                "entropy_critic_hidden_dims must contain positive dimensions."
-            )
         if self.return_scale_min <= 0.0:
             raise ValueError("return_scale_min must be > 0.")
         if self.scale_refit_ratio <= 1.0:
@@ -325,13 +333,15 @@ def _validate_reduction(reduction: str) -> None:
         )
 
 
-def _validate_network(
-    num_heads: int, hidden_dims: tuple[int, ...], *, name: str
+def _validate_value_network(
+    num_heads: int, width: int, residual_blocks: int, *, name: str
 ) -> None:
     if num_heads <= 0:
         raise ValueError(f"{name} num_heads must be > 0.")
-    if not hidden_dims or any(value <= 0 for value in hidden_dims):
-        raise ValueError(f"{name} hidden_dims must contain positive values.")
+    if width <= 0:
+        raise ValueError(f"{name} width must be > 0.")
+    if residual_blocks <= 0:
+        raise ValueError(f"{name} residual_blocks must be > 0.")
 
 
 def _validate_actor(learning_rate: float, batch_size: int) -> None:

@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 
+from algorithms.bro_network import reset_module_parameters
 from algorithms.off_policy_common import (
     BehaviorCloningLoss,
     copy_parameters,
@@ -80,6 +81,28 @@ class Sac:
     def observe_rollout(self, rollout: TransitionRollout) -> None:
         """Fit/update value-side statistics from one newly collected rollout."""
         self.value.fit_feature_scale(rollout)
+
+    def reset_parameters(self) -> None:
+        """Reinitialize actor, critics, optimizers and the entropy temperature.
+
+        Replay survives: the point of a reset is to relearn from the data the
+        agent already has, without the loss of plasticity that comes from many
+        gradient steps on it.
+        """
+        self.value.reset_parameters()
+        reset_module_parameters(self.policy.model)
+        self.actor_optimizer = torch.optim.Adam(
+            self.policy.parameters(), lr=self.cfg.actor_learning_rate
+        )
+        if self.log_entropy_temperature is not None:
+            initial = max(self.cfg.initial_entropy_temperature, 1.0e-12)
+            with torch.no_grad():
+                self.log_entropy_temperature.copy_(
+                    torch.tensor(initial, device=self.device).log()
+                )
+            self.entropy_optimizer = torch.optim.Adam(
+                [self.log_entropy_temperature], lr=self.cfg.entropy_learning_rate
+            )
 
     def critic_update(self, replay: TransitionReplayBuffer) -> dict[str, float]:
         return self.value.update(

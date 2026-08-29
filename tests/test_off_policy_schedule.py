@@ -23,6 +23,7 @@ class _CountingLearner:
         self.critic_updates = 0
         self.actor_updates = 0
         self.observed_rollouts = 0
+        self.resets = 0
 
     def observe_rollout(self, rollout: Any) -> None:
         del rollout
@@ -38,6 +39,9 @@ class _CountingLearner:
         self.actor_updates += 1
         self.policy_version += 1
         return {"Actor/loss": 2.0}
+
+    def reset_parameters(self) -> None:
+        self.resets += 1
 
     def train(self) -> None: ...
 
@@ -217,3 +221,27 @@ def test_off_policy_adapters_select_the_phased_runner_path() -> None:
 
     assert isinstance(adapter, PhasedOffPolicyAlgorithm)
     assert not isinstance(_OnPolicyAdapter(), PhasedOffPolicyAlgorithm)
+
+
+def test_learner_is_reset_on_the_configured_interval() -> None:
+    train_cfg = _train_cfg(reset_interval_updates=32)
+    learner, adapter = _sac_adapter(train_cfg)
+
+    # 16 critic updates per rollout at this ratio: two rollouts per reset.
+    first = adapter.update()
+    assert learner.resets == 0
+    assert first["Data/parameter_resets"] == 0.0
+
+    second = adapter.update()
+    assert learner.resets == 1
+    assert second["Data/parameter_resets"] == 1.0
+
+
+def test_resets_are_off_by_default() -> None:
+    learner, adapter = _sac_adapter(_train_cfg())
+
+    for _ in range(6):
+        metrics = adapter.update()
+
+    assert learner.resets == 0
+    assert metrics["Data/parameter_resets"] == 0.0

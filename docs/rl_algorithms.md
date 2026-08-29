@@ -103,6 +103,17 @@ while multiplicative reward changes deliberately change the update.
 
 SAC and PMD accept `algo.value.type: direct | successor`.
 
+### Critic architecture
+
+Both backends use the same normalized residual value network: one linear
+projection to `width`, `residual_blocks` blocks of
+`Linear -> LayerNorm -> ReLU -> Linear -> LayerNorm` added to their input, and
+a linear output. LayerNorm is per-sample, so nothing depends on dataset
+statistics, and it is what keeps a value network from extrapolating without
+bound once the policy leaves the states its critic was trained on. Ensemble
+heads are independent networks (direct Q) or independent heads on a shared
+residual trunk (successor Q).
+
 ### Direct Q
 
 The direct backend learns scalar soft action values:
@@ -156,6 +167,12 @@ These live under `algo.train`:
 - `replay.learning_starts`: minimum stored transitions before any learning.
 - `replay.capacity`: maximum stored transitions; replay is a ring buffer,
   so the oldest transitions are overwritten once it is full.
+- `reset_interval_updates`: reinitialize the learner - critics, actor,
+  optimizers, entropy temperature - every this many critic steps, keeping the
+  replay. A network trained at a high update-to-data ratio loses plasticity
+  long before its data stops being informative; relearning the same replay from
+  scratch is what recovers it. Zero disables resets, which is the Cartpole
+  setting: it is solved before a reset would ever fire.
 - `replay.storage_device`: `auto` keeps the ring on the training device, which
   removes a host-to-device copy from every sample; `cpu` trades that back for
   host memory. A ring that would not fit is refused with the measured bytes

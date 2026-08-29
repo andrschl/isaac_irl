@@ -35,6 +35,8 @@ class _OffPolicyAdapter:
         self._last_metrics: dict[str, float] = {}
         self._pending_rollout: TransitionRollout | None = None
         self._pending_metrics: dict[str, float] | None = None
+        self._critic_updates_since_reset = 0
+        self._resets = 0
         self._last_simulator_steps = collector.num_envs * collector.rollout_steps
 
     @property
@@ -127,6 +129,16 @@ class _OffPolicyAdapter:
         )
         return True
 
+    def _reset_if_due(self, critic_updates: int) -> dict[str, float]:
+        """Reinitialize the learner once its reset interval has elapsed."""
+        interval = self.train_cfg.reset_interval_updates
+        self._critic_updates_since_reset += critic_updates
+        if interval > 0 and self._critic_updates_since_reset >= interval:
+            self.learner.reset_parameters()
+            self._critic_updates_since_reset = 0
+            self._resets += 1
+        return {"Data/parameter_resets": float(self._resets)}
+
     def train_metrics(self) -> dict[str, float]:
         return dict(self._last_metrics)
 
@@ -178,6 +190,7 @@ class SacAdapter(_OffPolicyAdapter):
         metrics["Data/critic_updates"] = float(update_count)
         metrics["Data/actor_updates"] = float(update_count)
         metrics["Data/policy_version"] = float(self.learner.policy_version)
+        metrics.update(self._reset_if_due(update_count))
         self._last_metrics = metrics
         return dict(metrics)
 
@@ -230,6 +243,7 @@ class PmdAdapter(_OffPolicyAdapter):
         metrics["Data/critic_updates"] = float(len(critic_metrics))
         metrics["Data/actor_updates"] = float(projections)
         metrics["Data/policy_version"] = float(self.learner.policy_version)
+        metrics.update(self._reset_if_due(len(critic_metrics)))
         self._last_metrics = metrics
         return dict(metrics)
 

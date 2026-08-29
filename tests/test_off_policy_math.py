@@ -124,7 +124,8 @@ def test_successor_ensemble_has_explicit_head_batch_feature_shape() -> None:
         2,
         4,
         num_heads=5,
-        trunk_hidden_dims=(8,),
+        width=8,
+        residual_blocks=1,
         latent_dim=6,
         head_hidden_dim=7,
     )
@@ -201,7 +202,14 @@ def test_sac_constructs_no_previous_policy_snapshot() -> None:
 
 def test_output_scale_refit_preserves_successor_predictions() -> None:
     ensemble = SuccessorFeatureEnsemble(
-        3, 2, 4, num_heads=2, trunk_hidden_dims=(8,), latent_dim=6, head_hidden_dim=5
+        3,
+        2,
+        4,
+        num_heads=2,
+        width=8,
+        residual_blocks=1,
+        latent_dim=6,
+        head_hidden_dim=5,
     )
     for head in ensemble.heads:
         torch.nn.init.normal_(head[-1].weight, std=0.3)
@@ -224,7 +232,14 @@ def test_output_scale_refit_preserves_successor_predictions() -> None:
 
 def test_output_scale_without_preservation_rescales_predictions() -> None:
     ensemble = SuccessorFeatureEnsemble(
-        3, 2, 2, num_heads=1, trunk_hidden_dims=(8,), latent_dim=6, head_hidden_dim=5
+        3,
+        2,
+        2,
+        num_heads=1,
+        width=8,
+        residual_blocks=1,
+        latent_dim=6,
+        head_hidden_dim=5,
     )
     torch.nn.init.constant_(ensemble.heads[0][-1].bias, 1.0)
     observations = torch.randn(4, 3)
@@ -254,7 +269,14 @@ def test_return_scale_tracks_features_that_only_appear_later() -> None:
 
 def test_apply_head_matches_recomputing_the_trunk() -> None:
     ensemble = SuccessorFeatureEnsemble(
-        3, 2, 4, num_heads=3, trunk_hidden_dims=(8,), latent_dim=6, head_hidden_dim=5
+        3,
+        2,
+        4,
+        num_heads=3,
+        width=8,
+        residual_blocks=1,
+        latent_dim=6,
+        head_hidden_dim=5,
     )
     observations = torch.randn(9, 3)
     actions = torch.randn(9, 2)
@@ -288,3 +310,74 @@ def test_control_reduction_is_configured_not_hardcoded() -> None:
     assert SuccessorQCfg(control_reduction="min").control_reduction == "min"
     with pytest.raises(ValueError, match="control_reduction"):
         DirectQCfg(control_reduction="min-of-two")
+
+
+def test_bro_critic_is_layer_normalized_and_residual() -> None:
+    from algorithms.bro_network import BroNet
+    from algorithms.scalar_action_value import ScalarActionValue
+
+    critic = ScalarActionValue(3, 2, width=16, residual_blocks=2)
+    network = critic.network
+
+    assert isinstance(network, BroNet)
+    assert len(network.blocks) == 2
+    layer_norms = [
+        m for m in network.modules() if isinstance(torch.nn.LayerNorm(1), type(m))
+    ]
+    # stem + two per residual block
+    assert len(layer_norms) == 5
+    assert critic(torch.randn(7, 3), torch.randn(7, 2)).shape == (7,)
+
+
+def test_a_bro_critic_does_not_explode_far_off_distribution() -> None:
+    """LayerNorm is here to bound extrapolation; check it actually does."""
+    from algorithms.scalar_action_value import ScalarActionValue
+
+    torch.manual_seed(0)
+    critic = ScalarActionValue(3, 2, width=32, residual_blocks=2)
+    observations = torch.randn(64, 3)
+    actions = torch.randn(64, 2)
+
+    on_distribution = critic(observations, actions).abs().max()
+    far_away = critic(1_000.0 * observations, 1_000.0 * actions).abs().max()
+
+    assert float(far_away) < 20.0 * float(on_distribution) + 10.0
+
+
+def test_reset_reinitializes_every_head() -> None:
+    from algorithms.scalar_action_value import ScalarActionValueEnsemble
+
+    torch.manual_seed(0)
+    ensemble = ScalarActionValueEnsemble(3, 2, num_heads=3, width=16, residual_blocks=1)
+    observations = torch.randn(5, 3)
+    actions = torch.randn(5, 2)
+    before = ensemble(observations, actions).clone()
+
+    ensemble.reset_parameters()
+
+    assert not torch.allclose(ensemble(observations, actions), before)
+
+
+def test_successor_reset_keeps_the_output_scale_and_zero_heads() -> None:
+    ensemble = SuccessorFeatureEnsemble(
+        3,
+        2,
+        4,
+        num_heads=2,
+        width=16,
+        residual_blocks=1,
+        latent_dim=6,
+        head_hidden_dim=5,
+    )
+    ensemble.set_output_scale(torch.tensor([2.0, 3.0, 4.0, 5.0]))
+    for head in ensemble.heads:
+        torch.nn.init.normal_(head[-1].weight, std=0.5)
+
+    ensemble.reset_parameters()
+
+    torch.testing.assert_close(
+        ensemble.output_scale, torch.tensor([2.0, 3.0, 4.0, 5.0])
+    )
+    # A freshly reset head predicts no successor return, as at construction.
+    predictions = ensemble(torch.randn(4, 3), torch.randn(4, 2))
+    torch.testing.assert_close(predictions, torch.zeros_like(predictions))

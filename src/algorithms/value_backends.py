@@ -62,6 +62,8 @@ class ActionValueBackend(Protocol):
 
     def modules(self) -> tuple[nn.Module, ...]: ...
 
+    def reset_parameters(self) -> None: ...
+
     def save_state(self) -> dict[str, Any]: ...
 
     def load_state(self, state: dict[str, Any], *, load_optimizer: bool) -> None: ...
@@ -90,7 +92,8 @@ class DirectActionValue:
             observation_dim,
             action_dim,
             num_heads=cfg.num_heads,
-            hidden_dims=cfg.hidden_dims,
+            width=cfg.width,
+            residual_blocks=cfg.residual_blocks,
         ).to(device)
         self.target = self.online.target_copy()
         self.optimizer = torch.optim.Adam(
@@ -193,6 +196,14 @@ class DirectActionValue:
     def modules(self) -> tuple[nn.Module, ...]:
         return self.online, self.target
 
+    def reset_parameters(self) -> None:
+        """Reinitialize the critics and their optimizer, keeping replay."""
+        self.online.reset_parameters()
+        self.target = self.online.target_copy()
+        self.optimizer = torch.optim.Adam(
+            self.online.parameters(), lr=self.train_cfg.critic_learning_rate
+        )
+
     def save_state(self) -> dict[str, Any]:
         return {
             "type": "direct",
@@ -243,7 +254,8 @@ class SuccessorActionValue:
             action_dim,
             feature_dim,
             num_heads=cfg.num_heads,
-            trunk_hidden_dims=cfg.trunk_hidden_dims,
+            width=cfg.width,
+            residual_blocks=cfg.residual_blocks,
             latent_dim=cfg.latent_dim,
             head_hidden_dim=cfg.head_hidden_dim,
         ).to(device)
@@ -255,7 +267,8 @@ class SuccessorActionValue:
             ScalarActionValue(
                 observation_dim,
                 action_dim,
-                hidden_dims=cfg.entropy_critic_hidden_dims,
+                width=cfg.width,
+                residual_blocks=cfg.residual_blocks,
             ).to(device)
             if use_entropy_critic
             else None
@@ -480,6 +493,22 @@ class SuccessorActionValue:
             reward_q=reward_q,
             entropy_q=entropy_q,
         )
+
+    def reset_parameters(self) -> None:
+        """Reinitialize successor and entropy critics, keeping the feature scale."""
+        self.online.reset_parameters()
+        self.online.set_output_scale(self.return_scale)
+        self.target = self.online.target_copy()
+        self.optimizer = torch.optim.Adam(
+            self.online.parameters(), lr=self.train_cfg.critic_learning_rate
+        )
+        if self.entropy_online is not None:
+            self.entropy_online.reset_parameters()
+            self.entropy_target = self.entropy_online.target_copy()
+            self.entropy_optimizer = torch.optim.Adam(
+                self.entropy_online.parameters(),
+                lr=self.cfg.entropy_critic_learning_rate,
+            )
 
     def modules(self) -> tuple[nn.Module, ...]:
         modules: list[nn.Module] = [self.online, self.target]

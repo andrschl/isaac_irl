@@ -8,6 +8,7 @@ from typing import Any
 import torch
 from einops import rearrange
 
+from algorithms.bro_network import reset_module_parameters
 from algorithms.exponential_policy import (
     ExponentialTarget,
     adaptive_exponential_target,
@@ -84,6 +85,20 @@ class Pmd:
     def observe_rollout(self, rollout: TransitionRollout) -> None:
         """Fit/update value-side statistics from one newly collected rollout."""
         self.value.fit_feature_scale(rollout)
+
+    def reset_parameters(self) -> None:
+        """Reinitialize actor, critics and optimizers, keeping the replay.
+
+        The frozen policy is re-taken from the reinitialized actor: projecting
+        away from a policy that no longer exists would measure a KL against a
+        deleted network.
+        """
+        self.value.reset_parameters()
+        reset_module_parameters(self.policy.model)
+        self.previous_policy = self.policy.snapshot()
+        self.actor_optimizer = torch.optim.Adam(
+            self.policy.parameters(), lr=self.cfg.actor_learning_rate
+        )
 
     def critic_update(self, replay: TransitionReplayBuffer) -> dict[str, float]:
         """Evaluate the frozen pi_k that the next projection improves upon."""

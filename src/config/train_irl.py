@@ -489,6 +489,9 @@ def _parse_off_policy_train_cfg(
             section.get("initial_critic_updates", defaults.initial_critic_updates)
         ),
         target_polyak=float(section.get("target_polyak", defaults.target_polyak)),
+        reset_interval_updates=int(
+            section.get("reset_interval_updates", defaults.reset_interval_updates)
+        ),
         max_grad_norm=float(section.get("max_grad_norm", defaults.max_grad_norm)),
         replay=replay,
     )
@@ -515,16 +518,18 @@ def _parse_value_cfg(
         defaults = DirectQCfg()
         return DirectQCfg(
             num_heads=int(section.get("num_heads", defaults.num_heads)),
-            hidden_dims=_to_tuple_ints(
-                section.get("hidden_dims"), defaults.hidden_dims
+            width=int(section.get("width", defaults.width)),
+            residual_blocks=int(
+                section.get("residual_blocks", defaults.residual_blocks)
             ),
         )
     if value_type == "successor":
         defaults = SuccessorQCfg()
         return SuccessorQCfg(
             num_heads=int(section.get("num_heads", defaults.num_heads)),
-            trunk_hidden_dims=_to_tuple_ints(
-                section.get("trunk_hidden_dims"), defaults.trunk_hidden_dims
+            width=int(section.get("width", defaults.width)),
+            residual_blocks=int(
+                section.get("residual_blocks", defaults.residual_blocks)
             ),
             latent_dim=int(section.get("latent_dim", defaults.latent_dim)),
             head_hidden_dim=int(
@@ -532,10 +537,6 @@ def _parse_value_cfg(
             ),
             return_scale_min=float(
                 section.get("return_scale_min", defaults.return_scale_min)
-            ),
-            entropy_critic_hidden_dims=_to_tuple_ints(
-                section.get("entropy_critic_hidden_dims"),
-                defaults.entropy_critic_hidden_dims,
             ),
             entropy_critic_learning_rate=float(
                 section.get(
