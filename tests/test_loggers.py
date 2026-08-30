@@ -217,3 +217,24 @@ def test_composite_logger_fans_out():
         assert r.starts == [7]
         assert r.events == [evt]
         assert r.finishes == [3]
+
+
+def test_console_keeps_nested_validation_keys_distinguishable(capsys) -> None:
+    """Both policy modes report the same leaf name; the mode must survive."""
+    from runner.console_logger import ConsoleLogger
+    from runner.loggers import LogEvent
+
+    ConsoleLogger().log(
+        LogEvent(
+            kind="validation/summary",
+            step=1024,
+            payload={
+                "Validation/environment_return_mean": 0.70,
+                "Validation/stochastic/environment_return_mean": 0.72,
+            },
+        )
+    )
+
+    printed = capsys.readouterr().out
+    assert "environment_return_mean=0.7000" in printed
+    assert "stochastic/environment_return_mean=0.7200" in printed

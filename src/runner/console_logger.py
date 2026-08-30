@@ -66,8 +66,11 @@ class ConsoleLogger:
     def _validation_summary(event: LogEvent) -> None:
         if not event.payload:
             return
+        # Drop only the leading namespace: a nested key like
+        # Validation/stochastic/environment_return_mean must stay
+        # distinguishable from its deterministic counterpart.
         summary = ", ".join(
-            f"{key.rsplit('/', 1)[-1]}={value:.4f}"
+            f"{key.split('/', 1)[-1]}={value:.4f}"
             for key, value in event.payload.items()
         )
         label_part = f"  {event.label}" if event.label else ""
