@@ -14,16 +14,36 @@ def _override(args: Any, name: str) -> Any:
     return getattr(args, name, None)
 
 
-def _value_cfg(name: str | None, *, num_heads: int | None, reduction: str | None):
-    if name == "direct":
-        return DirectQCfg(
-            num_heads=num_heads or 5, control_reduction=reduction or "mean"
-        )
-    if name == "successor":
-        return SuccessorQCfg(
-            num_heads=num_heads or 5, control_reduction=reduction or "mean"
-        )
-    return None
+_SHARED_VALUE_FIELDS = ("num_heads", "width", "residual_blocks", "control_reduction")
+
+
+def _value_cfg(current: DirectQCfg | SuccessorQCfg, args: Any):
+    """Override the value backend without discarding the profile's architecture.
+
+    Selecting a backend used to build a default-constructed config, so
+    ``--value_backend direct`` silently replaced a task's tuned head count and
+    width with the dataclass defaults. Overrides now apply on top of the
+    profile, and switching backend type carries the shared architecture across.
+    """
+    overrides = {
+        name: value
+        for name, value in {
+            "num_heads": _override(args, "num_heads"),
+            "control_reduction": _override(args, "control_reduction"),
+            "target_reduction": _override(args, "target_reduction"),
+        }.items()
+        if value is not None
+    }
+    name = _override(args, "value_backend") or current.type
+    if name != "direct":
+        # Successor targets are reward-independent, so no head can be selected
+        # as the pessimistic one without reintroducing the reward weights.
+        overrides.pop("target_reduction", None)
+    if name == current.type:
+        return replace(current, **overrides) if overrides else current
+    shared = {field: getattr(current, field) for field in _SHARED_VALUE_FIELDS}
+    factory = DirectQCfg if name == "direct" else SuccessorQCfg
+    return factory(**(shared | overrides))
 
 
 def _apply_task_overrides(task: BenchmarkTask, args: Any) -> BenchmarkTask:
@@ -44,19 +64,8 @@ def _apply_task_overrides(task: BenchmarkTask, args: Any) -> BenchmarkTask:
 
 
 def _apply_algorithm_overrides(task: BenchmarkTask, args: Any) -> BenchmarkTask:
-    sac, pmd = task.sac, task.pmd
-    value = _value_cfg(
-        _override(args, "value_backend"),
-        num_heads=_override(args, "num_heads"),
-        reduction=_override(args, "control_reduction"),
-    )
-    if value is not None:
-        sac = replace(sac, value=value)
-        pmd = replace(pmd, value=value)
-    elif _override(args, "control_reduction") is not None:
-        reduction = args.control_reduction
-        sac = replace(sac, value=replace(sac.value, control_reduction=reduction))
-        pmd = replace(pmd, value=replace(pmd.value, control_reduction=reduction))
+    sac = replace(task.sac, value=_value_cfg(task.sac.value, args))
+    pmd = replace(task.pmd, value=_value_cfg(task.pmd.value, args))
 
     train_overrides = {
         name: value

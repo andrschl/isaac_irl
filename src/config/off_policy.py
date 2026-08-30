@@ -123,26 +123,47 @@ class OffPolicyTrainCfg:
 
 @dataclass(slots=True)
 class DirectQCfg:
-    """Five-head scalar action-value ensemble used by direct SAC/PMD.
+    """Scalar action-value ensemble used by direct SAC/PMD.
 
-    Every head learns from a disjoint slice of one replay draw and bootstraps
-    only from its paired EMA target. control_reduction decides what the actor
-    optimizes: the ensemble mean, or the pessimistic minimum that keeps an
-    over-estimating head from pulling the policy towards actions no head can
-    justify.
+    Every head learns from a disjoint slice of one replay draw.
+    target_reduction decides what it bootstraps from. "independent" leaves each
+    head trusting its own EMA target, which is M separate Q-learners each
+    carrying a single critic's maximization bias; the actor then maximizes a
+    quantity every head over-estimates in the same direction. "min" takes the
+    minimum over target_subset_size heads drawn afresh each update -- clipped
+    double-Q generalized to M heads, and at subset size two exactly SAC's rule.
+
+    control_reduction is the same choice on the control side: what the actor
+    optimizes, the ensemble mean or the pessimistic minimum.
     """
 
     type: ClassVar[str] = "direct"
     num_heads: int = 5
     width: int = 512
     residual_blocks: int = 2
-    control_reduction: str = "mean"
+    control_reduction: str = "min"
+    target_reduction: str = "min"
+    target_subset_size: int = 2
 
     def __post_init__(self) -> None:
         _validate_value_network(
             self.num_heads, self.width, self.residual_blocks, name="direct Q"
         )
         _validate_reduction(self.control_reduction)
+        if self.target_reduction not in {"min", "independent"}:
+            raise ValueError(
+                "direct Q target_reduction must be 'min' or 'independent', got "
+                f"{self.target_reduction!r}."
+            )
+        if self.target_reduction == "min" and not (
+            2 <= self.target_subset_size <= self.num_heads
+        ):
+            raise ValueError(
+                "direct Q target_subset_size must lie in "
+                f"[2,{self.num_heads}], got {self.target_subset_size}; "
+                "a clipped target needs at least two heads to minimize over, "
+                "so set target_reduction='independent' to run without one."
+            )
 
 
 @dataclass(slots=True)
@@ -151,8 +172,12 @@ class SuccessorQCfg:
 
     Successor TD targets contain features and dynamics only. Reward weights
     are applied when actions are scored, so changing a linear IRL reward never
-    changes these Bellman targets. control_reduction applies to the scalarized
-    per-head values only; feature occupancy is always the ensemble mean.
+    changes these Bellman targets. That is also why this ensemble has no
+    in-target minimum: picking the pessimistic head needs a scalar, a scalar
+    needs the reward weights, and a target chosen under w is no longer
+    reward-independent. Pessimism therefore enters where scalarization already
+    does -- control_reduction applies to the scalarized per-head values, and
+    feature occupancy itself is always the ensemble mean.
 
     scale_refit_ratio guards the output scale against features that are absent
     early: a feature only a competent policy ever produces looks like zero in
@@ -162,7 +187,7 @@ class SuccessorQCfg:
 
     type: ClassVar[str] = "successor"
     num_heads: int = 5
-    control_reduction: str = "mean"
+    control_reduction: str = "min"
     width: int = 512
     residual_blocks: int = 2
     latent_dim: int = 128

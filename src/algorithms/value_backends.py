@@ -70,7 +70,7 @@ class ActionValueBackend(Protocol):
 
 
 class DirectActionValue:
-    """Five-head scalar Q with paired targets and ensemble-mean control."""
+    """Scalar Q ensemble with clipped bootstrap targets and pessimistic control."""
 
     def __init__(
         self,
@@ -85,6 +85,8 @@ class DirectActionValue:
     ) -> None:
         self.num_heads = cfg.num_heads
         self.control_reduction = cfg.control_reduction
+        self.target_reduction = cfg.target_reduction
+        self.target_subset_size = cfg.target_subset_size
         self.reward = reward
         self.train_cfg = train_cfg
         self.device = device
@@ -101,9 +103,24 @@ class DirectActionValue:
         )
         self.replay_generator = torch.Generator(device="cpu").manual_seed(seed + 1009)
         self.action_generator = torch.Generator(device=device).manual_seed(seed + 2003)
+        self.subset_generator = torch.Generator(device="cpu").manual_seed(seed + 3001)
 
     def fit_feature_scale(self, rollout: TransitionRollout) -> None:
         del rollout
+
+    def _bootstrap_value(self, per_head: torch.Tensor, head_index: int) -> torch.Tensor:
+        """Reduce target values [M,B] to the one head ``head_index`` bootstraps from.
+
+        A fresh subset each update is what stops the clip from concentrating on
+        one pair of heads; drawing it on CPU keeps it reproducible from the
+        checkpointed generator state.
+        """
+        if self.target_reduction == "independent":
+            return per_head[head_index]
+        subset = torch.randperm(self.num_heads, generator=self.subset_generator)[
+            : self.target_subset_size
+        ]
+        return per_head[subset.to(per_head.device)].min(dim=0).values
 
     def update(
         self,
@@ -132,17 +149,16 @@ class DirectActionValue:
                 )
             )
             rewards = self.reward.score(batch.features)
+            # Every target head over the whole draw, so each head's slice can
+            # bootstrap from a clipped minimum rather than from itself alone.
+            next_q_per_head = self.target(batch.next_critic_observations, next_actions)
 
         losses: list[torch.Tensor] = []
         targets: list[torch.Tensor] = []
         for head_index in range(self.num_heads):
             rows = slice(head_index * batch_size, (head_index + 1) * batch_size)
             with torch.no_grad():
-                next_q = self.target.head(
-                    head_index,
-                    batch.next_critic_observations[rows],
-                    next_actions[rows],
-                )
+                next_q = self._bootstrap_value(next_q_per_head[:, rows], head_index)
                 target = soft_task_q_td_target(
                     rewards[rows].to(next_q),
                     next_log_probability[rows],
@@ -212,6 +228,7 @@ class DirectActionValue:
             "optimizer": self.optimizer.state_dict(),
             "replay_rng": self.replay_generator.get_state(),
             "action_rng": self.action_generator.get_state(),
+            "subset_rng": self.subset_generator.get_state(),
         }
 
     def load_state(self, state: dict[str, Any], *, load_optimizer: bool) -> None:
@@ -221,6 +238,7 @@ class DirectActionValue:
         self.target.load_state_dict(state["target"], strict=True)
         self.replay_generator.set_state(state["replay_rng"].cpu())
         self.action_generator.set_state(state["action_rng"].cpu())
+        self.subset_generator.set_state(state["subset_rng"].cpu())
         if load_optimizer:
             self.optimizer.load_state_dict(state["optimizer"])
 

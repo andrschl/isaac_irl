@@ -306,10 +306,77 @@ def test_control_reduction_selects_mean_or_pessimistic_minimum() -> None:
 def test_control_reduction_is_configured_not_hardcoded() -> None:
     from config.off_policy import DirectQCfg, SuccessorQCfg
 
-    assert DirectQCfg().control_reduction == "mean"
+    assert DirectQCfg(control_reduction="mean").control_reduction == "mean"
     assert SuccessorQCfg(control_reduction="min").control_reduction == "min"
     with pytest.raises(ValueError, match="control_reduction"):
         DirectQCfg(control_reduction="min-of-two")
+
+
+def test_direct_q_clips_its_bootstrap_target_by_default() -> None:
+    """Independent per-head targets are M unclipped Q-learners, not an ensemble."""
+    from config.off_policy import DirectQCfg
+
+    cfg = DirectQCfg()
+    assert cfg.target_reduction == "min"
+    assert cfg.target_subset_size == 2
+    assert cfg.control_reduction == "min"
+    with pytest.raises(ValueError, match="target_reduction"):
+        DirectQCfg(target_reduction="mean")
+    with pytest.raises(ValueError, match="target_subset_size"):
+        DirectQCfg(num_heads=5, target_subset_size=1)
+    with pytest.raises(ValueError, match="target_subset_size"):
+        DirectQCfg(num_heads=3, target_subset_size=4)
+
+
+def test_bootstrap_value_takes_a_subset_minimum() -> None:
+    """The clipped target is a minimum over a fresh random subset of heads."""
+    from algorithms.value_backends import DirectActionValue
+
+    backend = DirectActionValue.__new__(DirectActionValue)
+    backend.num_heads = 4
+    backend.target_subset_size = 2
+    backend.subset_generator = torch.Generator(device="cpu").manual_seed(0)
+
+    per_head = torch.tensor([[1.0, 9.0], [2.0, 8.0], [3.0, 7.0], [4.0, 6.0]])
+
+    backend.target_reduction = "independent"
+    for head_index in range(4):
+        torch.testing.assert_close(
+            backend._bootstrap_value(per_head, head_index), per_head[head_index]
+        )
+
+    backend.target_reduction = "min"
+    for head_index in range(4):
+        value = backend._bootstrap_value(per_head, head_index)
+        assert value.shape == (2,)
+        # A minimum over two of four heads: never above the pair-wise worst
+        # case, never below the full ensemble minimum.
+        assert torch.all(value >= per_head.min(dim=0).values)
+        assert torch.all(value <= per_head.max(dim=0).values)
+
+    backend.target_subset_size = 4
+    torch.testing.assert_close(
+        backend._bootstrap_value(per_head, 0), per_head.min(dim=0).values
+    )
+
+
+def test_clipped_target_never_exceeds_the_independent_one() -> None:
+    """Whatever subset is drawn, clipping can only lower a head's target."""
+    from algorithms.value_backends import DirectActionValue
+
+    backend = DirectActionValue.__new__(DirectActionValue)
+    backend.num_heads = 3
+    backend.target_subset_size = 2
+    backend.target_reduction = "min"
+    backend.subset_generator = torch.Generator(device="cpu").manual_seed(7)
+
+    generator = torch.Generator().manual_seed(11)
+    for _ in range(32):
+        per_head = torch.randn(3, 8, generator=generator)
+        clipped = torch.stack(
+            [backend._bootstrap_value(per_head, head) for head in range(3)]
+        )
+        assert torch.all(clipped <= per_head.max(dim=0).values)
 
 
 def test_bro_critic_is_layer_normalized_and_residual() -> None:

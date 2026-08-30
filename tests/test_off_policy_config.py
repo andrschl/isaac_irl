@@ -127,7 +127,7 @@ def test_benchmark_cli_overrides_only_the_named_axes() -> None:
         num_envs=16,
         transition_budget=10_000,
         value_backend="direct",
-        num_heads=1,
+        num_heads=2,
         updates_per_transition=0.25,
         pmd_beta=0.0,
         pmd_critic_updates_per_projection=4,
@@ -140,7 +140,10 @@ def test_benchmark_cli_overrides_only_the_named_axes() -> None:
     assert cfg.task.num_envs == 16
     assert cfg.task.transition_budget == 10_000
     assert isinstance(cfg.task.pmd.value, DirectQCfg)
-    assert cfg.task.pmd.value.num_heads == 1
+    assert cfg.task.pmd.value.num_heads == 2
+    # Selecting a backend must not silently drop the profile's architecture.
+    assert cfg.task.pmd.value.width == 256
+    assert cfg.task.pmd.value.residual_blocks == 1
     assert cfg.task.pmd.beta == 0.0
     assert cfg.task.pmd.critic_updates_per_projection == 4
     assert cfg.task.pmd.train.updates_per_transition == pytest.approx(0.25)
