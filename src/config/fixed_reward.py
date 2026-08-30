@@ -16,6 +16,9 @@ class FixedRewardRunnerCfg:
     validation_interval_transitions: int | None = None
     return_per_step_thresholds: tuple[float, ...] = ()
     success_rate_thresholds: tuple[float, ...] = ()
+    # Scoring the sampled policy as well costs one extra rollout per validation
+    # and is what separates a collapsed policy from a collapsed argmax.
+    validate_stochastic_policy: bool = True
 
     def __post_init__(self) -> None:
         if self.save_interval <= 0:

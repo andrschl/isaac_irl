@@ -167,6 +167,9 @@ These live under `algo.train`:
 - `replay.learning_starts`: minimum stored transitions before any learning.
 - `replay.capacity`: maximum stored transitions; replay is a ring buffer,
   so the oldest transitions are overwritten once it is full.
+- `reset_scope`: what a reset touches. `agent` reinitializes everything, the
+  from-scratch recipe; `critic` relearns the value functions and leaves the
+  actor alone, which is what fine-tuning a behaviour-cloned policy needs.
 - `reset_interval_updates`: reinitialize the learner - critics, actor,
   optimizers, entropy temperature - every this many critic steps, keeping the
   replay. A network trained at a high update-to-data ratio loses plasticity

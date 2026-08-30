@@ -35,6 +35,7 @@ def _add_override_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--updates_per_transition", type=float)
     parser.add_argument("--initial_critic_updates", type=int)
     parser.add_argument("--reset_interval_updates", type=int)
+    parser.add_argument("--reset_scope", choices=("agent", "critic"))
     parser.add_argument("--critic_learning_rate", type=float)
     parser.add_argument("--actor_learning_rate", type=float)
     parser.add_argument("--rollout_steps", type=int)

@@ -83,13 +83,16 @@ class Sac:
         self.value.fit_feature_scale(rollout)
 
     def reset_parameters(self) -> None:
-        """Reinitialize actor, critics, optimizers and the entropy temperature.
+        """Reinitialize the critics, and the actor unless the scope excludes it.
 
         Replay survives: the point of a reset is to relearn from the data the
         agent already has, without the loss of plasticity that comes from many
-        gradient steps on it.
+        gradient steps on it. Under the "critic" scope the actor is left intact,
+        so a behaviour prior it was initialized with is not thrown away.
         """
         self.value.reset_parameters()
+        if self.cfg.train.reset_scope == "critic":
+            return
         reset_module_parameters(self.policy.model)
         self.actor_optimizer = torch.optim.Adam(
             self.policy.parameters(), lr=self.cfg.actor_learning_rate

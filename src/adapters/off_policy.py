@@ -73,8 +73,14 @@ class _OffPolicyAdapter:
                 "Data/replay_transitions": float(self.replay.transition_count),
                 "Data/simulator_transitions": float(rollout.transition_count),
                 "Data/policy_version": float(self.learner.policy_version),
+                # What the behaviour policy actually collects, as opposed to
+                # what the deterministic evaluation policy scores later.
+                "Train/reward_per_step": float(
+                    rollout.environment_rewards.mean().item()
+                ),
             }
         )
+        metrics.update(self._reward_term_metrics(rollout))
         oldest_version, newest_version = self.replay.policy_version_range()
         metrics["Data/replay_policy_age_min"] = float(
             self.learner.policy_version - newest_version
@@ -83,6 +89,26 @@ class _OffPolicyAdapter:
             self.learner.policy_version - oldest_version
         )
         return rollout, metrics
+
+    def _reward_term_metrics(self, rollout: TransitionRollout) -> dict[str, float]:
+        """Split the environment reward into its named terms, per step.
+
+        Shapes: features [N,T,D] reduced to one mean contribution per term. A
+        return that turns negative says nothing about why; the term that did it
+        does.
+        """
+        feature_tap = self.collector.feature_tap
+        names = feature_tap.spec.names
+        if names is None:
+            return {}
+        weights = feature_tap.weights.to(rollout.features)
+        contributions = (
+            feature_tap.step_dt * rollout.features.mean(dim=(0, 1)) * weights
+        )
+        return {
+            f"Reward/{name}": float(value)
+            for name, value in zip(names, contributions.tolist(), strict=True)
+        }
 
     def collect_generation(self) -> TransitionRollout:
         """Collect once so IRL may update reward before policy improvement."""

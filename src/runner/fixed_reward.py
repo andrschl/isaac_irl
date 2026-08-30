@@ -104,8 +104,14 @@ class FixedRewardRunner:
         if self.log_dir is not None:
             self.save(os.path.join(self.log_dir, f"model_{self.current_iteration}.pt"))
 
-    def _validate(self) -> None:
-        self.rl_algorithm.eval_mode()
+    def _rollout_return(
+        self, action_fn: Callable[[Any], torch.Tensor]
+    ) -> tuple[torch.Tensor, float | None]:
+        """Roll out one policy mode for the validation horizon.
+
+        Returns per-environment returns [N] and the success rate, if the task
+        exposes one.
+        """
         self.env.reset()
         observations = self.env.get_observations()
         if isinstance(observations, tuple):
@@ -116,7 +122,7 @@ class FixedRewardRunner:
         )
         with torch.no_grad():
             for _ in range(self.cfg.validation_steps):
-                actions = self.rl_algorithm.actor.act_inference(observations)
+                actions = action_fn(observations)
                 observations, rewards, _, _ = self.env.step(actions.to(self.env.device))
                 total_reward += torch.as_tensor(rewards, device=self.device).reshape(-1)
                 if self.success_fn is not None:
@@ -126,12 +132,24 @@ class FixedRewardRunner:
                         .to(torch.bool)
                     )
                     ever_success |= success
-        environment_return_mean = float(total_reward.mean().item())
         success_rate = (
             float(ever_success.float().mean().item())
             if self.success_fn is not None
             else None
         )
+        return total_reward, success_rate
+
+    def _validate(self) -> None:
+        """Score both policy modes: the reported one and the one that collects.
+
+        Sample efficiency is reported for the deterministic policy, but a
+        deterministic collapse and a policy collapse look identical unless the
+        sampled policy is scored too.
+        """
+        self.rl_algorithm.eval_mode()
+        actor = self.rl_algorithm.actor
+        total_reward, success_rate = self._rollout_return(actor.act_inference)
+        environment_return_mean = float(total_reward.mean().item())
         payload = {
             "Validation/environment_return_mean": environment_return_mean,
             "Validation/environment_return_std": float(
@@ -148,6 +166,13 @@ class FixedRewardRunner:
                 success_rate=success_rate,
             )
         )
+        if self.cfg.validate_stochastic_policy:
+            sampled_reward, sampled_success = self._rollout_return(actor.act)
+            payload["Validation/stochastic/environment_return_mean"] = float(
+                sampled_reward.mean().item()
+            )
+            if sampled_success is not None:
+                payload["Validation/stochastic/success_rate"] = sampled_success
         self.logger.log(
             LogEvent(
                 kind="validation/summary",

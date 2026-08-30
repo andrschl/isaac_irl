@@ -87,13 +87,16 @@ class Pmd:
         self.value.fit_feature_scale(rollout)
 
     def reset_parameters(self) -> None:
-        """Reinitialize actor, critics and optimizers, keeping the replay.
+        """Reinitialize the critics, and the actor unless the scope excludes it.
 
-        The frozen policy is re-taken from the reinitialized actor: projecting
-        away from a policy that no longer exists would measure a KL against a
-        deleted network.
+        The frozen policy is re-taken from whatever the actor is afterwards:
+        projecting away from a policy that no longer exists would measure a KL
+        against a deleted network.
         """
         self.value.reset_parameters()
+        if self.cfg.train.reset_scope == "critic":
+            self.previous_policy = self.policy.snapshot()
+            return
         reset_module_parameters(self.policy.model)
         self.previous_policy = self.policy.snapshot()
         self.actor_optimizer = torch.optim.Adam(

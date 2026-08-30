@@ -68,6 +68,11 @@ class OffPolicyTrainCfg:
     trained at a high update-to-data ratio lose plasticity long before their
     data stops being informative, and relearning from the same replay is what
     recovers it. Zero disables resets.
+
+    reset_scope chooses what a reset touches. "agent" reinitializes everything,
+    which is the from-scratch recipe. "critic" leaves the actor and its
+    optimizer alone, which is what fine-tuning an imitation policy needs: the
+    value functions relearn, the behaviour prior survives.
     """
 
     gamma: float = 0.99
@@ -79,6 +84,7 @@ class OffPolicyTrainCfg:
     target_polyak: float = 0.005
     max_grad_norm: float = 1.0
     reset_interval_updates: int = 0
+    reset_scope: str = "agent"
     replay: TransitionReplayCfg = field(default_factory=TransitionReplayCfg)
 
     def __post_init__(self) -> None:
@@ -94,6 +100,10 @@ class OffPolicyTrainCfg:
             raise ValueError("initial_critic_updates must be >= 0.")
         if self.reset_interval_updates < 0:
             raise ValueError("reset_interval_updates must be >= 0.")
+        if self.reset_scope not in {"agent", "critic"}:
+            raise ValueError(
+                f"reset_scope must be 'agent' or 'critic', got {self.reset_scope!r}."
+            )
         for name, value in (
             ("critic_learning_rate", self.critic_learning_rate),
             ("updates_per_transition", self.updates_per_transition),

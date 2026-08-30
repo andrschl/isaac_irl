@@ -189,32 +189,39 @@ def _lift_pmd_cfg(*, value: DirectQCfg | SuccessorQCfg) -> PmdCfg:
     """PMD needs far more trust-region budget in eight action dimensions.
 
     Cartpole is solved with a projection every eight critic steps at 0.02 nats.
-    On Lift the same setting leaves the policy where it started: its Q stays at
-    0.09 while SAC climbs past 0.6. A projection per critic step at 0.05 nats —
-    forty times the policy movement per transition — is what makes it learn.
+    On Lift the same setting left the policy where it started: its Q stayed at
+    0.09 while SAC climbed past 0.6, and a projection per critic step at 0.05
+    nats is what made it learn.
+
+    At two gradient steps per transition that cadence would spend the run inside
+    candidate evaluation, so it goes back to eight critic steps per projection —
+    which is still a quarter of a projection per transition, sixteen times the
+    policy movement per transition that the tuned low-ratio setting bought.
     """
     return replace(
         _pmd_cfg(train=_lift_off_policy_train(), policy=_lift_policy(), value=value),
-        critic_updates_per_projection=1,
+        critic_updates_per_projection=8,
         actor_projection_kl=0.05,
         candidate_target_kl=0.15,
     )
 
 
 def _lift_off_policy_train() -> OffPolicyTrainCfg:
-    """Lift runs off-policy where off-policy is strong: few environments, many
-    updates per transition.
+    """Lift runs at the replay ratio the critic architecture assumes.
 
-    With 128 environments a rollout is 1,024 transitions and this ratio spends
-    128 critic steps on them — one gradient step per eight transitions, four
-    times the Cartpole ratio, because manipulation is where sample efficiency
-    has to show.
+    Two gradient steps per simulator transition is BRO's default, sixteen times
+    what this profile used before, and it is the setting a wide normalized
+    residual critic is built for: at a low ratio the capacity costs compute and
+    returns nothing. Thirty-two environments keep the data each of those steps
+    sees close to the current policy.
+
+    The reset interval counts gradient steps, so it now spans 25k transitions
+    rather than 160k — resets only help when the learner has enough updates
+    between them to recover, which is what went wrong at the lower ratio.
     """
     return OffPolicyTrainCfg(
-        updates_per_transition=1.0 / 8.0,
-        # Roughly every 160k transitions at this ratio: enough gradient steps to
-        # lose plasticity, few enough resets that each one has time to recover.
-        reset_interval_updates=20_000,
+        updates_per_transition=2.0,
+        reset_interval_updates=50_000,
     )
 
 
@@ -228,11 +235,11 @@ def lift_task() -> BenchmarkTask:
     return BenchmarkTask(
         name="lift",
         task_id="Isaac-Lift-Cube-Franka-v0",
-        num_envs=128,
-        transition_budget=1_500_000,
+        num_envs=32,
+        transition_budget=200_000,
         # Above one full episode per environment (300 steps), so training sees
         # episodes end instead of being reset by every validation.
-        evaluation_interval_transitions=51_200,
+        evaluation_interval_transitions=12_800,
         evaluation_steps=250,
         # The arm action is a joint-position offset scaled by 0.5, so a bound of
         # 1.0 is the half-radian range the task is designed around. Widening it

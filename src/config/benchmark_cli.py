@@ -64,6 +64,7 @@ def _apply_algorithm_overrides(task: BenchmarkTask, args: Any) -> BenchmarkTask:
             "updates_per_transition": _override(args, "updates_per_transition"),
             "initial_critic_updates": _override(args, "initial_critic_updates"),
             "reset_interval_updates": _override(args, "reset_interval_updates"),
+            "reset_scope": _override(args, "reset_scope"),
             "critic_learning_rate": _override(args, "critic_learning_rate"),
             "rollout_steps": _override(args, "rollout_steps"),
             "gamma": _override(args, "gamma"),

@@ -41,6 +41,8 @@ class ConsoleLogger:
             ("actor_delta", "Overview/actor_parameter_delta"),
             ("policy_std", "Overview/policy_std"),
             ("q_mean", "Overview/q_mean"),
+            ("train_reward", "Overview/train_reward_per_step"),
+            ("act_sat", "Overview/action_saturation_fraction"),
             ("psi_scale", "Overview/successor_scale_max"),
             ("psi_refits", "Overview/successor_scale_refits"),
             ("alpha", "Overview/entropy_temperature"),

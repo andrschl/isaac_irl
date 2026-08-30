@@ -492,6 +492,7 @@ def _parse_off_policy_train_cfg(
         reset_interval_updates=int(
             section.get("reset_interval_updates", defaults.reset_interval_updates)
         ),
+        reset_scope=str(section.get("reset_scope", defaults.reset_scope)),
         max_grad_norm=float(section.get("max_grad_norm", defaults.max_grad_norm)),
         replay=replay,
     )

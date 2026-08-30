@@ -10,7 +10,7 @@ from conftest import build_rollout  # noqa: E402
 
 from adapters.off_policy import PmdAdapter, SacAdapter  # noqa: E402
 from config.off_policy import OffPolicyTrainCfg, TransitionReplayCfg  # noqa: E402
-from interfaces import PhasedOffPolicyAlgorithm  # noqa: E402
+from interfaces import FeatureSpec, PhasedOffPolicyAlgorithm  # noqa: E402
 from storage.transition_replay import TransitionReplayBuffer  # noqa: E402
 
 
@@ -59,12 +59,24 @@ class _FrozenPolicy:
         self.model = torch.nn.Linear(2, 2)
 
 
+class _StubFeatureTap:
+    """Pre-reset tap double exposing only what reward decomposition needs."""
+
+    spec = FeatureSpec(dim=2, names=("alive", "effort"))
+    step_dt = 0.5
+
+    @property
+    def weights(self) -> torch.Tensor:
+        return torch.tensor([1.0, -2.0])
+
+
 class _StubCollector:
     """Collector double returning identical chunks without an environment."""
 
     def __init__(self, *, num_envs: int = 4, rollout_steps: int = 8) -> None:
         self.num_envs = num_envs
         self.rollout_steps = rollout_steps
+        self.feature_tap = _StubFeatureTap()
         self._rollout_id = 0
 
     def collect(self, *, policy_version: int):
@@ -245,3 +257,57 @@ def test_resets_are_off_by_default() -> None:
 
     assert learner.resets == 0
     assert metrics["Data/parameter_resets"] == 0.0
+
+
+def test_collection_reports_training_return_and_reward_terms() -> None:
+    _, adapter = _sac_adapter(_train_cfg())
+
+    metrics = adapter.update()
+
+    assert "Train/reward_per_step" in metrics
+    # step_dt * weight * mean feature, one entry per named term.
+    assert set(metrics) >= {"Reward/alive", "Reward/effort"}
+
+
+def test_critic_scope_reset_leaves_the_actor_alone() -> None:
+    """Fine-tuning needs a reset that keeps the behaviour prior it started from."""
+    from algorithms.sac import Sac
+    from algorithms.state_dependent_tanh_actor import (
+        StateDependentTanhGaussianActor,
+        StateDependentTanhPolicy,
+    )
+    from config.off_policy import SacCfg
+
+    class _StubValue:
+        num_heads = 1
+
+        def __init__(self) -> None:
+            self.resets = 0
+
+        def reset_parameters(self) -> None:
+            self.resets += 1
+
+    def build(scope: str) -> tuple[Sac, _StubValue, torch.Tensor]:
+        torch.manual_seed(0)
+        model = StateDependentTanhGaussianActor(3, 2, hidden_dims=(8,))
+        value = _StubValue()
+        learner = Sac(
+            StateDependentTanhPolicy(model),
+            value,
+            cfg=SacCfg(train=_train_cfg(reset_scope=scope)),
+            action_dim=2,
+            device=torch.device("cpu"),
+        )
+        return learner, value, model.mean_head.weight.detach().clone()
+
+    critic_learner, critic_value, actor_before = build("critic")
+    critic_learner.reset_parameters()
+    torch.testing.assert_close(
+        critic_learner.policy.model.mean_head.weight, actor_before
+    )
+    assert critic_value.resets == 1
+
+    agent_learner, agent_value, agent_before = build("agent")
+    agent_learner.reset_parameters()
+    assert not torch.allclose(agent_learner.policy.model.mean_head.weight, agent_before)
+    assert agent_value.resets == 1
