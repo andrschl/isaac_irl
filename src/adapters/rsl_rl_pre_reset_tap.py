@@ -144,6 +144,30 @@ class IsaacPreResetTap:
         self.reward_manager.compute = self._original_compute
         self._original_compute = None
 
+    def _require_constant_weights(self) -> None:
+        """Fail if the environment has changed a reward weight underneath us.
+
+        Features are recovered by dividing the manager's weighted per-step
+        reward by the weight snapshotted at construction, so a weight the
+        environment changes later silently rescales that feature -- and cannot
+        be caught downstream, because the same stale weight is used to score
+        it, cancelling the error exactly. Isaac Lab's own manipulation tasks do
+        this: Lift multiplies its action_rate and joint_vel penalties by 1000
+        once common_step_counter passes 10,000 steps.
+        """
+        changed = {
+            term.name: (term.weight, float(term.cfg.weight))
+            for term in self.terms
+            if float(term.cfg.weight) != term.weight
+        }
+        if changed:
+            raise ValueError(
+                "Reward weights changed during the run, so the ground-truth "
+                f"reward is not fixed: {changed} (term: was, now). A reward "
+                "curriculum is the usual cause; drop those curriculum terms "
+                "from the environment configuration."
+            )
+
     def _capture_features(self) -> torch.Tensor:
         """Return raw unweighted term values [N,D] in reward-manager order.
 
@@ -152,6 +176,7 @@ class IsaacPreResetTap:
         the manager skips them entirely and their value has to be computed here
         — still before the reset, like everything else this tap captures.
         """
+        self._require_constant_weights()
         step_reward = self.reward_manager._step_reward
         num_envs = int(self.unwrapped.num_envs)
         columns: list[torch.Tensor] = []

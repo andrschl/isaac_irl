@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -130,3 +132,52 @@ def test_a_reward_manager_without_captured_terms_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="no captured terms"):
         IsaacPreResetTap(env, device="cpu")
+
+
+def test_tap_refuses_a_reward_weight_that_changes_mid_run() -> None:
+    """A curriculum that rescales a weight silently rescales its feature.
+
+    The tap divides the manager's weighted reward by the weight it snapshotted,
+    and the scorer multiplies by that same stale weight, so the error cancels
+    exactly and nothing downstream can see it.
+    """
+    env, tap = _tapped(force_include_terms=("success_bonus",))
+    env.reward_manager.compute(STEP_DT)
+    before = tap.features().clone()
+    assert torch.isfinite(before).all()
+
+    env.reward_manager._term_cfgs[1].weight *= 1000.0
+
+    # The tap captures inside compute, so the run stops at the first step whose
+    # reward no longer matches the weights the features are recovered with.
+    with pytest.raises(ValueError, match="Reward weights changed during the run"):
+        env.reward_manager.compute(STEP_DT)
+
+
+def test_the_benchmark_drops_reward_weight_curricula() -> None:
+    from adapters.rsl_rl_benchmark_factory import _drop_reward_curriculum
+
+    def modify_reward_weight(env, env_ids):  # noqa: ARG001
+        return 0.0
+
+    def terrain_levels(env, env_ids):  # noqa: ARG001
+        return 0.0
+
+    class _Curriculum:
+        def __init__(self) -> None:
+            self.action_rate = SimpleNamespace(func=modify_reward_weight)
+            self.terrain = SimpleNamespace(func=terrain_levels)
+
+    env_cfg = SimpleNamespace(curriculum=_Curriculum())
+
+    _drop_reward_curriculum(env_cfg)
+
+    assert env_cfg.curriculum.action_rate is None
+    # Curricula that do not touch reward weights are left alone.
+    assert env_cfg.curriculum.terrain is not None
+
+
+def test_dropping_curricula_tolerates_an_environment_without_any() -> None:
+    from adapters.rsl_rl_benchmark_factory import _drop_reward_curriculum
+
+    _drop_reward_curriculum(SimpleNamespace())

@@ -29,6 +29,27 @@ class BuiltBenchmark:
     training_video_dir: str | None
 
 
+def _drop_reward_curriculum(env_cfg: Any) -> None:
+    """Remove curriculum terms that rewrite reward weights mid-run.
+
+    The benchmark measures sample efficiency against a fixed ground-truth
+    reward, and Isaac Lab's manipulation tasks do not supply one: Lift
+    multiplies its action_rate and joint_vel penalties by 1000 once
+    common_step_counter passes 10,000 environment steps, validation rollouts
+    included. Every off-policy arm reached that step count around 140k
+    transitions and turned sharply negative there, while PPO at 4096
+    environments would not have reached it until 41M -- so the baselines were
+    being scored against two different reward functions.
+    """
+    curriculum = getattr(env_cfg, "curriculum", None)
+    if curriculum is None:
+        return
+    for name, term in list(vars(curriculum).items()):
+        func = getattr(term, "func", None)
+        if getattr(func, "__name__", "") == "modify_reward_weight":
+            setattr(curriculum, name, None)
+
+
 def build_fixed_reward_benchmark(cfg: FixedRewardBenchmarkCfg) -> BuiltBenchmark:
     """Construct a seeded environment and one learner for the chosen task."""
     import gymnasium as gym
@@ -48,6 +69,7 @@ def build_fixed_reward_benchmark(cfg: FixedRewardBenchmarkCfg) -> BuiltBenchmark
         use_fabric=True,
     )
     env_cfg.seed = cfg.seed
+    _drop_reward_curriculum(env_cfg)
     if task.add_success_bonus:
         if task.success_threshold is None:
             raise ValueError("add_success_bonus requires a success_threshold.")
