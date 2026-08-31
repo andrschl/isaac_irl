@@ -188,15 +188,11 @@ def _lift_policy() -> TanhGaussianPolicyCfg:
 def _lift_pmd_cfg(*, value: DirectQCfg | SuccessorQCfg) -> PmdCfg:
     """PMD needs far more trust-region budget in eight action dimensions.
 
-    Cartpole is solved with a projection every eight critic steps at 0.02 nats.
-    On Lift the same setting left the policy where it started: its Q stayed at
-    0.09 while SAC climbed past 0.6, and a projection per critic step at 0.05
-    nats is what made it learn.
-
-    At two gradient steps per transition that cadence would spend the run inside
-    candidate evaluation, so it goes back to eight critic steps per projection —
-    which is still a quarter of a projection per transition, sixteen times the
-    policy movement per transition that the tuned low-ratio setting bought.
+    Cartpole is solved by a projection every eight critic steps at 0.02 nats;
+    on Lift the same setting left the policy where it started. Eight critic
+    steps per projection is a quarter of a projection per simulator transition
+    at this replay ratio, and against a clipped critic that is enough for PMD
+    to match SAC here — 2.78 against 2.75 at 128k transitions.
     """
     return replace(
         _pmd_cfg(train=_lift_off_policy_train(), policy=_lift_policy(), value=value),
@@ -209,20 +205,18 @@ def _lift_pmd_cfg(*, value: DirectQCfg | SuccessorQCfg) -> PmdCfg:
 def _lift_off_policy_train() -> OffPolicyTrainCfg:
     """Lift runs at the replay ratio the critic architecture assumes.
 
-    Two gradient steps per simulator transition is BRO's default, sixteen times
-    what this profile used before, and it is the setting a wide normalized
-    residual critic is built for: at a low ratio the capacity costs compute and
-    returns nothing. Thirty-two environments keep the data each of those steps
-    sees close to the current policy.
+    Two gradient steps per simulator transition is BRO's default and what a
+    wide normalized residual critic is built for; at a lower ratio that
+    capacity costs compute and returns nothing. Thirty-two environments keep
+    the data each of those steps sees close to the current policy.
 
-    The reset interval counts gradient steps, so it now spans 25k transitions
-    rather than 160k — resets only help when the learner has enough updates
-    between them to recover, which is what went wrong at the lower ratio.
+    Resets stay off. They came in for plasticity at this ratio, but the
+    ablation is one-sided: by 128k transitions the reset-free runs reach 2.75
+    (SAC) and 2.78 (PMD) against 1.95 for resets every 25k updates, and nothing
+    here trains long enough to lose plasticity. reset_scope survives for the
+    fine-tuning stage, where a critic-only reset spares an actor worth keeping.
     """
-    return OffPolicyTrainCfg(
-        updates_per_transition=2.0,
-        reset_interval_updates=50_000,
-    )
+    return OffPolicyTrainCfg(updates_per_transition=2.0)
 
 
 def lift_task() -> BenchmarkTask:
