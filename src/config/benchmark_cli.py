@@ -67,6 +67,29 @@ def _apply_algorithm_overrides(task: BenchmarkTask, args: Any) -> BenchmarkTask:
     sac = replace(task.sac, value=_value_cfg(task.sac.value, args))
     pmd = replace(task.pmd, value=_value_cfg(task.pmd.value, args))
 
+    replay_overrides = {
+        name: value
+        for name, value in {
+            "demonstration_path": _override(args, "demonstrations"),
+            "demonstration_fraction": _override(args, "demonstration_fraction"),
+            "demonstration_episodes": _override(args, "demonstration_episodes"),
+        }.items()
+        if value is not None
+    }
+    if replay_overrides:
+        sac = replace(
+            sac,
+            train=replace(
+                sac.train, replay=replace(sac.train.replay, **replay_overrides)
+            ),
+        )
+        pmd = replace(
+            pmd,
+            train=replace(
+                pmd.train, replay=replace(pmd.train.replay, **replay_overrides)
+            ),
+        )
+
     train_overrides = {
         name: value
         for name, value in {

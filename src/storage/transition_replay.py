@@ -10,6 +10,7 @@ from einops import rearrange
 from storage.observations import (
     Observation,
     assert_finite_observation,
+    concat_observations,
     empty_observation_like,
     map_observation,
     observation_leaves,
@@ -170,6 +171,11 @@ class TransitionReplayBuffer:
     independent of how many rollouts have been collected and of how the data
     was chunked. ``device`` decides where the ring lives; keeping it on the
     training device removes a host-to-device copy from every sample.
+
+    Demonstrations, when seeded, are held outside the ring and never evicted,
+    and ``demonstration_fraction`` of every sampled batch is drawn from them.
+    That is RLPD's mixing rule, and it is what stops a reward the policy only
+    reaches by accident from being estimated off a single rollout.
     """
 
     def __init__(
@@ -177,11 +183,16 @@ class TransitionReplayBuffer:
         *,
         capacity_transitions: int,
         device: str | torch.device = "cpu",
+        demonstration_fraction: float = 0.0,
     ) -> None:
         if capacity_transitions <= 0:
             raise ValueError("capacity_transitions must be > 0.")
+        if not 0.0 <= demonstration_fraction < 1.0:
+            raise ValueError("demonstration_fraction must lie in [0,1).")
         self.capacity_transitions = int(capacity_transitions)
         self.device = torch.device(device)
+        self.demonstration_fraction = float(demonstration_fraction)
+        self._demonstrations: TransitionBatch | None = None
         self._storage: TransitionBatch | None = None
         self._policy_versions = torch.empty(0, dtype=torch.int64)
         self._transition_count = 0
@@ -241,15 +252,89 @@ class TransitionReplayBuffer:
         generator: torch.Generator,
         device: torch.device,
     ) -> TransitionBatch:
-        """Sample ``batch_size`` stored transitions uniformly with replacement."""
+        """Sample ``batch_size`` transitions uniformly with replacement.
+
+        With demonstrations seeded, the draw is split so that the demonstration
+        share of the batch is fixed and independent of how much the policy has
+        collected.
+        """
         if self._storage is None or self._transition_count == 0:
             raise RuntimeError("Cannot sample an empty replay.")
         if batch_size <= 0:
             raise ValueError("batch_size must be > 0.")
-        index = torch.randint(
-            self._transition_count, (batch_size,), generator=generator
-        ).to(self.device)
-        return _gather_transitions(self._storage, index, device)
+        demonstration_size = (
+            0
+            if self._demonstrations is None
+            else min(round(batch_size * self.demonstration_fraction), batch_size - 1)
+        )
+        collected = _sample_rows(
+            self._storage,
+            self._transition_count,
+            batch_size - demonstration_size,
+            generator=generator,
+            device=device,
+            index_device=self.device,
+        )
+        if demonstration_size == 0:
+            return collected
+        assert self._demonstrations is not None
+        return _concat_batches(
+            _sample_rows(
+                self._demonstrations,
+                int(self._demonstrations.actions.shape[0]),
+                demonstration_size,
+                generator=generator,
+                device=device,
+                index_device=self.device,
+            ),
+            collected,
+        )
+
+    def seed_with_demonstrations(self, rollout: TransitionRollout) -> None:
+        """Store demonstrations outside the ring, where nothing evicts them."""
+        if self.demonstration_fraction == 0.0:
+            raise ValueError("Seeding demonstrations needs demonstration_fraction > 0.")
+        if self._demonstrations is not None:
+            raise RuntimeError("Demonstrations are already seeded.")
+        self._demonstrations = _flatten_rollout(rollout.to_device(self.device))
+
+
+def _sample_rows(
+    storage: TransitionBatch,
+    stored: int,
+    batch_size: int,
+    *,
+    generator: torch.Generator,
+    device: torch.device,
+    index_device: torch.device,
+) -> TransitionBatch:
+    """Draw ``batch_size`` rows uniformly with replacement from ``stored`` of them."""
+    index = torch.randint(stored, (batch_size,), generator=generator).to(index_device)
+    return _gather_transitions(storage, index, device)
+
+
+def _concat_batches(*batches: TransitionBatch) -> TransitionBatch:
+    """Join sampled batches along the batch dimension."""
+
+    def join(name: str) -> torch.Tensor:
+        return torch.cat([getattr(batch, name) for batch in batches], dim=0)
+
+    return TransitionBatch(
+        policy_observations=concat_observations(
+            [batch.policy_observations for batch in batches]
+        ),
+        next_policy_observations=concat_observations(
+            [batch.next_policy_observations for batch in batches]
+        ),
+        critic_observations=join("critic_observations"),
+        next_critic_observations=join("next_critic_observations"),
+        actions=join("actions"),
+        features=join("features"),
+        environment_rewards=join("environment_rewards"),
+        terminated=join("terminated"),
+        truncated=join("truncated"),
+        bootstrap_valid=join("bootstrap_valid"),
+    )
 
 
 def _flatten_rollout(rollout: TransitionRollout) -> TransitionBatch:

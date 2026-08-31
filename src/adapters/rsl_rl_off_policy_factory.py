@@ -31,6 +31,7 @@ from config.off_policy import (
     SacCfg,
     SuccessorQCfg,
 )
+from data.demonstration_transitions import load_demonstration_rollout
 from reward_model.fixed import FixedLinearReward
 from reward_model.scorer import (
     LearnedLinearRewardScorer,
@@ -141,10 +142,34 @@ def build_off_policy_stack(
     else:
         raise TypeError(f"Unsupported value config {type(algorithm_cfg.value)!r}.")
 
+    replay_cfg = algorithm_cfg.train.replay
     replay = TransitionReplayBuffer(
-        capacity_transitions=algorithm_cfg.train.replay.capacity,
-        device=algorithm_cfg.train.replay.resolve_storage_device(compute_device),
+        capacity_transitions=replay_cfg.capacity,
+        device=replay_cfg.resolve_storage_device(compute_device),
+        demonstration_fraction=(
+            replay_cfg.demonstration_fraction
+            if replay_cfg.demonstration_path is not None
+            else 0.0
+        ),
     )
+    if replay_cfg.demonstration_path is not None:
+        if feature_tap.spec.names is None:
+            raise ValueError(
+                "Seeding demonstrations needs named reward features to line the "
+                "recorded ones up with the environment's."
+            )
+        observations = env.get_observations()
+        replay.seed_with_demonstrations(
+            load_demonstration_rollout(
+                replay_cfg.demonstration_path,
+                feature_names=feature_tap.spec.names,
+                observation_template=(
+                    observations[0] if isinstance(observations, tuple) else observations
+                ),
+                device=compute_device,
+                max_episodes=replay_cfg.demonstration_episodes,
+            )
+        )
     collector = TransitionCollector(
         env,
         policy,

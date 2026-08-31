@@ -30,11 +30,18 @@ class TransitionReplayCfg:
     the training device when it is a GPU, which removes a host-to-device copy
     from every critic update; "cpu" trades that for host memory when the ring
     would not fit.
+
+    demonstration_path seeds the replay from recorded demonstrations, which are
+    kept out of the ring and never evicted, and demonstration_fraction is their
+    share of every sampled batch.
     """
 
     learning_starts: int = 4_096
     capacity: int = 1_000_000
     storage_device: str = "auto"
+    demonstration_path: str | None = None
+    demonstration_fraction: float = 0.5
+    demonstration_episodes: int | None = None
 
     def __post_init__(self) -> None:
         if self.learning_starts <= 0:
@@ -46,6 +53,10 @@ class TransitionReplayCfg:
                 "replay.storage_device must be 'auto' or 'cpu', got "
                 f"{self.storage_device!r}."
             )
+        if not 0.0 < self.demonstration_fraction < 1.0:
+            raise ValueError("replay.demonstration_fraction must lie in (0,1).")
+        if self.demonstration_episodes is not None and self.demonstration_episodes <= 0:
+            raise ValueError("replay.demonstration_episodes must be > 0 when set.")
 
     def resolve_storage_device(self, compute_device: str | object) -> str:
         """Return the device the ring should be allocated on."""
