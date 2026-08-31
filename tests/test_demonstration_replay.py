@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 import torch
-
 from conftest import build_rollout
+
 from storage.transition_replay import TransitionReplayBuffer
 
 h5py = pytest.importorskip("h5py")
@@ -100,6 +100,35 @@ def test_loader_rejects_missing_reward_features(tmp_path) -> None:
             path,
             feature_names=(*FEATURES, "object_goal_tracking"),
             observation_template=torch.zeros(1, 3),
+            device="cpu",
+        )
+
+
+def test_loader_matches_the_environment_observation_tree(tmp_path) -> None:
+    """Isaac reports a single named group, not a bare tensor."""
+    from data.demonstration_transitions import load_demonstration_rollout
+
+    path = _write_demos(tmp_path / "demos.hdf5")
+    rollout = load_demonstration_rollout(
+        path,
+        feature_names=FEATURES,
+        observation_template={"policy": torch.zeros(1, 3)},
+        device="cpu",
+    )
+
+    assert set(rollout.policy_observations) == {"policy"}
+    torch.testing.assert_close(
+        rollout.policy_observations["policy"], rollout.critic_observations
+    )
+
+    with pytest.raises(ValueError, match="one observation group"):
+        load_demonstration_rollout(
+            path,
+            feature_names=FEATURES,
+            observation_template={
+                "policy": torch.zeros(1, 3),
+                "critic": torch.zeros(1, 5),
+            },
             device="cpu",
         )
 

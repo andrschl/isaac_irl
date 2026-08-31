@@ -18,7 +18,11 @@ from typing import Any
 import torch
 
 from data._hdf5 import iter_hdf5_demos
-from storage.observations import Observation
+from storage.observations import (
+    Observation,
+    detached_observation,
+    observation_leaves,
+)
 from storage.transition_replay import TransitionRollout
 
 
@@ -51,6 +55,7 @@ def load_demonstration_rollout(
             f"Demonstrations must share one horizon, got {sorted(horizons)}."
         )
 
+    template = detached_observation(observation_template, torch.device(device))
     stacked = {
         name: torch.stack([episode[name] for episode in episodes]).to(device)
         for name in episodes[0]
@@ -59,10 +64,8 @@ def load_demonstration_rollout(
     next_observations = stacked.pop("next_observations")
     shape = stacked["actions"].shape[:2]
     return TransitionRollout(
-        policy_observations=_match_structure(observation_template, observations),
-        next_policy_observations=_match_structure(
-            observation_template, next_observations
-        ),
+        policy_observations=_match_structure(template, observations),
+        next_policy_observations=_match_structure(template, next_observations),
         critic_observations=observations,
         next_critic_observations=next_observations,
         terminated=torch.zeros(shape, dtype=torch.bool, device=device),
@@ -126,10 +129,10 @@ def _match_structure(template: Observation, tensor: torch.Tensor) -> Observation
     """Place ``tensor`` in the tree shape the environment reports."""
     if isinstance(template, torch.Tensor):
         return tensor
-    groups = list(template)
-    if len(groups) != 1:
+    paths = [path for path, _ in observation_leaves(template)]
+    if len(paths) != 1 or "." in paths[0]:
         raise ValueError(
-            f"Demonstrations store one observation group, but the environment "
-            f"reports {groups}; record demonstrations for each group."
+            "Demonstrations store one observation group, but the environment "
+            f"reports {paths}; record demonstrations for each group."
         )
-    return {groups[0]: tensor}
+    return {paths[0]: tensor}
