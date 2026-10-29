@@ -8,14 +8,17 @@ torch = pytest.importorskip("torch")
 
 from conftest import build_replay, build_rollout  # noqa: E402
 
-from algorithms.off_policy_common import latent_policy_kl  # noqa: E402
-from algorithms.pmd import Pmd  # noqa: E402
-from algorithms.state_dependent_tanh_actor import (  # noqa: E402
+from algorithms.off_policy.actor import (  # noqa: E402
     StateDependentTanhGaussianActor,
     StateDependentTanhPolicy,
 )
-from algorithms.value_backends import ValueEstimate  # noqa: E402
-from config.off_policy import PmdCfg, TanhGaussianPolicyCfg  # noqa: E402
+from algorithms.off_policy.common import decomposed_policy_kl  # noqa: E402
+from algorithms.off_policy.exponential_target import (  # noqa: E402
+    adaptive_exponential_target,
+)
+from algorithms.off_policy.pmd import Pmd  # noqa: E402
+from algorithms.off_policy.values.backends import ValueEstimate  # noqa: E402
+from config.schema import PmdCfg, TanhGaussianPolicyCfg  # noqa: E402
 
 PREFERRED_ACTION = torch.tensor([0.9, -0.6])
 
@@ -37,9 +40,9 @@ class _QuadraticValue:
         observations: torch.Tensor,
         actions: torch.Tensor,
         *,
-        entropy_temperature: float,
+        entropy_rate: float,
     ) -> ValueEstimate:
-        del observations, entropy_temperature
+        del observations, entropy_rate
         q = -(actions - PREFERRED_ACTION.to(actions)).square().sum(dim=-1)
         return ValueEstimate(q=q, reward_q=q, entropy_q=torch.zeros_like(q))
 
@@ -63,7 +66,13 @@ class _ConstantBehaviorCloning:
         return policy.deterministic_action(observations).square().mean()
 
 
-def _learner(cfg: PmdCfg | None = None, bc: Any = None, value: Any = None) -> Pmd:
+def _learner(
+    cfg: PmdCfg | None = None,
+    bc: Any = None,
+    value: Any = None,
+    *,
+    step_dt: float = 1.0,
+) -> Pmd:
     torch.manual_seed(0)
     cfg = cfg or PmdCfg(
         actor_batch_size=64,
@@ -84,9 +93,27 @@ def _learner(cfg: PmdCfg | None = None, bc: Any = None, value: Any = None) -> Pm
         StateDependentTanhPolicy(model),
         value or _QuadraticValue(),
         cfg=cfg,
+        step_dt=step_dt,
         device=torch.device("cpu"),
         bc=bc,
     )
+
+
+def test_collection_policy_kl_measures_cumulative_not_last_projection_drift():
+    learner = _learner()
+    rollout = build_rollout(num_envs=2, horizon=8, rollout_id=0, policy_version=0)
+    learner.observe_rollout(rollout)
+    replay = build_replay([rollout])
+    reference = learner.policy.snapshot()
+    for _ in range(3):
+        metrics = learner.actor_update(replay)
+    mean, spread = decomposed_policy_kl(
+        reference, learner.policy, learner._collection_observations
+    )
+    assert metrics["PMD/collection_policy_kl"] == pytest.approx(float(mean + spread))
+    assert metrics["PMD/collection_policy_kl"] > 0
+    learner.observe_rollout(rollout)
+    assert learner._collection_policy_metrics()["PMD/collection_policy_kl"] == 0
 
 
 def _replay():
@@ -98,6 +125,42 @@ def _mean_q(policy) -> float:
     with torch.no_grad():
         actions = policy.deterministic_action(observations)
     return float(-(actions - PREFERRED_ACTION).square().sum(dim=-1).mean().item())
+
+
+def test_policy_improvement_includes_current_dt_scaled_entropy() -> None:
+    cfg = PmdCfg(
+        entropy_rate=0.4,
+        actor_batch_size=64,
+        candidate_actions=16,
+        projection_steps=2,
+    )
+    learner = _learner(cfg, step_dt=0.05)
+    replay = _replay()
+    batch = replay.sample(
+        cfg.actor_batch_size,
+        generator=torch.Generator().manual_seed(11),
+        device=torch.device("cpu"),
+    )
+    candidates = learner._candidate_batch(
+        batch.policy_observations,
+        batch.critic_observations,
+        generator=torch.Generator().manual_seed(13),
+    )
+    soft_improvement_q = (
+        candidates.value.q - 0.05 * 0.4 * candidates.reference_log_probability
+    )
+    expected = adaptive_exponential_target(
+        soft_improvement_q,
+        candidates.reference_log_probability,
+        beta=cfg.beta,
+        target_kl=cfg.candidate_target_kl,
+        coefficient_min=cfg.q_coefficient_min,
+        coefficient_max=cfg.q_coefficient_max,
+        bisection_steps=cfg.coefficient_bisection_steps,
+    )
+
+    assert learner.entropy_step_coefficient == pytest.approx(0.02)
+    torch.testing.assert_close(candidates.target.probabilities, expected.probabilities)
 
 
 def test_projection_respects_the_actor_kl_bound() -> None:
@@ -113,7 +176,7 @@ def test_projection_respects_the_actor_kl_bound() -> None:
     assert metrics["PMD/actor_spread_kl"] <= learner.cfg.actor_spread_projection_kl
     # States outside the projection batch may differ, but not by orders.
     held_out_kl = float(
-        latent_policy_kl(reference, learner.policy, observations).item()
+        sum(decomposed_policy_kl(reference, learner.policy, observations)).item()
     )
     assert held_out_kl <= 5.0 * learner.cfg.actor_projection_kl
     assert 1 <= metrics["PMD/projection_steps_taken"] <= learner.cfg.projection_steps
@@ -225,8 +288,8 @@ def test_noise_weighted_projections_stay_inside_the_spread_ceiling() -> None:
     class _NoisyValue(_QuadraticValue):
         """A critic with no signal: weights are pure noise, as early training."""
 
-        def mean(self, observations, actions, *, entropy_temperature):
-            del observations, entropy_temperature
+        def mean(self, observations, actions, *, entropy_rate):
+            del observations, entropy_rate
             q = torch.randn(actions.shape[0], generator=None)
             return ValueEstimate(q=q, reward_q=q, entropy_q=torch.zeros_like(q))
 

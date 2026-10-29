@@ -10,22 +10,15 @@ torch = pytest.importorskip("torch")
 nn = pytest.importorskip("torch.nn")
 
 from algorithms.bc import BC, BCCfg
-from algorithms.ppo_with_bc import make_ppo_with_bc_cls
-from storage.obs_action_storage import ObsActionBufCfg, ObsActionBuffer
-from utils.runtime_context import RuntimeContext
+from algorithms.on_policy.ppo_bc import make_ppo_with_bc_cls
+from storage.expert_dataset import ExpertObsActionDataset
 
 # ---------------------------------------------------------------------------
-# ObsActionBuffer
+# ExpertObsActionDataset
 # ---------------------------------------------------------------------------
 
 
-def _make_buffer() -> ObsActionBuffer:
-    ctx = RuntimeContext(num_envs=1, feature_dim=2, device="cpu")
-    return ObsActionBuffer(cfg=ObsActionBufCfg(), ctx=ctx)
-
-
-def test_obs_action_buffer_load_and_sample_round_trip():
-    buf = _make_buffer()
+def test_expert_dataset_load_and_sample_round_trip():
     ep1 = (
         {"policy": {"x": torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3)}},
         torch.arange(5 * 2, dtype=torch.float32).reshape(5, 2),
@@ -34,7 +27,7 @@ def test_obs_action_buffer_load_and_sample_round_trip():
         {"policy": {"x": torch.arange(4 * 3, dtype=torch.float32).reshape(4, 3) + 100}},
         torch.arange(4 * 2, dtype=torch.float32).reshape(4, 2) + 100,
     )
-    buf.load_episodes([ep1, ep2])
+    buf = ExpertObsActionDataset([ep1, ep2])
     assert len(buf) == 9
     assert buf.action_dim == 2
 
@@ -43,22 +36,19 @@ def test_obs_action_buffer_load_and_sample_round_trip():
     assert obs_mb["policy"]["x"].shape == (4, 3)
 
 
-def test_obs_action_buffer_rejects_mismatched_T():
-    buf = _make_buffer()
-    bad = (
-        {"policy": {"x": torch.zeros(5, 3)}},
-        torch.zeros(4, 2),  # mismatch
-    )
-    with pytest.raises(ValueError, match="first dim must equal"):
-        buf.load_episodes([bad])
+def test_expert_dataset_rejects_observations_and_actions_of_different_length():
+    bad = ({"policy": {"x": torch.zeros(5, 3)}}, torch.zeros(4, 2))
+
+    with pytest.raises(ValueError, match="disagree on length"):
+        ExpertObsActionDataset([bad])
 
 
-def test_obs_action_buffer_rejects_leaf_structure_mismatch():
-    buf = _make_buffer()
+def test_expert_dataset_rejects_episodes_with_different_observation_leaves():
     ep1 = ({"policy": {"x": torch.zeros(3, 2)}}, torch.zeros(3, 2))
     ep2 = ({"policy": {"y": torch.zeros(3, 2)}}, torch.zeros(3, 2))
-    with pytest.raises(ValueError, match="leaf structure mismatch"):
-        buf.load_episodes([ep1, ep2])
+
+    with pytest.raises(ValueError, match="observation leaves"):
+        ExpertObsActionDataset([ep1, ep2])
 
 
 # ---------------------------------------------------------------------------
@@ -94,10 +84,9 @@ class _FakeMLPActor(nn.Module):
 
 
 def _make_bc_setup(loss_type: str) -> tuple[BC, _FakeMLPActor]:
-    buf = _make_buffer()
     expert_obs = torch.randn(64, 3)
     expert_actions = (expert_obs @ torch.randn(3, 2)) + 0.1
-    buf.load_episodes([({"policy": {"x": expert_obs}}, expert_actions)])
+    buf = ExpertObsActionDataset([({"policy": {"x": expert_obs}}, expert_actions)])
 
     bc = BC(
         cfg=BCCfg(weight=1.0, loss_type=loss_type, batch_size=32),
@@ -135,12 +124,12 @@ def test_bc_validation_loss_none_without_split():
 @pytest.mark.parametrize("loss_type", ["nll", "mse"])
 def test_bc_validation_loss_is_float_and_gradless(loss_type: str):
     torch.manual_seed(0)
-    train_buf = _make_buffer()
-    train_buf.load_episodes(
+    train_buf = ExpertObsActionDataset(
         [({"policy": {"x": torch.randn(32, 3)}}, torch.randn(32, 2))]
     )
-    val_buf = _make_buffer()
-    val_buf.load_episodes([({"policy": {"x": torch.randn(16, 3)}}, torch.randn(16, 2))])
+    val_buf = ExpertObsActionDataset(
+        [({"policy": {"x": torch.randn(16, 3)}}, torch.randn(16, 2))]
+    )
 
     bc = BC(
         cfg=BCCfg(weight=1.0, loss_type=loss_type, batch_size=8),
@@ -156,15 +145,17 @@ def test_bc_validation_loss_is_float_and_gradless(loss_type: str):
 
 
 def test_bc_loss_rejects_unknown_loss_type():
-    buf = _make_buffer()
-    buf.load_episodes([({"policy": {"x": torch.zeros(2, 3)}}, torch.zeros(2, 2))])
+    buf = ExpertObsActionDataset(
+        [({"policy": {"x": torch.zeros(2, 3)}}, torch.zeros(2, 2))]
+    )
     with pytest.raises(ValueError, match="loss_type"):
         BC(cfg=BCCfg(loss_type="bogus"), storage=buf)
 
 
 def test_bc_weight_validation():
-    buf = _make_buffer()
-    buf.load_episodes([({"policy": {"x": torch.zeros(2, 3)}}, torch.zeros(2, 2))])
+    buf = ExpertObsActionDataset(
+        [({"policy": {"x": torch.zeros(2, 3)}}, torch.zeros(2, 2))]
+    )
     with pytest.raises(ValueError, match="weight"):
         BC(cfg=BCCfg(weight=1.5), storage=buf)
 
@@ -223,17 +214,16 @@ class _TinyActor(nn.Module):
         return self._distribution.log_prob(actions).sum(dim=-1)
 
 
+class _FullDatasetOnEveryBatch(ExpertObsActionDataset):
+    """Sample the whole dataset every time, so the gradient test is exact."""
+
+    def sample(self, batch_size: int, device):
+        del batch_size
+        return self.all_pairs(device)
+
+
 def _make_full_dataset_buffer(expert_x, expert_actions):
-    """Build a buffer that samples without replacement so a batch_size=N
-    minibatch is exactly the full dataset (in permuted order). Makes the
-    convex-combination test analytically exact."""
-    ctx = RuntimeContext(num_envs=1, feature_dim=2, device="cpu")
-    buf = ObsActionBuffer(
-        cfg=ObsActionBufCfg(sample_with_replacement=False),
-        ctx=ctx,
-    )
-    buf.load_episodes([({"policy": {"x": expert_x}}, expert_actions)])
-    return buf
+    return _FullDatasetOnEveryBatch([({"policy": {"x": expert_x}}, expert_actions)])
 
 
 def test_ppo_with_bc_gradient_is_convex_combination():
@@ -280,8 +270,9 @@ def test_ppo_with_bc_gradient_is_convex_combination():
 def test_ppo_with_bc_weight_zero_passes_through():
     """weight=0 should behave exactly like the base PPO update."""
     torch.manual_seed(0)
-    buf = _make_buffer()
-    buf.load_episodes([({"policy": {"x": torch.randn(4, 3)}}, torch.randn(4, 2))])
+    buf = ExpertObsActionDataset(
+        [({"policy": {"x": torch.randn(4, 3)}}, torch.randn(4, 2))]
+    )
     bc = BC(cfg=BCCfg(weight=0.0, loss_type="mse", batch_size=4), storage=buf)
 
     W_target = torch.tensor([[2.0, 0.0], [0.0, 0.0], [0.0, 0.0]])
@@ -356,7 +347,7 @@ def test_obs_action_hdf5_loader_round_trip(tmp_path: Path):
 def test_bounded_policy_bc_rejects_out_of_range_expert_actions() -> None:
     torch = pytest.importorskip("torch")
     from algorithms.bc import BC, BCCfg
-    from algorithms.state_dependent_tanh_actor import (
+    from algorithms.off_policy.actor import (
         StateDependentTanhGaussianActor,
         StateDependentTanhPolicy,
     )
@@ -381,7 +372,7 @@ def test_bounded_policy_bc_rejects_out_of_range_expert_actions() -> None:
 def test_bounded_policy_bc_scores_in_range_expert_actions() -> None:
     torch = pytest.importorskip("torch")
     from algorithms.bc import BC, BCCfg
-    from algorithms.state_dependent_tanh_actor import (
+    from algorithms.off_policy.actor import (
         StateDependentTanhGaussianActor,
         StateDependentTanhPolicy,
     )
@@ -402,3 +393,28 @@ def test_bounded_policy_bc_scores_in_range_expert_actions() -> None:
     loss = bc.compute_policy_loss(policy)
 
     assert loss.ndim == 0 and torch.isfinite(loss)
+
+
+def test_tanh_nll_rejects_clipped_expert_actions_but_mse_accepts_them() -> None:
+    torch = pytest.importorskip("torch")
+    from algorithms.bc import BC, BCCfg
+    from algorithms.off_policy.actor import (
+        StateDependentTanhGaussianActor,
+        StateDependentTanhPolicy,
+    )
+
+    class _Storage:
+        def sample(self, batch_size, device):
+            return torch.zeros(batch_size, 3), torch.ones(batch_size, 2)
+
+    policy = StateDependentTanhPolicy(
+        StateDependentTanhGaussianActor(3, 2, hidden_dims=(8,), action_bound=1)
+    )
+    with pytest.raises(ValueError, match="NLL is undefined"):
+        BC(
+            cfg=BCCfg(weight=1, loss_type="nll"), storage=_Storage()
+        ).compute_policy_loss(policy)
+    loss = BC(
+        cfg=BCCfg(weight=1, loss_type="mse"), storage=_Storage()
+    ).compute_policy_loss(policy)
+    assert torch.isfinite(loss)

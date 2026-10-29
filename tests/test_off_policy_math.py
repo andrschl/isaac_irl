@@ -4,25 +4,27 @@ import math
 
 import pytest
 import torch
-import torch.nn as nn
+from conftest import build_rollout
 
 from algorithms.bc import BCCfg, build_bc_alg
-from algorithms.exponential_policy import (
+from algorithms.off_policy.exponential_target import (
     adaptive_exponential_target,
     exponential_log_weights,
     exponential_target,
 )
-from algorithms.sac import Sac
-from algorithms.soft_value import entropy_return_td_target, soft_task_q_td_target
-from algorithms.successor_ensemble import (
+from algorithms.off_policy.values.networks import (
     SuccessorFeatureEnsemble,
-    estimate_successor_return_scale,
     successor_ensemble_td_target,
     successor_return_scale_from_second_moment,
+    successor_return_span,
 )
-from config.off_policy import OffPolicyTrainCfg, SacCfg
-from reward_model.fixed import FixedLinearReward
-from utils.runtime_context import RuntimeContext
+from algorithms.off_policy.values.targets import (
+    entropy_return_td_target,
+    soft_task_q_td_target,
+)
+from config.schema import OffPolicyTrainCfg
+from interfaces import RuntimeContext
+from reward.fixed import FixedLinearReward
 
 
 def test_exponential_target_uses_proposal_correction() -> None:
@@ -45,11 +47,11 @@ def test_beta_endpoints_match_boltzmann_and_mirror_targets() -> None:
     q_values = torch.tensor([[0.1, 0.4, -0.2]])
     log_pi_old = torch.tensor([[-0.3, -0.8, -1.7]])
 
-    sac_family = exponential_target(q_values, log_pi_old, beta=0.0, q_coefficient=3.0)
+    boltzmann = exponential_target(q_values, log_pi_old, beta=0.0, q_coefficient=3.0)
     mirror = exponential_target(q_values, log_pi_old, beta=1.0, q_coefficient=3.0)
 
     torch.testing.assert_close(
-        sac_family.probabilities,
+        boltzmann.probabilities,
         torch.softmax(-log_pi_old + 3.0 * q_values, dim=1),
     )
     torch.testing.assert_close(
@@ -98,12 +100,12 @@ def test_successor_target_is_reward_and_entropy_independent() -> None:
     torch.testing.assert_close(target, torch.tensor([[2.8, 2.2], [0.2, 0.8]]))
 
 
-def test_entropy_and_direct_soft_targets_share_sac_semantics() -> None:
+def test_entropy_and_direct_soft_targets_share_max_entropy_semantics() -> None:
     next_log_pi = torch.tensor([-2.0, 0.5])
     next_entropy_q = torch.tensor([3.0, 4.0])
     bootstrap = torch.tensor([True, False])
     entropy_target = entropy_return_td_target(
-        next_log_pi, next_entropy_q, bootstrap, gamma=0.9
+        next_log_pi, next_entropy_q, bootstrap, gamma=0.9, step_dt=0.5
     )
     direct_target = soft_task_q_td_target(
         torch.tensor([1.0, 2.0]),
@@ -111,11 +113,12 @@ def test_entropy_and_direct_soft_targets_share_sac_semantics() -> None:
         torch.tensor([3.0, 4.0]),
         bootstrap,
         gamma=0.9,
-        entropy_coefficient=0.2,
+        entropy_rate=0.2,
+        step_dt=0.5,
     )
 
-    torch.testing.assert_close(entropy_target, torch.tensor([4.5, 0.0]))
-    torch.testing.assert_close(direct_target, torch.tensor([4.06, 2.0]))
+    torch.testing.assert_close(entropy_target, torch.tensor([3.6, 0.0]))
+    torch.testing.assert_close(direct_target, torch.tensor([3.88, 2.0]))
 
 
 def test_successor_ensemble_has_explicit_head_batch_feature_shape() -> None:
@@ -132,18 +135,46 @@ def test_successor_ensemble_has_explicit_head_batch_feature_shape() -> None:
     observations = torch.randn(11, 3)
     actions = torch.randn(11, 2)
 
+    latent = ensemble.latent(observations, actions)
+
     assert ensemble(observations, actions).shape == (5, 11, 4)
-    assert ensemble.head(2, observations, actions).shape == (11, 4)
-    assert ensemble.mean(observations, actions).shape == (11, 4)
+    assert ensemble.apply_head(2, latent).shape == (11, 4)
     assert ensemble.heads[0] is not ensemble.heads[1]
 
 
 def test_successor_return_scale_is_fixed_per_feature() -> None:
     features = torch.tensor([[1.0, 0.0], [-1.0, 2.0]])
-    scale = estimate_successor_return_scale(features, gamma=0.5, minimum_scale=1.0e-3)
+    scale = successor_return_scale_from_second_moment(
+        features.square().mean(dim=0), gamma=0.5, minimum_scale=1.0e-3
+    )
 
     expected_rms = features.square().mean(dim=0).sqrt()
     torch.testing.assert_close(scale, expected_rms / 0.5)
+
+
+def test_an_undiscounted_successor_sum_is_scaled_by_the_episode() -> None:
+    """Nothing decays at gamma=1, so the episode is what bounds the sum.
+
+    A finite-horizon task has a perfectly good scale - H steps of features -
+    but it is not 1/(1-gamma), and reading that limit at gamma=1 gives infinity.
+    """
+    features = torch.tensor([[1.0, 0.0], [-1.0, 2.0]])
+    second_moment = features.square().mean(dim=0)
+
+    scale = successor_return_scale_from_second_moment(
+        second_moment, gamma=1.0, minimum_scale=1.0e-3, horizon=250
+    )
+
+    torch.testing.assert_close(scale, second_moment.sqrt() * 250.0)
+    assert successor_return_span(0.98) == pytest.approx(50.0)
+    assert successor_return_span(1.0, 250) == 250.0
+
+
+def test_gamma_one_without_a_horizon_is_refused() -> None:
+    with pytest.raises(ValueError, match="positive episode horizon"):
+        successor_return_scale_from_second_moment(
+            torch.ones(2), gamma=1.0, minimum_scale=1.0
+        )
 
 
 def test_fixed_linear_reward_has_no_trainable_parameters() -> None:
@@ -156,12 +187,12 @@ def test_fixed_linear_reward_has_no_trainable_parameters() -> None:
     torch.testing.assert_close(reward.score(features), torch.tensor([0.0]))
 
 
-def test_update_to_data_ratio_is_measured_in_transitions() -> None:
-    cfg = OffPolicyTrainCfg(updates_per_transition=0.25)
-
-    assert cfg.critic_updates_for(2_048) == 512
-    with pytest.raises(ValueError, match="transition_count"):
-        cfg.critic_updates_for(0)
+def test_episode_and_compute_budgets_are_explicit() -> None:
+    cfg = OffPolicyTrainCfg(episodes_per_batch=16, critic_updates_per_batch=512)
+    assert cfg.episodes_per_batch == 16
+    assert cfg.critic_updates_per_batch == 512
+    with pytest.raises(ValueError, match="critic_updates_per_batch"):
+        OffPolicyTrainCfg(critic_updates_per_batch=0)
 
 
 def test_zero_bc_weight_constructs_no_loader_or_loss() -> None:
@@ -173,31 +204,6 @@ def test_zero_bc_weight_constructs_no_loader_or_loss() -> None:
     )
 
     assert bc is None
-
-
-class _MinimalPolicy:
-    def __init__(self) -> None:
-        self.model = nn.Linear(2, 1)
-
-    def parameters(self):
-        return self.model.parameters()
-
-
-def test_sac_constructs_no_previous_policy_snapshot() -> None:
-    policy = _MinimalPolicy()
-    cfg = SacCfg(
-        initial_entropy_temperature=0.0,
-        automatic_entropy_tuning=False,
-    )
-    learner = Sac(
-        policy,
-        object(),
-        cfg=cfg,
-        action_dim=1,
-        device=torch.device("cpu"),
-    )
-
-    assert not hasattr(learner, "previous_policy")
 
 
 def test_output_scale_refit_preserves_successor_predictions() -> None:
@@ -256,7 +262,9 @@ def test_return_scale_tracks_features_that_only_appear_later() -> None:
     early[:, 0] = 1.0
     late = torch.ones(64, 2)
 
-    early_scale = estimate_successor_return_scale(early, gamma=0.99, minimum_scale=1.0)
+    early_scale = successor_return_scale_from_second_moment(
+        early.square().mean(dim=0), gamma=0.99, minimum_scale=1.0
+    )
     combined_second_moment = torch.cat((early, late)).square().mean(dim=0)
     later_scale = successor_return_scale_from_second_moment(
         combined_second_moment, gamma=0.99, minimum_scale=1.0
@@ -282,16 +290,16 @@ def test_apply_head_matches_recomputing_the_trunk() -> None:
     actions = torch.randn(9, 2)
 
     latent = ensemble.latent(observations, actions)
+    per_head = ensemble(observations, actions)
 
     for head_index in range(3):
         torch.testing.assert_close(
-            ensemble.apply_head(head_index, latent),
-            ensemble.head(head_index, observations, actions),
+            ensemble.apply_head(head_index, latent), per_head[head_index]
         )
 
 
 def test_control_reduction_selects_mean_or_pessimistic_minimum() -> None:
-    from algorithms.value_backends import _reduce_heads
+    from algorithms.off_policy.values.backends import _reduce_heads
 
     per_head = torch.tensor([[1.0, 4.0], [3.0, 2.0], [8.0, 0.0]])
 
@@ -303,18 +311,114 @@ def test_control_reduction_selects_mean_or_pessimistic_minimum() -> None:
         _reduce_heads(per_head, "median")
 
 
-def test_control_reduction_is_configured_not_hardcoded() -> None:
-    from config.off_policy import DirectQCfg, SuccessorQCfg
+def test_direct_control_reduction_is_configured_not_hardcoded() -> None:
+    from config.schema import DirectQCfg
 
     assert DirectQCfg(control_reduction="mean").control_reduction == "mean"
-    assert SuccessorQCfg(control_reduction="min").control_reduction == "min"
     with pytest.raises(ValueError, match="control_reduction"):
         DirectQCfg(control_reduction="min-of-two")
 
 
+def test_successor_control_quantile_is_percentage_based() -> None:
+    from config.schema import SuccessorQCfg
+
+    cfg = SuccessorQCfg()
+    assert cfg.control_quantile == 0.25
+
+
+def test_ensemble_quantile_selects_the_lower_quartile_per_batch_item() -> None:
+    from algorithms.off_policy.values.backends import _ensemble_quantile
+
+    per_head = torch.tensor(
+        [[9.0, 0.0], [1.0, 8.0], [7.0, 2.0], [3.0, 6.0], [5.0, 4.0]]
+    )
+    expected = torch.tensor([3.0, 2.0])
+
+    torch.testing.assert_close(_ensemble_quantile(per_head, 0.25), expected)
+    torch.testing.assert_close(
+        _ensemble_quantile(per_head[[3, 0, 4, 1, 2]], 0.25), expected
+    )
+
+
+def test_ensemble_quantile_interpolates_and_handles_endpoints() -> None:
+    from algorithms.off_policy.values.backends import _ensemble_quantile
+
+    four_heads = torch.tensor([[0.0], [4.0], [8.0], [12.0]])
+    torch.testing.assert_close(
+        _ensemble_quantile(four_heads, 0.25), torch.tensor([3.0])
+    )
+    torch.testing.assert_close(_ensemble_quantile(four_heads, 0.0), torch.tensor([0.0]))
+    torch.testing.assert_close(_ensemble_quantile(four_heads, 0.5), torch.tensor([6.0]))
+
+    one_head = torch.tensor([[7.0, -2.0]])
+    torch.testing.assert_close(_ensemble_quantile(one_head, 0.25), one_head[0])
+
+
+@pytest.mark.parametrize(
+    "quantile, expected",
+    [
+        (0.25, [2.0, 4.0]),
+        (0.5, [4.0, 6.0]),
+        (0.75, [8.0, 7.0]),
+        (0.9, [10.4, 7.6]),
+        (1.0, [12.0, 8.0]),
+    ],
+)
+def test_three_head_optimism_sweep_interpolates_scalar_scores(quantile, expected):
+    from algorithms.off_policy.values.backends import _ensemble_quantile
+
+    # Scalarized Q scores [M=3, B=2], deliberately not sorted by head.
+    per_head = torch.tensor([[12.0, 2.0], [0.0, 8.0], [4.0, 6.0]])
+    torch.testing.assert_close(
+        _ensemble_quantile(per_head, quantile), torch.tensor(expected)
+    )
+
+
+@pytest.mark.parametrize("quantile", [-0.1, 1.1])
+def test_successor_control_quantile_rejects_values_outside_the_unit_range(
+    quantile: float,
+) -> None:
+    from config.schema import SuccessorQCfg
+
+    with pytest.raises(ValueError, match="control_quantile"):
+        SuccessorQCfg(control_quantile=quantile)
+
+
+@pytest.mark.parametrize(
+    "quantile, expected_reward_q", [(0.25, -0.5), (0.9, 1.6), (1.0, 2.0)]
+)
+def test_successor_quantile_is_applied_after_signed_reward_scalarization(
+    quantile: float, expected_reward_q: float
+) -> None:
+    from algorithms.off_policy.values.backends import SuccessorActionValue
+
+    successors = torch.tensor(
+        [
+            [[1.0, 0.0]],
+            [[0.0, 1.0]],
+            [[2.0, 0.0]],
+            [[0.0, 2.0]],
+            [[1.0, 1.0]],
+        ]
+    )
+    backend = SuccessorActionValue.__new__(SuccessorActionValue)
+    backend.online = lambda observations, actions: successors
+    backend.reward = FixedLinearReward(
+        ("positive", "negative"), torch.tensor([2.0, -1.0]), step_dt=0.5
+    )
+    backend.control_quantile = quantile
+    backend.entropy = None
+
+    estimate = backend.mean(torch.zeros(1, 3), torch.zeros(1, 2), entropy_rate=0.0)
+
+    torch.testing.assert_close(estimate.reward_q, torch.tensor([expected_reward_q]))
+    torch.testing.assert_close(estimate.q, estimate.reward_q)
+    torch.testing.assert_close(estimate.entropy_q, torch.zeros(1))
+
+
 def test_direct_q_clips_its_bootstrap_target_by_default() -> None:
     """Independent per-head targets are M unclipped Q-learners, not an ensemble."""
-    from config.off_policy import DirectQCfg
+    from config.schema import DirectQCfg
 
     cfg = DirectQCfg()
     assert cfg.target_reduction == "min"
@@ -330,7 +434,7 @@ def test_direct_q_clips_its_bootstrap_target_by_default() -> None:
 
 def test_bootstrap_value_takes_a_subset_minimum() -> None:
     """The clipped target is a minimum over a fresh random subset of heads."""
-    from algorithms.value_backends import DirectActionValue
+    from algorithms.off_policy.values.backends import DirectActionValue
 
     backend = DirectActionValue.__new__(DirectActionValue)
     backend.num_heads = 4
@@ -362,7 +466,7 @@ def test_bootstrap_value_takes_a_subset_minimum() -> None:
 
 def test_clipped_target_never_exceeds_the_independent_one() -> None:
     """Whatever subset is drawn, clipping can only lower a head's target."""
-    from algorithms.value_backends import DirectActionValue
+    from algorithms.off_policy.values.backends import DirectActionValue
 
     backend = DirectActionValue.__new__(DirectActionValue)
     backend.num_heads = 3
@@ -380,8 +484,7 @@ def test_clipped_target_never_exceeds_the_independent_one() -> None:
 
 
 def test_bro_critic_is_layer_normalized_and_residual() -> None:
-    from algorithms.bro_network import BroNet
-    from algorithms.scalar_action_value import ScalarActionValue
+    from algorithms.off_policy.values.networks import BroNet, ScalarActionValue
 
     critic = ScalarActionValue(3, 2, width=16, residual_blocks=2)
     network = critic.network
@@ -398,7 +501,7 @@ def test_bro_critic_is_layer_normalized_and_residual() -> None:
 
 def test_a_bro_critic_does_not_explode_far_off_distribution() -> None:
     """LayerNorm is here to bound extrapolation; check it actually does."""
-    from algorithms.scalar_action_value import ScalarActionValue
+    from algorithms.off_policy.values.networks import ScalarActionValue
 
     torch.manual_seed(0)
     critic = ScalarActionValue(3, 2, width=32, residual_blocks=2)
@@ -412,7 +515,7 @@ def test_a_bro_critic_does_not_explode_far_off_distribution() -> None:
 
 
 def test_reset_reinitializes_every_head() -> None:
-    from algorithms.scalar_action_value import ScalarActionValueEnsemble
+    from algorithms.off_policy.values.networks import ScalarActionValueEnsemble
 
     torch.manual_seed(0)
     ensemble = ScalarActionValueEnsemble(3, 2, num_heads=3, width=16, residual_blocks=1)
@@ -448,3 +551,74 @@ def test_successor_reset_keeps_the_output_scale_and_zero_heads() -> None:
     # A freshly reset head predicts no successor return, as at construction.
     predictions = ensemble(torch.randn(4, 3), torch.randn(4, 2))
     torch.testing.assert_close(predictions, torch.zeros_like(predictions))
+
+
+def test_the_entropy_critic_exists_only_when_a_temperature_asks_for_it() -> None:
+    """Successor features are reward-independent, so entropy needs its own critic."""
+    from algorithms.off_policy.values.backends import SuccessorActionValue
+    from config.schema import OffPolicyTrainCfg, SuccessorQCfg
+    from reward.fixed import FixedLinearReward
+
+    def build(use_entropy_critic: bool) -> SuccessorActionValue:
+        return SuccessorActionValue(
+            observation_dim=3,
+            action_dim=2,
+            feature_dim=2,
+            reward=FixedLinearReward(
+                ("alive", "effort"), torch.tensor([1.0, -0.1]), step_dt=0.02
+            ),
+            cfg=SuccessorQCfg(num_heads=2, width=16, residual_blocks=1, latent_dim=8),
+            train_cfg=OffPolicyTrainCfg(),
+            use_entropy_critic=use_entropy_critic,
+            step_dt=0.02,
+            device=torch.device("cpu"),
+            seed=0,
+        )
+
+    assert build(False).entropy is None
+    assert build(True).entropy is not None
+
+
+def test_an_entropy_checkpoint_does_not_load_into_a_backend_without_one() -> None:
+    from algorithms.off_policy.values.backends import SuccessorActionValue
+    from config.schema import OffPolicyTrainCfg, SuccessorQCfg
+    from reward.fixed import FixedLinearReward
+
+    def build(use_entropy_critic: bool) -> SuccessorActionValue:
+        return SuccessorActionValue(
+            observation_dim=3,
+            action_dim=2,
+            feature_dim=2,
+            reward=FixedLinearReward(
+                ("alive", "effort"), torch.tensor([1.0, -0.1]), step_dt=0.02
+            ),
+            cfg=SuccessorQCfg(num_heads=2, width=16, residual_blocks=1, latent_dim=8),
+            train_cfg=OffPolicyTrainCfg(),
+            use_entropy_critic=use_entropy_critic,
+            step_dt=0.02,
+            device=torch.device("cpu"),
+            seed=0,
+        )
+
+    with_entropy = build(True)
+    with_entropy.fit_feature_scale(build_rollout(feature_dim=2))
+    state = with_entropy.save_state()
+
+    with pytest.raises(ValueError, match="entropy-critic configuration differs"):
+        build(False).load_state(state, load_optimizer=True)
+
+
+def test_an_optimistic_quantile_scores_above_the_median() -> None:
+    """Optimism is the other half of the range: pulled toward disagreement."""
+    from algorithms.off_policy.values.backends import _ensemble_quantile
+
+    per_head = torch.tensor([[1.0, 5.0], [2.0, 6.0], [9.0, 7.0]])
+
+    pessimistic = _ensemble_quantile(per_head, 0.0)
+    median = _ensemble_quantile(per_head, 0.5)
+    optimistic = _ensemble_quantile(per_head, 1.0)
+
+    torch.testing.assert_close(pessimistic, torch.tensor([1.0, 5.0]))
+    torch.testing.assert_close(median, torch.tensor([2.0, 6.0]))
+    torch.testing.assert_close(optimistic, torch.tensor([9.0, 7.0]))
+    assert bool((optimistic >= median).all()) and bool((median >= pessimistic).all())

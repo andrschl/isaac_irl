@@ -83,24 +83,57 @@ def test_load_feature_episodes_accepts_named_hdf5_payload(tmp_path: Path):
     assert torch.allclose(episodes[1][:, 1], torch.ones(4))  # lift
 
 
-def test_load_feature_episodes_rejects_hdf5_feature_name_mismatch(tmp_path: Path):
+def _write_named_features(path: Path, **columns: torch.Tensor) -> str:
     h5py = pytest.importorskip("h5py")
-    payload_path = tmp_path / "expert_bad_names.hdf5"
-
-    with h5py.File(payload_path, "w", track_order=True) as file_handle:
+    with h5py.File(path, "w", track_order=True) as file_handle:
         data_group = file_handle.create_group("data", track_order=True)
         _set_current_feature_semantics(data_group)
         demo_0 = data_group.create_group("demo_0", track_order=True)
-        demo_0_features = demo_0.create_group("features", track_order=True)
-        demo_0_features.create_dataset("reach", data=torch.ones(3).numpy())
-        demo_0_features.create_dataset("lift", data=torch.ones(3).numpy())
+        features = demo_0.create_group("features", track_order=True)
+        for name, values in columns.items():
+            features.create_dataset(name, data=values.numpy())
+    return str(path)
 
-    with pytest.raises(ValueError, match="feature-name mismatch"):
+
+def test_load_feature_episodes_rejects_a_feature_the_file_does_not_hold(tmp_path: Path):
+    payload_path = _write_named_features(
+        tmp_path / "expert_bad_names.hdf5",
+        reach=torch.ones(3),
+        lift=torch.ones(3),
+    )
+
+    with pytest.raises(
+        ValueError, match=r"missing reward features \['success_bonus'\]"
+    ):
         load_feature_episodes(
-            str(payload_path),
+            payload_path,
             expected_feature_dim=2,
             expected_feature_names=["reach", "success_bonus"],
         )
+
+
+def test_load_feature_episodes_reads_a_subset_of_the_stored_columns(tmp_path: Path):
+    """One recording serves arms that learn over different feature subsets.
+
+    The arm that holds the sparse reward coefficient fixed fits fewer columns
+    than the recording stores. Requiring an exact name match would force a
+    separate recording per arm, and then the arms would differ by their data.
+    """
+    payload_path = _write_named_features(
+        tmp_path / "expert_extra_names.hdf5",
+        reach=torch.ones(3),
+        lift=2.0 * torch.ones(3),
+        terminal_success=3.0 * torch.ones(3),
+    )
+
+    episodes = load_feature_episodes(
+        payload_path,
+        expected_feature_dim=2,
+        expected_feature_names=["lift", "reach"],
+    )
+
+    assert len(episodes) == 1
+    torch.testing.assert_close(episodes[0][0], torch.tensor([2.0, 1.0]))
 
 
 def test_load_expert_success_rate_any_time(tmp_path: Path):
@@ -195,17 +228,17 @@ def test_install_expert_features_with_max_num_trajectories_loads_subset(tmp_path
     )
 
     from algorithms.irl import IrlAlgorithm, IRLCfg
+    from config.schema import RewardModelCfg
     from data import install_expert_features
     from interfaces import FeatureSpec
-    from reward_model import LinearFeatureRewardModel, RewardModelCfg
+    from reward import LinearFeatureRewardModel
 
     reward_model = LinearFeatureRewardModel(
-        RewardModelCfg(num_features=2, is_linear=True)
+        RewardModelCfg(is_linear=True), num_features=2
     )
     irl_alg = IrlAlgorithm(
         reward=reward_model,
         feature_spec=FeatureSpec(dim=2),
-        num_envs=1,
         gamma=0.99,
         cfg=IRLCfg(batch_size=2),
     )

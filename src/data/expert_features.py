@@ -54,18 +54,18 @@ def _validate_hdf5_feature_semantics(path: str) -> None:
     if mismatches:
         raise ValueError(
             "Demonstrations use missing or legacy reward-feature semantics "
-            f"{mismatches}. Regenerate them with record_synthetic_demos.py."
+            f"{mismatches}. Regenerate them with scripts/record_demos.py."
         )
 
 
 def _torch_load_payload(path: str) -> Any:
-    try:
-        return torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-    except TypeError:
-        pass
-    except Exception:
-        pass
-    return torch.load(path, map_location="cpu")
+    """Load a .pt demonstration file as tensors only.
+
+    ``weights_only=True`` is not a performance detail: the fallback it replaces
+    unpickles arbitrary objects, so a corrupt or untrusted demonstration file
+    would execute code instead of failing.
+    """
+    return torch.load(path, map_location="cpu", weights_only=True, mmap=True)
 
 
 def _tensor_to_feature_episodes(payload: torch.Tensor) -> list[torch.Tensor]:
@@ -105,89 +105,109 @@ def _extract_feature_episodes_from_torch_payload(payload: Any) -> list[torch.Ten
     return episodes
 
 
+def _resolve_feature_order(
+    feature_group: Any, expected_feature_names: list[str] | None, *, demo_key: str
+) -> list[str]:
+    """Decide the column order, and refuse a file that lacks a wanted feature.
+
+    With no expectation, the HDF5 group order wins: the recorder writes with
+    ``track_order=True``, so it is the reward-manager order the features were
+    captured in.
+
+    A named request is a *subset* request. One recording serves several arms,
+    and the arm that holds one reward coefficient fixed learns over fewer
+    columns than the recording stores; re-recording per subset would turn one
+    dataset into several. A requested name the file does not hold is still an
+    error - nothing can fill it in.
+    """
+    if not hasattr(feature_group, "keys"):
+        raise ValueError(
+            f"Demo '{demo_key}' uses a legacy feature format; expected a group "
+            "'features/<feature_name>'. Re-record it with scripts/record_demos.py."
+        )
+    available = [str(name) for name in feature_group.keys()]
+    if not available:
+        raise ValueError(f"Demo '{demo_key}' has an empty 'features' group.")
+    if expected_feature_names is None:
+        return available
+
+    expected = [str(name) for name in expected_feature_names]
+    missing = [name for name in expected if name not in available]
+    if missing:
+        raise ValueError(
+            f"Demo '{demo_key}' is missing reward features {sorted(missing)}; it "
+            f"holds {sorted(available)}. Re-record the demos with this feature "
+            "map, or match the ignored/forced terms it was recorded with."
+        )
+    return expected
+
+
+def _feature_column(
+    feature_node: Any, *, demo_key: str, feature_name: str
+) -> torch.Tensor:
+    """Read one feature's sequence as ``[T]``."""
+    if hasattr(feature_node, "keys"):
+        raise ValueError(
+            f"Demo '{demo_key}' feature '{feature_name}' must be a dataset of "
+            "shape [T] or [T,1], not a group."
+        )
+    values = torch.as_tensor(feature_node[...])
+    if values.ndim == 2 and int(values.shape[1]) == 1:
+        return rearrange(values, "t 1 -> t")
+    if values.ndim != 1:
+        raise ValueError(
+            f"Demo '{demo_key}' feature '{feature_name}' must have shape [T] or "
+            f"[T,1], got {tuple(values.shape)}."
+        )
+    return values
+
+
+def _episode_matrix(
+    feature_group: Any, feature_names: list[str], *, demo_key: str
+) -> torch.Tensor:
+    """Stack one demo's features into ``[T, D]`` in the given order."""
+    columns: list[torch.Tensor] = []
+    episode_length: int | None = None
+    for feature_name in feature_names:
+        values = _feature_column(
+            feature_group[feature_name], demo_key=demo_key, feature_name=feature_name
+        )
+        num_steps = int(values.shape[0])
+        if episode_length is None:
+            if num_steps == 0:
+                raise ValueError(
+                    f"Demo '{demo_key}' has an empty feature sequence '{feature_name}'."
+                )
+            episode_length = num_steps
+        elif num_steps != episode_length:
+            raise ValueError(
+                f"Demo '{demo_key}' feature lengths disagree: expected "
+                f"{episode_length}, feature '{feature_name}' has {num_steps}."
+            )
+        columns.append(values)
+    return torch.stack(columns, dim=1)
+
+
 def _extract_feature_episodes_from_hdf5(
     path: str,
     expected_feature_names: list[str] | None = None,
 ) -> list[torch.Tensor]:
-    def _episode_from_named_features(
-        feature_group: Any, *, demo_key: str
-    ) -> torch.Tensor:
-        if not hasattr(feature_group, "keys"):
-            raise ValueError(
-                f"Demo '{demo_key}' uses legacy feature format. Expected group 'features/<feature_name>'. "
-                "Regenerate demos with the simplified recorder."
-            )
-
-        available_feature_names = [str(name) for name in feature_group.keys()]
-        if len(available_feature_names) == 0:
-            raise ValueError(f"Demo '{demo_key}' has empty 'features' group.")
-
-        if expected_feature_names is None:
-            # Preserve the HDF5 group order. Demo files written by
-            # RobomimicDataCollector use track_order=True, so this matches the
-            # reward-manager feature order used online.
-            feature_names = available_feature_names
-        else:
-            expected_names = [str(name) for name in expected_feature_names]
-            available_set = set(available_feature_names)
-            expected_set = set(expected_names)
-            if available_set != expected_set:
-                missing = sorted(expected_set - available_set)
-                extra = sorted(available_set - expected_set)
-                raise ValueError(
-                    f"Demo '{demo_key}' feature-name mismatch: missing={missing}, extra={extra}. "
-                    "Regenerate demos with the current feature map, or pass matching ignored/forced terms."
-                )
-            feature_names = expected_names
-
-        columns: list[torch.Tensor] = []
-        expected_steps: int | None = None
-        for feature_name in feature_names:
-            feature_node = feature_group[feature_name]
-            if hasattr(feature_node, "keys"):
-                raise ValueError(
-                    f"Demo '{demo_key}' feature '{feature_name}' must be a dataset of shape [T] or [T,1]."
-                )
-
-            values = torch.as_tensor(feature_node[...])
-            if values.ndim == 2 and int(values.shape[1]) == 1:
-                values = rearrange(values, "t 1 -> t")
-            elif values.ndim != 1:
-                raise ValueError(
-                    f"Demo '{demo_key}' feature '{feature_name}' must have shape [T] or [T,1], "
-                    f"got {tuple(values.shape)}."
-                )
-
-            num_steps = int(values.shape[0])
-            if expected_steps is None:
-                if num_steps <= 0:
-                    raise ValueError(
-                        f"Demo '{demo_key}' has empty feature sequence '{feature_name}'."
-                    )
-                expected_steps = num_steps
-            elif num_steps != expected_steps:
-                raise ValueError(
-                    f"Demo '{demo_key}' feature length mismatch: expected {expected_steps}, "
-                    f"feature '{feature_name}' has length {num_steps}."
-                )
-
-            columns.append(rearrange(values, "t -> t 1"))
-
-        return torch.cat(columns, dim=1)
-
+    """Read every demo's feature trajectory from an HDF5 file."""
     episodes: list[torch.Tensor] = []
     for demo_key, demo_group in iter_hdf5_demos(
         path, payload_hint="features/<feature_name>"
     ):
         if "features" not in demo_group:
-            raise ValueError(f"Demo '{demo_key}' is missing required group 'features'.")
-        episodes.append(
-            _episode_from_named_features(demo_group["features"], demo_key=demo_key)
+            raise ValueError(f"Demo '{demo_key}' is missing the 'features' group.")
+        feature_group = demo_group["features"]
+        feature_names = _resolve_feature_order(
+            feature_group, expected_feature_names, demo_key=demo_key
         )
-
-    if len(episodes) == 0:
-        raise ValueError("No demos found under 'data/*' in HDF5 payload.")
-
+        episodes.append(
+            _episode_matrix(feature_group, feature_names, demo_key=demo_key)
+        )
+    if not episodes:
+        raise ValueError(f"No demos with features found in {path}.")
     return episodes
 
 
@@ -289,19 +309,12 @@ def install_expert_features(
     subset_strategy: str = "first",
     seed: int = 42,
 ) -> None:
-    """Load expert feature episodes from disk and add them to ``irl_alg``.
+    """Load expert feature episodes from disk into ``irl_alg``'s expert buffer.
 
-    Reads ``feature_spec.dim`` / ``feature_spec.names`` from the alg itself —
-    the caller doesn't need to pass them. The expert buffer must already be
-    initialized with ``num_envs == 1`` (``IrlAlgorithm.__init__`` does this).
+    The expected feature dimension and names come from the algorithm's own
+    spec, so a demonstration file recorded against a different reward space is
+    rejected here rather than silently mislabeled.
     """
-    expert_ctx = irl_alg.expert_storage.ctx
-    if int(expert_ctx.num_envs) != 1:
-        raise ValueError(
-            "Expert loader requires IrlAlgorithm.expert_storage with num_envs == 1, "
-            f"got {int(expert_ctx.num_envs)}."
-        )
-
     spec = irl_alg.feature_spec
     expected_feature_names = list(spec.names) if spec.names is not None else None
     episodes = load_feature_episodes(

@@ -1,18 +1,16 @@
 """Runner entry points for local training scripts."""
 
 from .console_logger import ConsoleLogger
-from .fixed_reward import FixedRewardRunner
 from .loggers import CompositeLogger, LogEvent, Logger, NoopLogger, WandbLogger
-from .runner import IrlRunner, IrlRunnerCfg
+from .runner import Runner, RunnerCfg
 
 __all__ = [
     "CompositeLogger",
     "ConsoleLogger",
-    "FixedRewardRunner",
-    "IrlRunner",
-    "IrlRunnerCfg",
     "LogEvent",
     "Logger",
     "NoopLogger",
+    "Runner",
+    "RunnerCfg",
     "WandbLogger",
 ]

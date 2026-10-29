@@ -1,0 +1,194 @@
+# Arm 2/4: sparse terminal reward + BC.
+#
+# Sparse finite-horizon Easy Lift, one of three arms of the batch-IRL study.
+# The arms differ in this file by `reward.source` and nothing else; everything
+# below is shared, so a difference in the results is a difference in the reward
+# signal. See docs/batch_irl_protocol.md for the protocol and how to launch it.
+#
+# The task pays one unit on the final transition of an episode that held the
+# goal for its last 25 steps, and nothing otherwise. Every dense Lift reward
+# term stays in the reward manager at weight zero, so it is still a feature phi
+# the reward learner fits - the environment simply stops paying for it.
+experiment_name: lift_sparse_bc
+run_name: ""          # optional suffix on the log directory
+logger: wandb         # wandb | noop
+wandb_project: isaac_irl
+
+seed: 42              # the study runs 42, 43 and 44
+# 100 cycles x 32 episodes x 250 steps = 800,000 physical training interactions.
+max_iterations: 100
+device: cuda:0
+
+# Every arm starts from the same behaviour-cloned actor; see scripts/train_bc.py.
+# Pass it with --init_policy_checkpoint.
+init_policy_checkpoint: null
+
+env:
+  name: Isaac-Lift-Cube-Franka-v0
+  variant: lift_easy
+  device: cuda:0
+  num_envs: 32              # one wave of 32 lanes is one complete episode batch
+  reward_curriculum: false  # a moving reward is not a reward this can be scored against
+  # The episode genuinely ends at H=250, so nothing bootstraps past it.
+  is_finite_horizon: true
+  terminal_success_reward: true
+  success_hold_steps: 25
+  success_threshold: 0.08
+  # The sparse terminal reward is the only success signal; a second one would
+  # pay for reaching the goal early, which this task deliberately does not.
+  add_success_bonus: false
+
+# The zeroed dense terms are re-included as features automatically, because
+# `terminal_success_reward` is what zeroed them.
+feature_map:
+  ignored_reward_terms: []
+  force_include_terms: []
+
+# One recording of ten complete successful episodes serves every arm, for BC,
+# for the IRL expert buffer, and for the protected replay partition. Launch with
+#   --expert_data_path $DEMOS --set algo.pmd.train.replay.demonstration_path=$DEMOS
+expert_data:
+  path: ""
+  num_trajectories: null   # null = all ten
+  subset_strategy: first
+
+reward:
+  # The environment's own reward, which on this task is the sparse
+  # terminal unit and nothing else. No reward is learned.
+  source: environment
+  fit_diagnostic: false
+
+  model:
+    is_linear: true        # a fixed and a learned coefficient add on one basis
+    hidden_dims: [256, 128, 64]   # dense only; unused here
+    activation: elu               # dense only; unused here
+    regularization: l2
+    regularization_strength: 1.0e-4
+    linear_projection: l2_ball    # unit-L2 projection after every reward step
+    linear_projection_radius: 1.0
+
+# Match episode feature expectations mu = E[sum_t dt * phi_t] under uniform
+# episode sampling. The follow-up run replaces gradient_steps with 64:
+#   --set irl.gradient_steps=64
+irl:
+  batch_size: 256
+  gradient_steps: 8
+  weight_decay: 1.0e-6
+  max_grad_norm: 1.0
+  reward_loss_coef: 1.0
+  reward_learning_rate: 1.0e-4
+  discount_gamma: null     # null = inherit the policy algorithm's gamma, here 1
+  # Undiscounted sums per attempted episode, failures included; no division by
+  # episode length, so a short failed episode is not rescaled into a good one.
+  normalize_returns_by_episode_length: false
+
+# Behavioral cloning as an online regularizer on top of the offline fit.
+bc:
+  weight: 0.1
+  loss_type: mse      # the offline fit is on actions, and so is this
+  batch_size: 256
+  val_fraction: 0.0   # all ten demonstrations are used; nothing is held out
+
+algo:
+  type: pmd
+  ppo:
+    learning_rate: 1.0e-4
+    gamma: 0.98
+    lam: 0.95
+    entropy_rate: 0.006
+    num_learning_epochs: 5
+    num_mini_batches: 4
+  pmd:
+    beta: 1.0
+    # Q_H integrates -dt*log(pi) in its own critic, independently of the
+    # successor features, so the learned reward never rescales the entropy term.
+    entropy_rate: 0.006
+    candidate_actions: 32
+    candidate_target_kl: 0.15
+    actor_projection_kl: 0.05
+    actor_spread_projection_kl: 0.002
+    projection_steps: 8
+    # 16 improvements per batch, each fitting one frozen projection target.
+    policy_improvements_per_batch: 16
+    actor_learning_rate: 3.0e-4
+    actor_batch_size: 512
+    train:
+      # Undiscounted: the episode is finite, so there is nothing to discount for.
+      gamma: 1.0
+      episodes_per_batch: 32
+      # UTD 2 over the 8,000 retained transitions of each batch: 16,000 critic
+      # steps, split evenly across the 16 policy improvements.
+      critic_updates_per_batch: null
+      critic_updates_per_transition: 2.0
+      critic_batch_size: 256
+      critic_learning_rate: 3.0e-4
+      # Compute, not interaction: it samples replay and steps nothing.
+      initial_critic_updates: 1000
+      target_polyak: 0.005
+      reset_interval_updates: 0
+      reset_scope: agent
+      replay:
+        learning_starts: 4096
+        capacity: 1000000
+        storage_device: auto
+        # Must name the same file as expert_data.path; see the launch line above.
+        demonstration_path: null
+        demonstration_fraction: 0.5
+        demonstration_episodes: null
+    value:
+      type: successor
+      num_heads: 3
+      width: 512
+      residual_blocks: 2
+      # Successor targets stay independent of the reward weights; pessimism
+      # enters at scalarization. q=0.5 is the median head.
+      successor: {latent_dim: 128, head_hidden_dim: 128, control_quantile: 0.5}
+      direct: {target_subset_size: 2, control_reduction: min}
+    policy:
+      hidden_dims: [256, 128, 64]
+      # The behaviour-cloned actor is fitted at this spread and the online arms
+      # load it, so a run that starts from a checkpoint inherits it.
+      initial_std: 0.1
+      minimum_std: 0.05
+      maximum_std: 2.0
+      # Native arm command: q_target = q_default + 0.5 * action. See
+      # docs/lift_action_bounds.md.
+      action_bound: 4.0
+
+# Unused here; PMD does not build an rsl_rl actor/critic.
+actor_critic:
+  actor_hidden_dims: [256, 128, 64]
+  critic_hidden_dims: [256, 128, 64]
+  activation: elu
+
+runner:
+  steps_per_env_per_cycle: 24   # PPO only; PMD collects complete episodes
+  # One collection, one reward update block, one policy update block per cycle.
+  rl_updates_per_cycle: 1
+  reward_updates_per_cycle: 1
+  # Checkpoints at 5, 10, ... 100 cover 80k, 200k, 400k and 800k interactions.
+  save_interval: 5
+  imitator_source: collected  # the reward is fit to the batch just collected
+  # Evaluation is external, on saved checkpoints, so it is never training data
+  # and never resets the environment mid-run.
+  validation_interval: 0
+  validation_episodes: 64
+  validation_steps_per_env: 250
+  validation_interval_transitions: null
+  # 800,000 retained physical training interactions; evaluation is counted
+  # separately and does not come out of this.
+  transition_budget: 800000
+  total_transition_budget: null
+  success_rate_thresholds: [0.25, 0.5, 0.9]
+  imitator_buffer:
+    capacity_steps: 1000000
+    store_device: cpu
+    store_dtype: float32
+    min_ep_len: 1                    # a one-step failure is a real episode
+    sample_weighted_by_length: false # uniform over episodes, not over steps
+  expert_buffer:
+    capacity_steps: 1000000
+    store_device: cpu
+    store_dtype: float32
+    min_ep_len: 1
+    sample_weighted_by_length: false

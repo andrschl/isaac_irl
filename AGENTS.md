@@ -71,7 +71,7 @@ Example comment style:
 - Short names (`n`, `d`, `t`) are fine only in small local blocks with obvious context.
 - Name methods by data contract and intent:
   - `sample_episodes`
-  - `sample_discounted_feature_returns`
+  - `discounted_feature_returns`
   - `get_reward_from_features`
 - Avoid vague names like `process`, `handle`, `compute_data`.
 
@@ -96,7 +96,7 @@ Do not duplicate runtime values across unrelated configs unless necessary.
 - Constructors (`__init__`) should initialize dependencies/state, not perform hidden I/O.
 
 Prefer composition over inheritance in training code:
-- `Runner` owns `rl_alg`, `irl_alg`, `feature_map`, buffers, logger
+- `Runner` owns `rl_alg`, `reward_learner`, `feature_source`, logger
 instead of deep inheritance trees.
 
 ---
@@ -160,9 +160,30 @@ Keep logging/formatting code separate from core learning logic.
 ---
 
 ## Module Boundaries
-- **Scripts (`scripts/**`) are thin wiring only**: parse args → build config → build objects → call `runner.learn()` → exit. No business logic. Keep each script under ~200 lines after the wiring helpers it owns; if a script grows past that, extract config, data, or backend-specific helpers into `src/`.
-- **Config lives in `src/config/`**; YAML schema + CLI overrides + dataclasses. Pure Python — no Isaac/Omniverse imports.
-- **Data loading lives in `src/data/`**: expert feature/obs-action loaders and generic episode subsetting. Returns plain tensors / nested dicts; never touches an env.
-- **Env contract** (`step`, `get_observations`, `num_envs`, `action_dim`, `max_episode_length`) appears only in `src/runner/runner.py` and `src/adapters/rsl_rl_*.py`. The IRL algorithm and the reward model never step the env or call `get_observations`.
-- **Core protocol vocabulary**: `action_dim`. `num_actions` is rsl_rl's name and stops at the adapter boundary (`src/adapters/rsl_rl_vec_env.py` translates).
-- **Backend adapters** live under `src/adapters/` (one module per backend object: PPO, VecEnv). The core protocols in `src/interfaces.py` never import from backends.
+- **Scripts (`scripts/*.py`) are launchers**: set up the import path, start the
+  Isaac app, call into `src/training/`. No logic, no more than ~50 lines.
+- **`src/training/`** owns everything about starting a run: `pipeline.py` (the
+  lifecycle and the order things are built in), `build.py` (environment,
+  reward, algorithm, runner), `record.py` (demonstration recording),
+  `video.py`, `run_output.py`.
+- **Config lives in `src/config/`**: `schema.py` holds every dataclass and
+  validates in `__post_init__`, `loader.py` builds them from mappings and
+  rejects unknown keys, `cli.py` is the only argparse surface, `experiment.py`
+  resolves a task to a config file. Pure Python — no Isaac, no algorithms, no
+  runner imports, so nothing else has to import config lazily.
+- **`src/algorithms/`** is the three learners: `irl.py` (reward), `bc.py`
+  (regularizer), `off_policy/` and `on_policy/` (policy). Value representations
+  live under `off_policy/values/`.
+- **`src/reward/`** holds reward features and the models that score them; a
+  reward model never extracts its own features.
+- **Data loading lives in `src/data/`**: loaders and writers that take file
+  paths and return or accept plain tensors. Never touches an env.
+- **Env contract** (`step`, `get_observations`, `num_envs`, `action_dim`,
+  `max_episode_length`, `device`) appears only in `src/runner/runner.py` and
+  `src/adapters/`. Algorithms and reward models never step the env.
+- **Core protocol vocabulary**: `action_dim`. `num_actions` is rsl_rl's name and
+  stops at `src/adapters/vec_env.py`.
+- **Backend adapters** live under `src/adapters/`, one module per backend
+  object. The protocols in `src/interfaces.py` never import from backends.
+- **One metric contract**: the runner emits `Summary/*` for every algorithm;
+  algorithms emit their own namespaces and never know about the dashboard.

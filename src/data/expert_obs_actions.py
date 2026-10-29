@@ -7,6 +7,8 @@ from typing import Any
 
 import torch
 
+from storage.observations import Observation, observation_leaves
+
 from ._hdf5 import iter_hdf5_demos
 
 
@@ -27,12 +29,9 @@ def _walk_obs_group(group: Any, demo_key: str) -> dict[str, Any]:
     return out
 
 
-def _collect_leaf_lengths(obs: dict[str, Any], out: list[int]) -> None:
-    for value in obs.values():
-        if isinstance(value, dict):
-            _collect_leaf_lengths(value, out)
-        else:
-            out.append(int(value.shape[0]))
+def _leaf_lengths(observations: Observation) -> list[int]:
+    """Length of every observation leaf, which must agree across the tree."""
+    return [int(leaf.shape[0]) for _, leaf in observation_leaves(observations)]
 
 
 def _extract_obs_action_episodes_from_hdf5(
@@ -66,8 +65,7 @@ def _extract_obs_action_episodes_from_hdf5(
                 f"got {tuple(actions_tensor.shape)}."
             )
 
-        lengths: list[int] = []
-        _collect_leaf_lengths(obs_dict, lengths)
+        lengths = _leaf_lengths(obs_dict)
         t_actions = int(actions_tensor.shape[0])
         if any(length != t_actions for length in lengths):
             raise ValueError(

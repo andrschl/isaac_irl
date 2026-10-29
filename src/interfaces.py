@@ -7,22 +7,42 @@ Lives at the top level of `src/` so it can be imported by both `runner.*` and
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol
 
 import torch
 
 
 @dataclass(slots=True)
-class FeatureStep:
-    """One vectorized feature step consumed by a reward learner.
+class RuntimeContext:
+    """Shared runtime context for feature-buffer IRL wiring."""
 
-    Shapes:
-        features: [N, D]
-        dones:    [N]
+    num_envs: int
+    feature_dim: int
+    device: str = "cpu"
+
+
+@dataclass(frozen=True, slots=True)
+class Generation:
+    """What one collection cycle produced.
+
+    ``features`` are the per-step reward features the algorithm already had to
+    compute, kept so the reward learner can reuse them instead of paying for a
+    second rollout. ``dones`` marks where episodes ended, so a discounted
+    feature return is never accumulated across a reset.
+
+    Shapes: features [B, T, D], dones [B, T].
     """
 
-    features: torch.Tensor
-    dones: torch.Tensor
+    transition_count: int
+    features: torch.Tensor | None = None
+    dones: torch.Tensor | None = None
+    episode_mask: torch.Tensor | None = None
+    """[B,T] valid prefixes when features contain complete padded episodes."""
+    environment_transition_count: int | None = None
+    """Actual interactions, including vector lanes excluded from the batch."""
+    completed_episodes: int = 0
+    policy_version: int | None = None
+    """Frozen behavior policy whose episodes estimate feature expectations."""
 
 
 @dataclass(frozen=True)
@@ -72,20 +92,30 @@ class Actor(Protocol):
 
 
 class RlAlgorithm(Protocol):
-    """RL algorithm adapter owned by the runner.
+    """RL algorithm adapter driven by the runner.
 
-    `actor` exposes the side-effect-free policy used by validation, imitator
-    rollouts, and final-video rollouts. `update()` is responsible for any
-    env collection the algorithm needs — the runner never steps the env for
-    RL collection.
+    The runner owns the cycle: ``collect()`` gathers one generation of
+    environment transitions, the reward learner may then update, and
+    ``update()`` improves the policy on what was collected. ``actor`` exposes
+    the side-effect-free policy used by validation and video rollouts.
     """
 
     @property
     def actor(self) -> Actor:
         """Side-effect-free policy facade."""
 
+    @property
+    def simulator_steps_per_update(self) -> int:
+        """Simulator transitions one collect/update cycle consumes."""
+
+    def collect(self) -> Generation:
+        """Collect one generation of environment transitions."""
+
     def update(self) -> dict[str, float]:
-        """Collect (if needed) and run one algorithm update; return scalar metrics."""
+        """Improve the policy on the collected generation; return scalar metrics."""
+
+    def reset_collection_state(self) -> None:
+        """Forget cached observations after an external validation rollout."""
 
     def train_metrics(self) -> dict[str, float]:
         """Cheap per-iteration metrics."""
@@ -106,33 +136,6 @@ class RlAlgorithm(Protocol):
         self, checkpoint: dict[str, Any], *, load_optimizer: bool = True
     ) -> None:
         """Load checkpoint payload for this algorithm."""
-
-
-class FixedRewardRlAlgorithm(RlAlgorithm, Protocol):
-    """Off-policy algorithm contract used by the fixed-reward runner."""
-
-    @property
-    def simulator_steps_per_update(self) -> int:
-        """Number of simulator transitions collected by one update."""
-
-    def reset_collection_state(self) -> None:
-        """Forget cached observations after an external validation rollout."""
-
-
-@runtime_checkable
-class PhasedOffPolicyAlgorithm(RlAlgorithm, Protocol):
-    """Runner contract for one-collection off-policy IRL cycles.
-
-    The runner calls collect_generation once, gives that generation to the
-    reward learner, performs reward updates, and only then calls update.
-    Implementing collect_generation is what selects the phased ordering.
-    """
-
-    def collect_generation(self) -> Any:
-        """Collect and retain one complete grouped policy generation."""
-
-    def reset_collection_state(self) -> None:
-        """Forget cached observations after an external validation rollout."""
 
 
 # No IrlAlgorithm Protocol: only one IRL estimator exists today

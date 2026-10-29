@@ -1,0 +1,169 @@
+# Easier Lift reset/goal variant: UTD 2, 32 PMD improvements.
+# Same networks, quantile, replay, and TD math as the conservative PMD baseline.
+# Successor-PMD uses its own entropy-return critic; PPO keeps its tuned recipe.
+experiment_name: lift_easy_pmd
+run_name: ""          # optional suffix on the log directory
+logger: wandb         # wandb | noop
+wandb_project: isaac_irl
+
+seed: 42
+max_iterations: 500
+device: cuda:0
+
+env:
+  name: Isaac-Lift-Cube-Franka-v0
+  variant: lift_easy
+  device: cuda:0
+  num_envs: 32   # PMD parallelism; use ppo.yaml for the native PPO benchmark
+  reward_curriculum: false  # PMD/IRL use fixed weights; see ppo.yaml for native PPO
+  # Object-to-goal distance (m) below which a step counts as success. The
+  # upstream Franka-Lift reward uses std=0.3, so a converged policy sits at a
+  # 5-10cm residual; 0.08 registers without being trivial.
+  success_threshold: 0.08
+  # Inject a binary `success_bonus` term as an IRL feature. At weight 0 it
+  # never enters the environment's reward, but the reward model still learns
+  # its coefficient alongside every other feature.
+  add_success_bonus: true
+  success_bonus_weight: 0.0
+
+# Which environment reward terms become reward-learning features.
+feature_map:
+  ignored_reward_terms: []
+  force_include_terms: [success_bonus]
+
+# Demonstrations, shared by the reward learner and behavioral cloning.
+expert_data:
+  path: ""            # --expert_data_path usually sets this
+  num_trajectories: null   # null = all; an int subsets for ablations
+  subset_strategy: first   # first | random
+
+reward:
+  # learned: the agent maximizes the reward model fit to demonstrations.
+  # environment: the agent maximizes the task's own reward (the RL baseline).
+  source: environment
+  fit_diagnostic: false    # with source=environment, fit the model anyway
+  model:
+    is_linear: true        # linear (w^T phi) or a dense MLP over features
+    hidden_dims: [256, 128, 64]   # dense only
+    activation: elu               # dense only
+    regularization: l2            # none | l2
+    regularization_strength: 1.0e-4
+    linear_projection: l2_ball    # none | l2_ball
+    linear_projection_radius: 1.0
+
+# How the reward model is fit to the expert/imitator return gap.
+irl:
+  batch_size: 256
+  gradient_steps: 1
+  weight_decay: 1.0e-6
+  max_grad_norm: 1.0
+  reward_loss_coef: 1.0
+  reward_learning_rate: 1.0e-4
+  discount_gamma: null     # null = inherit the policy algorithm's gamma
+  # Match discounted feature sums per attempted episode, including failures.
+  normalize_returns_by_episode_length: false
+
+# Behavioral cloning as a regularizer: L = (1-weight) L_RL + weight L_BC.
+bc:
+  weight: 0.0
+  loss_type: nll      # nll | mse
+  batch_size: 256
+  val_fraction: 0.1
+
+# Policy update. Each algorithm's tuning lives in its own block, so
+# --algorithm and --value_backend select between them rather than falling back
+# to defaults. See docs/algorithms.md.
+#
+# PMD collects 32 complete episodes per iteration, independent of parallelism.
+# Use configs/lift_cube_franka/ppo.yaml for the standard upstream PPO benchmark.
+algo:
+  type: pmd
+  ppo:
+    learning_rate: 1.0e-4
+    gamma: 0.98
+    lam: 0.95
+    entropy_rate: 0.006
+    num_learning_epochs: 5
+    num_mini_batches: 4
+  pmd:
+    beta: 1.0
+    # Shared entropy rate alpha. Q_H integrates -dt*log(pi) separately from
+    # successor features; PPO applies the same dt and alpha before GAE.
+    entropy_rate: 0.006
+    candidate_actions: 32
+    # Eight action dimensions need far more trust-region budget than cartpole:
+    # at 0.02 nats per projection the policy stays where it started.
+    candidate_target_kl: 0.15
+    actor_projection_kl: 0.05
+    actor_spread_projection_kl: 0.002
+    projection_steps: 8
+    policy_improvements_per_batch: 32
+    actor_learning_rate: 3.0e-4
+    actor_batch_size: 512
+    train:
+      gamma: 0.98
+      episodes_per_batch: 32
+      critic_updates_per_batch: null
+      critic_updates_per_transition: 2.0
+      critic_batch_size: 256
+      critic_learning_rate: 3.0e-4
+      initial_critic_updates: 1000
+      target_polyak: 0.005
+      # Resets came in for plasticity at this ratio, but by 128k transitions
+      # the reset-free runs reach 2.78 against 1.95 with resets every 25k.
+      reset_interval_updates: 0
+      reset_scope: agent
+      replay:
+        learning_starts: 4096
+        capacity: 1000000
+        storage_device: auto
+    value:
+      type: successor
+      num_heads: 3
+      width: 512
+      residual_blocks: 2
+      successor: {latent_dim: 128, head_hidden_dim: 128, control_quantile: 0.25}
+      direct: {target_subset_size: 2, control_reduction: min}
+    policy:
+      hidden_dims: [256, 128, 64]
+      initial_std: 1.0
+      minimum_std: 0.05
+      maximum_std: 2.0
+      # Native arm command: q_target = q_default + 0.5 * action (not a delta
+      # from the current joint position). The old +/-1 bound restricted the
+      # expert severely; +/-4 retained reliable lifting in matched Isaac runs.
+      # Gripper actuation remains binary by sign. See docs/lift_action_bounds.md.
+      action_bound: 4.0
+
+# The rsl_rl actor/critic used only when algo.type is ppo.
+actor_critic:
+  actor_hidden_dims: [256, 128, 64]
+  critic_hidden_dims: [256, 128, 64]
+  activation: elu
+
+runner:
+  steps_per_env_per_cycle: 24   # PPO only; PMD collects complete episodes
+  rl_updates_per_cycle: 1
+  reward_updates_per_cycle: 8
+  save_interval: 1
+  imitator_source: collected  # reuse the exact behavior-policy episode batch
+  validation_interval: 0
+  validation_episodes: 10     # per mode; all stepped vector lanes count toward budget
+  validation_steps_per_env: 250
+  # Optional training-transition cadence; evaluation still waits for a boundary.
+  validation_interval_transitions: null
+  transition_budget: null
+  total_transition_budget: 4000000  # training process only; external evaluation is separate
+  success_rate_thresholds: [0.25, 0.5, 0.9]
+  imitator_buffer:
+    capacity_steps: 1000000
+    store_device: cpu
+    store_dtype: float32
+    min_ep_len: 1
+    sample_weighted_by_length: false  # each attempted episode has equal weight
+  expert_buffer:
+    capacity_steps: 1000000
+    store_device: cpu
+    store_dtype: float32
+    min_ep_len: 1
+    sample_weighted_by_length: false

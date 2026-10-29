@@ -1,154 +1,118 @@
+"""Episode-structured reward features, the data a reward is learned from."""
+
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
 
 import torch
 import torch.nn.utils.rnn as rnn_utils
 from einops import einsum, rearrange
 
-from utils.runtime_context import RuntimeContext
-
-
-@dataclass(slots=True)
-class FeatureBufCfg:
-    """Buffer-specific configuration (chosen by the experiment)."""
-
-    capacity_steps: int = 1_000_000
-    # `None` -> resolved to `ctx.device` in FeatureTrajectoryBuffer.__init__.
-    # Imitator buffers default to ctx.device so the per-step append stays on
-    # GPU; long-lived expert buffers should set "cpu" explicitly to keep
-    # episode storage off the device.
-    store_device: torch.device | str | None = None
-    store_dtype: torch.dtype = torch.float32
-    min_ep_len: int = 2
-    sample_weighted_by_length: bool = False
+from config.schema import FeatureBufCfg
 
 
 class FeatureTrajectoryBuffer:
-    """
-    Vectorized, features-only episode buffer.
+    """Completed feature episodes, stored as ragged ``[T, D]`` tensors.
 
-    Stores completed episodes as tensors [T, D] in a deque.
-    Supports:
-      - add_step(z[N,D], done[N])
-      - sample_episodes(...) -> feats [B,T,D], mask [B,T], lengths [B]
-      - sample_discounted_feature_returns(...) -> [B,D], lengths [B]
-      - discounted_returns(...) for reward sequences
+    Episodes arrive already batched - a policy generation as ``[N, T, D]``, a
+    recorded demonstration as ``[T, D]`` - so ingestion is vectorized and never
+    walks environments or timesteps in Python.
+
+    Sampling pads to the longest episode in the batch and returns the mask that
+    says which steps are real, because a discounted feature return has to stop
+    where its episode did.
     """
 
-    def __init__(self, cfg: FeatureBufCfg, ctx: RuntimeContext, gamma: float) -> None:
+    def __init__(
+        self,
+        cfg: FeatureBufCfg,
+        *,
+        feature_dim: int,
+        gamma: float,
+        device: str | torch.device = "cpu",
+    ) -> None:
+        if feature_dim <= 0:
+            raise ValueError(f"`feature_dim` must be > 0, got {feature_dim}.")
         self.cfg = cfg
-        self.ctx = ctx
+        self.feature_dim = int(feature_dim)
         self.gamma = float(gamma)
-
-        store_device = cfg.store_device if cfg.store_device is not None else ctx.device
-        self._store_device = torch.device(store_device)
-
-        # Current unfinished episodes, one list per env. Each entry is a [D] tensor.
-        self._cur: list[list[torch.Tensor]] = [[] for _ in range(ctx.num_envs)]
-
-        # Completed episodes and their lengths.
-        self._eps: deque[torch.Tensor] = deque()  # each episode: [T, D]
+        self._store_device = torch.device(cfg.resolve_store_device(device))
+        self._episodes: deque[torch.Tensor] = deque()
         self._lengths: deque[int] = deque()
-
         self._steps_stored = 0
 
     def __len__(self) -> int:
-        return len(self._eps)
+        return len(self._episodes)
 
     @property
     def steps_stored(self) -> int:
         return self._steps_stored
 
     def clear(self) -> None:
-        self._cur = [[] for _ in range(self.ctx.num_envs)]
-        self._eps.clear()
+        self._episodes.clear()
         self._lengths.clear()
         self._steps_stored = 0
 
-    def add_step(self, z: torch.Tensor, done: torch.Tensor) -> None:
-        """
-        Add one vectorized env step.
-
-        Args:
-            z:    [N, D] feature vectors for all envs at current timestep
-            done: [N] bool, True if the episode ended after this step
-        """
-        if z.ndim != 2:
-            raise ValueError(f"`z` must be [N,D], got {tuple(z.shape)}")
-        if done.ndim != 1:
-            raise ValueError(f"`done` must be [N], got {tuple(done.shape)}")
-
-        n, d = z.shape
-        if n != self.ctx.num_envs or d != self.ctx.feature_dim:
+    def append_episode(self, features: torch.Tensor) -> None:
+        """Store one complete episode. Shapes: features [T, D]."""
+        if features.ndim != 2 or features.shape[1] != self.feature_dim:
             raise ValueError(
-                f"Expected z shape [{self.ctx.num_envs}, {self.ctx.feature_dim}], got {tuple(z.shape)}"
+                f"Expected features [T, {self.feature_dim}], got "
+                f"{tuple(features.shape)}."
             )
-        if done.shape[0] != self.ctx.num_envs:
+        episode_length = int(features.shape[0])
+        if episode_length < self.cfg.min_ep_len:
+            return
+        self._episodes.append(
+            features.detach()
+            .to(device=self._store_device, dtype=self.cfg.store_dtype)
+            .clone()
+        )
+        self._lengths.append(episode_length)
+        self._steps_stored += episode_length
+        self._evict_by_capacity()
+
+    def add_rollout(self, features: torch.Tensor, dones: torch.Tensor) -> None:
+        """Store the episodes a rollout contains. Shapes: [N,T,D], [N,T].
+
+        A fixed-horizon rollout cuts the last episode of every environment
+        short; that trailing segment is kept, because a rollout shorter than an
+        episode would otherwise store nothing at all. Discounting never crosses
+        a reset, which is what makes an imitator return comparable to an expert
+        demonstration's.
+        """
+        if features.ndim != 3 or features.shape[-1] != self.feature_dim:
             raise ValueError(
-                f"Expected done shape [{self.ctx.num_envs}], got {tuple(done.shape)}"
+                f"Expected features [N,T,{self.feature_dim}], got "
+                f"{tuple(features.shape)}."
             )
-
-        # Move once to storage device/dtype, then pull dones once to a Python
-        # list so the per-env loop never triggers a GPU->CPU sync.
-        z_store = z.detach().to(device=self._store_device, dtype=self.cfg.store_dtype)
-        done_list = done.detach().to("cpu").bool().tolist()
-
-        for i in range(self.ctx.num_envs):
-            # clone() avoids retaining a view into the full [N,D] tensor
-            self._cur[i].append(z_store[i].clone())
-            if done_list[i]:
-                self._finalize(i)
-
-    def finalize_in_progress_episodes(self) -> None:
-        """Force-flush each env's in-progress episode into the completed deque.
-
-        Validation rolls out for a fixed horizon and typically does not see
-        natural episode ends, so the buffer would otherwise hold zero
-        completed episodes after the rollout. Callers that want fixed-length
-        trajectories (one per env) should call this after the rollout loop.
-        Respects ``cfg.min_ep_len``.
-        """
-        for i in range(self.ctx.num_envs):
-            if self._cur[i]:
-                self._finalize(i)
-
-    def add_episode(self, feats: torch.Tensor) -> None:
-        """
-        Convenience helper for expert loading in a 1-env buffer.
-        `feats` must be [T, D].
-        """
-        if self.ctx.num_envs != 1:
-            raise ValueError("`add_episode` is only valid when ctx.num_envs == 1.")
-        if feats.ndim != 2:
-            raise ValueError(f"`feats` must be [T,D], got {tuple(feats.shape)}")
-        if feats.shape[1] != self.ctx.feature_dim:
+        if tuple(dones.shape) != tuple(features.shape[:2]) or dones.dtype != torch.bool:
             raise ValueError(
-                f"Expected feature dim {self.ctx.feature_dim}, got {feats.shape[1]}"
+                f"Expected bool dones {tuple(features.shape[:2])}, got "
+                f"{tuple(dones.shape)} with dtype {dones.dtype}."
             )
-
-        t_steps = int(feats.shape[0])
-        for t in range(t_steps):
-            done = torch.tensor(
-                [t == t_steps - 1], dtype=torch.bool, device=feats.device
-            )
-            self.add_step(feats[t : t + 1], done)
+        horizon = int(features.shape[1])
+        for row, row_dones in zip(features, dones, strict=True):
+            boundaries = (row_dones.nonzero(as_tuple=False).flatten() + 1).tolist()
+            if not boundaries or boundaries[-1] != horizon:
+                boundaries.append(horizon)
+            start = 0
+            for end in boundaries:
+                self.append_episode(row[start:end])
+                start = end
 
     def replace_episode_batch(self, feats: torch.Tensor, mask: torch.Tensor) -> None:
-        """Replace storage from a dense trajectory batch.
+        """Replace everything stored with one batch of episodes.
 
-        Args:
-            feats: [B,T,D]
-            mask: [B,T] bool contiguous-prefix validity mask
+        Shapes: feats [B, T, D], mask [B, T] as a contiguous valid prefix.
         """
-        if feats.ndim != 3 or feats.shape[-1] != self.ctx.feature_dim:
+        if feats.ndim != 3 or feats.shape[-1] != self.feature_dim:
             raise ValueError(
-                f"Expected feats [B,T,{self.ctx.feature_dim}], got {tuple(feats.shape)}."
+                f"Expected feats [B, T, {self.feature_dim}], got {tuple(feats.shape)}."
             )
         if tuple(mask.shape) != tuple(feats.shape[:2]) or mask.dtype != torch.bool:
             raise ValueError(
-                f"Expected bool mask shape {tuple(feats.shape[:2])}, got "
+                f"Expected a bool mask {tuple(feats.shape[:2])}, got "
                 f"{tuple(mask.shape)} with dtype {mask.dtype}."
             )
         prefix = mask.to(torch.int64).cummin(dim=1).values.to(torch.bool)
@@ -157,120 +121,80 @@ class FeatureTrajectoryBuffer:
                 "mask must be a contiguous valid prefix for every episode."
             )
         self.clear()
-        lengths = mask.sum(dim=1).to("cpu").tolist()
-        for batch_idx, length in enumerate(lengths):
-            episode_length = int(length)
-            if episode_length < self.cfg.min_ep_len:
-                continue
-            episode = (
-                feats[batch_idx, :episode_length]
-                .detach()
-                .to(device=self._store_device, dtype=self.cfg.store_dtype)
-                .clone()
-            )
-            self._eps.append(episode)
-            self._lengths.append(episode_length)
-            self._steps_stored += episode_length
-        self._evict_by_capacity()
-
-    def _finalize(self, env_i: int) -> None:
-        ep_list = self._cur[env_i]
-        self._cur[env_i] = []
-
-        ep_len = len(ep_list)
-        if ep_len < self.cfg.min_ep_len:
-            return
-
-        ep = torch.stack(ep_list, dim=0)  # [T, D]
-        self._eps.append(ep)
-        self._lengths.append(ep_len)
-        self._steps_stored += ep_len
-
-        self._evict_by_capacity()
+        stored = feats.detach().to(
+            device=self._store_device, dtype=self.cfg.store_dtype
+        )
+        for episode, length in zip(stored, mask.sum(dim=1).tolist(), strict=True):
+            self.append_episode(episode[: int(length)])
 
     def _evict_by_capacity(self) -> None:
-        while self._steps_stored > self.cfg.capacity_steps and self._eps:
-            _ = self._eps.popleft()
-            old_len = self._lengths.popleft()
-            self._steps_stored -= int(old_len)
-
-    def _sample_indices(self, batch_size: int) -> list[int]:
-        if len(self._eps) == 0:
-            raise RuntimeError("No completed episodes in buffer.")
-        if batch_size <= 0:
-            raise ValueError(f"`batch_size` must be positive, got {batch_size}")
-
-        if self.cfg.sample_weighted_by_length:
-            lens = torch.tensor(list(self._lengths), dtype=torch.float32)
-            probs = lens / lens.sum()
-            return torch.multinomial(
-                probs, num_samples=batch_size, replacement=True
-            ).tolist()
-
-        return torch.randint(0, len(self._eps), (batch_size,)).tolist()
+        while self._steps_stored > self.cfg.capacity_steps and self._episodes:
+            self._episodes.popleft()
+            self._steps_stored -= int(self._lengths.popleft())
 
     def sample_episodes(
-        self,
-        batch_size: int,
-        device: torch.device | str,
+        self, batch_size: int, device: torch.device | str
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Sample episodes, padded to the longest one drawn.
+
+        Returns feats [B, T_max, D], mask [B, T_max], and lengths [B].
         """
-        Returns:
-            feats   [B, T_max, D]
-            mask    [B, T_max] bool
-            lengths [B]
-        """
-        idx = self._sample_indices(batch_size)
+        indices = self._sample_indices(batch_size)
         device = torch.device(device)
-
-        # Collect episodes on target device
-        eps = [self._eps[i].to(device=device, dtype=self.cfg.store_dtype) for i in idx]
-        lengths = torch.tensor([ep.shape[0] for ep in eps], device=device)
-
-        feats = rnn_utils.pad_sequence(eps, batch_first=True)
-        t_indices = torch.arange(feats.shape[1], device=device)
-        mask = rearrange(t_indices, "t -> 1 t") < rearrange(lengths, "b -> b 1")
-
+        episodes = [
+            self._episodes[index].to(device=device, dtype=self.cfg.store_dtype)
+            for index in indices
+        ]
+        lengths = torch.tensor(
+            [episode.shape[0] for episode in episodes], device=device
+        )
+        feats = rnn_utils.pad_sequence(episodes, batch_first=True)
+        time_index = torch.arange(feats.shape[1], device=device)
+        mask = rearrange(time_index, "t -> 1 t") < rearrange(lengths, "b -> b 1")
         return feats, mask, lengths
 
-    def sample_discounted_feature_returns(
+    def mean_feature_return(
         self,
-        batch_size: int,
+        *,
+        gamma: float,
         device: torch.device | str,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Convenience for linear reward heads.
+        normalize_by_episode_length: bool = False,
+    ) -> torch.Tensor:
+        """Mean over every stored episode of its feature return [D]."""
+        if not self._episodes:
+            raise RuntimeError("Cannot average: no completed episodes are stored.")
+        target_device = torch.device(device)
+        returns = []
+        for episode in self._episodes:
+            features = episode.to(device=target_device, dtype=torch.float32)
+            powers = gamma ** torch.arange(
+                features.shape[0], device=target_device, dtype=features.dtype
+            )
+            feature_return = (features * rearrange(powers, "t -> t 1")).sum(0)
+            if normalize_by_episode_length:
+                feature_return = feature_return / features.shape[0]
+            returns.append(feature_return)
+        return torch.stack(returns).mean(0)
 
-        Returns:
-            discounted_feature_returns [B, D]
-            lengths                    [B]
-        """
-        feats, mask, lengths = self.sample_episodes(
-            batch_size=batch_size, device=device
-        )
-        z_ret = self.discounted_feature_returns(feats, mask, self.gamma)
-        return z_ret, lengths
+    def _sample_indices(self, batch_size: int) -> list[int]:
+        if not self._episodes:
+            raise RuntimeError("Cannot sample: no completed episodes are stored.")
+        if batch_size <= 0:
+            raise ValueError(f"`batch_size` must be > 0, got {batch_size}.")
+        if not self.cfg.sample_weighted_by_length:
+            return torch.randint(0, len(self._episodes), (batch_size,)).tolist()
+        # Weighting by length samples timesteps uniformly rather than episodes,
+        # so a long episode is not compressed into the same weight as a short one.
+        lengths = torch.tensor(list(self._lengths), dtype=torch.float32)
+        return torch.multinomial(
+            lengths / lengths.sum(), num_samples=batch_size, replacement=True
+        ).tolist()
 
     @staticmethod
     def discounted_feature_returns(
-        feats: torch.Tensor,
-        mask: torch.Tensor,
-        gamma: float,
+        feats: torch.Tensor, mask: torch.Tensor, gamma: float
     ) -> torch.Tensor:
-        """
-        feats: [B,T,D], mask: [B,T] -> discounted feature returns [B,D]
-        """
-        _, t, _ = feats.shape
-        powers = gamma ** torch.arange(t, device=feats.device, dtype=feats.dtype)
+        """Discounted per-feature return. Shapes: [B,T,D], [B,T] -> [B,D]."""
+        horizon = feats.shape[1]
+        powers = gamma ** torch.arange(horizon, device=feats.device, dtype=feats.dtype)
         return einsum(feats, mask.to(dtype=feats.dtype), powers, "b t d, b t, t -> b d")
-
-    @staticmethod
-    def discounted_returns(
-        r: torch.Tensor, mask: torch.Tensor, gamma: float
-    ) -> torch.Tensor:
-        """
-        r: [B,T], mask: [B,T] -> returns [B]
-        """
-        _, t = r.shape
-        powers = gamma ** torch.arange(t, device=r.device, dtype=r.dtype)
-        return einsum(r, mask.to(dtype=r.dtype), powers, "b t, b t, t -> b")

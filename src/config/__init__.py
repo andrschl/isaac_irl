@@ -1,52 +1,60 @@
-"""Experiment configuration dataclasses and YAML parsing."""
+"""Experiment configuration: schema, YAML loading, and the CLI."""
 
-from __future__ import annotations
-
-from typing import Any
-
-from .fixed_reward import FixedRewardRunnerCfg
-from .off_policy import (
+from .cli import (
+    build_arg_parser,
+    build_behavior_cloning_parser,
+    build_record_parser,
+    merge_overrides,
+    parse_overrides,
+)
+from .experiment import load_experiment_cfg, task_slug
+from .loader import build_dataclass
+from .schema import (
+    ActorCriticCfg,
+    BCCfg,
     DirectQCfg,
-    OffPolicyAlgorithmCfg,
+    EnvCfg,
+    ExpertDataCfg,
+    FeatureBufCfg,
+    FeatureMapCfg,
+    IRLCfg,
     OffPolicyTrainCfg,
     PmdCfg,
-    SacCfg,
+    PpoAlgoCfg,
+    RewardCfg,
+    RewardModelCfg,
+    RunnerCfg,
     SuccessorQCfg,
     TanhGaussianPolicyCfg,
+    TrainCfg,
     TransitionReplayCfg,
 )
 
-_TRAIN_EXPORTS = {
-    "ActorCriticCfg",
-    "EnvCfg",
-    "PpoAlgoCfg",
-    "TrainCfg",
-    "load_train_cfg",
-}
-
-
-def __getattr__(name: str) -> Any:
-    """Load the main training schema lazily to avoid config/algorithm cycles."""
-    if name not in _TRAIN_EXPORTS:
-        raise AttributeError(name)
-    from . import train_irl
-
-    return getattr(train_irl, name)
-
-
 __all__ = [
     "ActorCriticCfg",
+    "BCCfg",
     "DirectQCfg",
     "EnvCfg",
-    "FixedRewardRunnerCfg",
-    "OffPolicyAlgorithmCfg",
+    "ExpertDataCfg",
+    "FeatureBufCfg",
+    "FeatureMapCfg",
+    "IRLCfg",
     "OffPolicyTrainCfg",
     "PmdCfg",
     "PpoAlgoCfg",
-    "SacCfg",
+    "RewardCfg",
+    "RewardModelCfg",
+    "RunnerCfg",
     "SuccessorQCfg",
     "TanhGaussianPolicyCfg",
     "TrainCfg",
     "TransitionReplayCfg",
-    "load_train_cfg",
+    "build_arg_parser",
+    "build_behavior_cloning_parser",
+    "build_dataclass",
+    "build_record_parser",
+    "load_experiment_cfg",
+    "merge_overrides",
+    "parse_overrides",
+    "task_slug",
 ]

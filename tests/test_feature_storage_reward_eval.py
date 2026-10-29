@@ -6,18 +6,20 @@ torch = pytest.importorskip("torch")
 nn = pytest.importorskip("torch.nn")
 
 from algorithms.irl import IrlAlgorithm, IRLCfg
-from interfaces import FeatureSpec
-from reward_model import LinearFeatureRewardModel, RewardModelCfg
-from reward_model.base import BaseRewardModel
+from config.schema import RewardModelCfg
+from interfaces import FeatureSpec, RuntimeContext
+from reward import LinearFeatureRewardModel
+from reward.base import BaseRewardModel
 from storage.feature_storage import FeatureBufCfg, FeatureTrajectoryBuffer
-from utils.runtime_context import RuntimeContext
 
 
 class LinearFeatureReward(LinearFeatureRewardModel):
     def __init__(self, weight: torch.Tensor) -> None:
         if weight.ndim != 1:
             raise ValueError(f"Expected weight shape [D], got {tuple(weight.shape)}")
-        super().__init__(RewardModelCfg(num_features=weight.shape[0], is_linear=True))
+        super().__init__(
+            RewardModelCfg(is_linear=True), num_features=int(weight.shape[0])
+        )
         with torch.no_grad():
             self.reward.weight.copy_(weight.unsqueeze(0))
 
@@ -206,7 +208,6 @@ def test_irl_eval_expected_return_matches_shared_helper():
     irl = IrlAlgorithm(
         reward=reward_model,
         feature_spec=FeatureSpec(dim=2),
-        num_envs=1,
         gamma=gamma,
         cfg=IRLCfg(batch_size=2),
         device="cpu",
@@ -244,7 +245,6 @@ def test_irl_eval_expected_return_can_disable_length_normalization():
     irl = IrlAlgorithm(
         reward=reward_model,
         feature_spec=FeatureSpec(dim=2),
-        num_envs=1,
         gamma=gamma,
         cfg=IRLCfg(batch_size=2, normalize_returns_by_episode_length=False),
         device="cpu",
@@ -279,11 +279,10 @@ def _make_irl_for_discount_cfg(
     irl = IrlAlgorithm(
         reward=reward_model,
         feature_spec=FeatureSpec(dim=2),
-        num_envs=1,
         gamma=gamma,
         cfg=IRLCfg(
             batch_size=1,
-            num_learning_epochs=1,
+            gradient_steps=1,
             reward_loss_coef=1.0,
             max_grad_norm=10.0,
             discount_gamma=discount_gamma,
@@ -292,13 +291,12 @@ def _make_irl_for_discount_cfg(
         device="cpu",
         imitator_buffer_cfg=buffer_cfg,
         expert_buffer_cfg=buffer_cfg,
-        expert_num_envs=1,
     )
 
     expert_episode = torch.tensor([[1.0, 1.0], [1.0, 1.0]], dtype=torch.float32)
     imitator_episode = torch.tensor([[2.0, 0.0], [2.0, 0.0]], dtype=torch.float32)
     irl.add_expert_episode(expert_episode)
-    irl.imitator_storage.add_episode(imitator_episode)
+    irl.imitator_storage.append_episode(imitator_episode)
     return irl
 
 
@@ -337,7 +335,6 @@ def test_irl_rejects_invalid_discount_gamma():
                 weight=torch.tensor([1.0, 0.0], dtype=torch.float32)
             ),
             feature_spec=FeatureSpec(dim=2),
-            num_envs=1,
             gamma=0.9,
             cfg=IRLCfg(discount_gamma=0.0),
             device="cpu",
@@ -345,27 +342,56 @@ def test_irl_rejects_invalid_discount_gamma():
 
 
 @pytest.mark.parametrize(
-    "cfg, match",
+    "overrides, match",
     [
-        (IRLCfg(expert_num_trajectories=0), "expert_num_trajectories"),
-        (IRLCfg(expert_subset_strategy="middle"), "expert_subset_strategy"),
-        (IRLCfg(batch_size=0), "batch_size"),
-        (IRLCfg(num_learning_epochs=0), "num_learning_epochs"),
-        (IRLCfg(weight_decay=-1.0), "weight_decay"),
-        (IRLCfg(max_grad_norm=0.0), "max_grad_norm"),
-        (IRLCfg(reward_loss_coef=-1.0), "reward_loss_coef"),
-        (IRLCfg(reward_learning_rate=0.0), "reward_learning_rate"),
+        ({"batch_size": 0}, "batch_size"),
+        ({"gradient_steps": 0}, "gradient_steps"),
+        ({"weight_decay": -1.0}, "weight_decay"),
+        ({"max_grad_norm": 0.0}, "max_grad_norm"),
+        ({"reward_loss_coef": -1.0}, "reward_loss_coef"),
+        ({"reward_learning_rate": 0.0}, "reward_learning_rate"),
+        ({"discount_gamma": 0.0}, "discount_gamma"),
     ],
 )
-def test_irl_rejects_invalid_cfg_values(cfg: IRLCfg, match: str):
+def test_irl_cfg_rejects_invalid_values(overrides: dict, match: str):
+    """A config validates itself, so an invalid one cannot reach an algorithm."""
     with pytest.raises(ValueError, match=match):
-        _ = IrlAlgorithm(
-            reward=LinearFeatureReward(
-                weight=torch.tensor([1.0, 0.0], dtype=torch.float32)
-            ),
-            feature_spec=FeatureSpec(dim=2),
-            num_envs=1,
-            gamma=0.9,
-            cfg=cfg,
-            device="cpu",
-        )
+        IRLCfg(**overrides)
+
+
+def test_reward_weight_cosine_reports_alignment_with_the_environment_reward():
+    """The direct read on whether IRL is recovering the task's reward."""
+    reward_model = LinearFeatureRewardModel(
+        RewardModelCfg(is_linear=True), num_features=2
+    )
+    irl = IrlAlgorithm(
+        reward=reward_model,
+        feature_spec=FeatureSpec(dim=2, names=("reach", "lift")),
+        gamma=0.99,
+        cfg=IRLCfg(),
+        device="cpu",
+        environment_reward_weights=torch.tensor([1.0, 0.0]),
+    )
+
+    with torch.no_grad():
+        reward_model.reward.weight.copy_(torch.tensor([[2.0, 0.0]]))
+    assert irl.reward_weight_cosine() == pytest.approx(1.0)
+
+    with torch.no_grad():
+        reward_model.reward.weight.copy_(torch.tensor([[0.0, 1.0]]))
+    assert irl.reward_weight_cosine() == pytest.approx(0.0, abs=1e-6)
+
+    assert "IRL/reward_weight_cosine" in irl.train_metrics()
+
+
+def test_reward_weight_cosine_is_absent_when_the_task_exposes_no_weights():
+    irl = IrlAlgorithm(
+        reward=LinearFeatureRewardModel(RewardModelCfg(is_linear=True), num_features=2),
+        feature_spec=FeatureSpec(dim=2),
+        gamma=0.99,
+        cfg=IRLCfg(),
+        device="cpu",
+    )
+
+    assert irl.reward_weight_cosine() is None
+    assert "IRL/reward_weight_cosine" not in irl.train_metrics()

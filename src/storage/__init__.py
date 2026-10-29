@@ -1,7 +1,7 @@
-"""Storage entry points for feature and transition training."""
+"""Where data lives between being collected and being learned from."""
 
-from .feature_storage import FeatureBufCfg, FeatureTrajectoryBuffer
-from .obs_action_storage import ObsActionBufCfg, ObsActionBuffer
+from .expert_dataset import ExpertObsActionDataset
+from .feature_storage import FeatureTrajectoryBuffer
 from .transition_replay import (
     TransitionBatch,
     TransitionReplayBuffer,
@@ -9,10 +9,8 @@ from .transition_replay import (
 )
 
 __all__ = [
-    "FeatureBufCfg",
+    "ExpertObsActionDataset",
     "FeatureTrajectoryBuffer",
-    "ObsActionBufCfg",
-    "ObsActionBuffer",
     "TransitionBatch",
     "TransitionReplayBuffer",
     "TransitionRollout",

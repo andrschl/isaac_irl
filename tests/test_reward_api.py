@@ -1,150 +1,122 @@
 # ruff: noqa: E402
+"""The reward model's data contract: features in, per-step rewards out."""
+
+from __future__ import annotations
 
 import pytest
 
 torch = pytest.importorskip("torch")
 
-from reward_model import (
-    DenseFeatureRewardModel,
-    LinearFeatureRewardModel,
-    RewardModelCfg,
-)
+from config.schema import RewardModelCfg
+from reward import DenseFeatureRewardModel, LinearFeatureRewardModel
 
 
-def test_reward_model_feature_api_output_shape_2d():
-    model = DenseFeatureRewardModel(
-        RewardModelCfg(
-            num_features=4,
-            hidden_dims=(16, 8),
-            is_linear=False,
-            activation="relu",
-        )
+def _linear(num_features: int = 3, **cfg_overrides) -> LinearFeatureRewardModel:
+    return LinearFeatureRewardModel(
+        RewardModelCfg(is_linear=True, **cfg_overrides), num_features=num_features
     )
-    feats = torch.randn(5, 4)
-    out = model.get_reward_from_features(feats)
-    assert out.shape == (5,)
 
 
-def test_reward_model_feature_api_output_shape_3d_and_masking():
-    model = DenseFeatureRewardModel(
-        RewardModelCfg(
-            num_features=4,
-            hidden_dims=(8,),
-            is_linear=False,
-            activation="elu",
-        )
+def _dense(num_features: int = 3, **cfg_overrides) -> DenseFeatureRewardModel:
+    settings = {"is_linear": False, "hidden_dims": (8,)}
+    settings.update(cfg_overrides)
+    return DenseFeatureRewardModel(
+        RewardModelCfg(**settings), num_features=num_features
     )
-    feats = torch.randn(2, 3, 4)
-    mask = torch.tensor([[True, True, False], [True, False, False]], dtype=torch.bool)
-    out = model.get_reward_from_features(feats, mask=mask)
-    assert out.shape == (2, 3)
-    assert torch.all(out[~mask] == 0.0)
 
 
-def test_linear_reward_model_is_bias_free():
-    model = LinearFeatureRewardModel(
-        RewardModelCfg(num_features=3, is_linear=True, hidden_dims=(8,))
-    )
-    assert model.reward.bias is None
+def test_a_batch_of_steps_scores_one_reward_each() -> None:
+    rewards = _dense().get_reward_from_features(torch.zeros(5, 3))
+
+    assert rewards.shape == (5,)
 
 
-def test_linear_reward_model_sets_weights_in_feature_name_order():
-    model = LinearFeatureRewardModel(RewardModelCfg(num_features=3, is_linear=True))
+def test_a_batch_of_trajectories_keeps_its_time_axis() -> None:
+    rewards = _dense().get_reward_from_features(torch.zeros(2, 4, 3))
+
+    assert rewards.shape == (2, 4)
+
+
+def test_masked_steps_contribute_nothing() -> None:
+    model = _dense()
+    mask = torch.tensor([[True, True, False, False], [True, False, False, False]])
+
+    rewards = model.get_reward_from_features(torch.ones(2, 4, 3), mask)
+
+    assert torch.equal(rewards == 0, ~mask)
+
+
+def test_a_wrong_feature_dimension_is_refused() -> None:
+    with pytest.raises(ValueError, match="Expected feature dimension D=3"):
+        _dense().get_reward_from_features(torch.zeros(5, 4))
+
+
+def test_a_linear_reward_has_no_bias() -> None:
+    """A constant shift in reward changes nothing, so it must not be learnable."""
+    assert _linear().reward.bias is None
+
+
+def test_named_weights_land_in_feature_order() -> None:
+    model = _linear(num_features=3)
+
     model.set_named_weights(
-        ["velocity", "height", "effort"],
-        {"height": 15.0, "effort": -0.001, "velocity": 2.0},
+        ("reach", "lift", "goal"), {"lift": 2.0, "reach": -1.0, "goal": 0.0}
     )
+
     torch.testing.assert_close(
-        model.reward.weight,
-        torch.tensor([[2.0, 15.0, -0.001]]),
+        model.reward.weight.detach().squeeze(0), torch.tensor([-1.0, 2.0, 0.0])
     )
 
 
-def test_linear_reward_model_rejects_missing_named_weight():
-    model = LinearFeatureRewardModel(RewardModelCfg(num_features=2, is_linear=True))
+def test_a_feature_with_no_weight_is_refused_rather_than_zeroed() -> None:
+    """A silently zeroed term would look like a reward the env does not have."""
+    model = _linear(num_features=2)
+
     with pytest.raises(ValueError, match="missing feature names"):
-        model.set_named_weights(["height", "effort"], {"height": 15.0})
+        model.set_named_weights(("reach", "lift"), {"reach": 1.0})
 
 
-def test_linear_reward_model_l2_ball_projection():
-    cfg = RewardModelCfg(
-        num_features=4,
-        is_linear=True,
-        linear_projection="l2_ball",
-        linear_projection_radius=1.0,
+def test_projection_pulls_weights_back_onto_the_l2_ball() -> None:
+    model = _linear(
+        num_features=2, linear_projection="l2_ball", linear_projection_radius=1.0
     )
-    model = LinearFeatureRewardModel(cfg)
-    model.reward.weight.data.fill_(2.0)
+    with torch.no_grad():
+        model.reward.weight.copy_(torch.tensor([[3.0, 4.0]]))
+
     model.project_weights()
-    assert model.reward.weight.data.norm(p=2).item() <= 1.0 + 1e-5
+
+    assert float(model.reward.weight.detach().norm().item()) == pytest.approx(1.0)
 
 
-def test_linear_reward_model_l1_ball_projection():
-    cfg = RewardModelCfg(
-        num_features=4,
-        is_linear=True,
-        linear_projection="l1_ball",
-        linear_projection_radius=1.0,
-    )
-    model = LinearFeatureRewardModel(cfg)
-    model.reward.weight.data.fill_(1.0)
-    model.project_weights()
-    assert model.reward.weight.data.abs().sum().item() <= 1.0 + 1e-5
+def test_l2_regularization_grows_with_the_weights() -> None:
+    model = _linear(num_features=2, regularization="l2", regularization_strength=0.5)
+    with torch.no_grad():
+        model.reward.weight.copy_(torch.tensor([[1.0, 1.0]]))
+
+    assert float(model.get_regularization_loss().item()) == pytest.approx(1.0)
 
 
-def test_reward_model_l2_regularization_loss():
-    cfg = RewardModelCfg(
-        num_features=4,
-        is_linear=False,
-        hidden_dims=(8,),
-        regularization="l2",
-        regularization_strength=0.1,
-    )
-    model = DenseFeatureRewardModel(cfg)
-    reg = model.get_regularization_loss()
-    assert reg.ndim == 0
-    assert reg.item() > 0
+def test_no_regularization_costs_nothing() -> None:
+    assert float(_linear(regularization="none").get_regularization_loss().item()) == 0.0
 
 
-def test_reward_model_regularization_none_returns_zero():
-    cfg = RewardModelCfg(num_features=4, is_linear=True, regularization="none")
-    model = LinearFeatureRewardModel(cfg)
-    reg = model.get_regularization_loss()
-    assert reg.item() == 0.0
-
-
-def test_reward_model_apply_proximal_step_l1():
-    cfg = RewardModelCfg(
-        num_features=4, is_linear=True, regularization="l1", regularization_strength=0.5
-    )
-    model = LinearFeatureRewardModel(cfg)
-    model.reward.weight.data.fill_(2.0)
-    model.apply_proximal_step()
-    expected = 1.5
-    torch.testing.assert_close(
-        model.reward.weight.data, torch.full_like(model.reward.weight.data, expected)
-    )
-
-
-def test_dense_reward_model_rejects_is_linear_true():
+def test_each_model_rejects_the_other_one_s_config() -> None:
     with pytest.raises(ValueError, match="is_linear"):
-        DenseFeatureRewardModel(RewardModelCfg(num_features=2, is_linear=True))
-
-
-def test_linear_reward_model_rejects_is_linear_false():
+        DenseFeatureRewardModel(RewardModelCfg(is_linear=True), num_features=3)
     with pytest.raises(ValueError, match="is_linear"):
-        LinearFeatureRewardModel(RewardModelCfg(num_features=2, is_linear=False))
+        LinearFeatureRewardModel(RewardModelCfg(is_linear=False), num_features=3)
 
 
-def test_dense_reward_model_rejects_linear_projection():
-    with pytest.raises(ValueError, match="LinearFeatureRewardModel"):
-        DenseFeatureRewardModel(
-            RewardModelCfg(num_features=2, is_linear=False, linear_projection="l2_ball")
-        )
+def test_a_dense_model_cannot_take_a_linear_projection() -> None:
+    with pytest.raises(ValueError, match="linear_projection"):
+        _dense(linear_projection="l2_ball")
 
 
-def test_dense_reward_model_rejects_empty_hidden_dims():
+def test_a_dense_model_needs_hidden_layers() -> None:
     with pytest.raises(ValueError, match="hidden_dims"):
-        DenseFeatureRewardModel(
-            RewardModelCfg(num_features=2, is_linear=False, hidden_dims=())
-        )
+        _dense(hidden_dims=())
+
+
+def test_a_reward_model_needs_a_positive_feature_dimension() -> None:
+    with pytest.raises(ValueError, match="num_features"):
+        _linear(num_features=0)

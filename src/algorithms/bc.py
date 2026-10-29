@@ -1,47 +1,26 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
 
-from algorithms.state_dependent_tanh_actor import TanhPolicyProtocol
+from algorithms.off_policy.actor import TanhPolicyProtocol
+from config.schema import BCCfg
 from data import load_obs_action_episodes, split_holdout_episodes, subset_episodes
-from storage.obs_action_storage import ObsActionBufCfg, ObsActionBuffer
-from utils.runtime_context import RuntimeContext
+from interfaces import RuntimeContext
+from storage.expert_dataset import ExpertObsActionDataset
+from storage.observations import Observation
 
 if TYPE_CHECKING:
     from rsl_rl.models import MLPModel
-
-
-@dataclass(slots=True)
-class BCCfg:
-    """Behavioral cloning hyperparameters.
-
-    Notes:
-        - ``weight`` is the convex mixing weight on the policy loss when BC is
-          combined with PPO via :class:`algorithms.ppo_with_bc.PPOWithBC`.
-          ``weight=0`` disables BC; ``weight=1`` makes the policy update
-          BC-only.
-        - This config holds no learning-rate / weight-decay / grad-clip
-          settings: the actor optimizer is owned by PPO.
-        - ``val_fraction`` carves out that fraction of expert *episodes* into a
-          held-out validation set whose BC loss is logged (but never trained
-          on) during validation passes. ``0`` disables the split.
-    """
-
-    weight: float = 0.0
-    loss_type: str = "nll"  # "nll" | "mse"
-    batch_size: int = 256
-    val_fraction: float = 0.0
 
 
 class BC:
     """Compute a behavioral-cloning loss against an rsl_rl actor.
 
     BC is a *loss provider*, not a standalone trainer. It holds a reference to
-    a shared :class:`storage.obs_action_storage.ObsActionBuffer` and exposes
+    a shared :class:`storage.expert_dataset.ExpertObsActionDataset` and exposes
     :meth:`compute_loss` so an outer optimizer (typically PPO's, via
     :class:`algorithms.ppo_with_bc.PPOWithBC`) can incorporate the BC gradient
     into its update.
@@ -51,8 +30,8 @@ class BC:
         self,
         *,
         cfg: BCCfg,
-        storage: ObsActionBuffer,
-        val_storage: ObsActionBuffer | None = None,
+        storage: ExpertObsActionDataset,
+        val_storage: ExpertObsActionDataset | None = None,
         device: str | torch.device = "cpu",
     ) -> None:
         if cfg.loss_type not in {"nll", "mse"}:
@@ -75,18 +54,25 @@ class BC:
     def weight(self) -> float:
         return self.cfg.weight
 
-    def _compute_loss(self, actor: MLPModel, storage: ObsActionBuffer) -> torch.Tensor:
+    def _compute_loss(
+        self, actor: MLPModel, storage: ExpertObsActionDataset
+    ) -> torch.Tensor:
         """Sample a minibatch from ``storage`` and return the BC loss."""
-        obs_mb, expert_actions = storage.sample(self.cfg.batch_size, self.device)
+        observations, expert_actions = storage.sample(self.cfg.batch_size, self.device)
+        return self._loss(actor, observations, expert_actions)
 
+    def _loss(
+        self,
+        actor: MLPModel,
+        observations: Observation,
+        expert_actions: torch.Tensor,
+    ) -> torch.Tensor:
+        """BC loss of ``actor`` on given pairs. Shapes: actions [B, A] -> []."""
         if self.cfg.loss_type == "nll":
-            actor(obs_mb, stochastic_output=True)
+            actor(observations, stochastic_output=True)
             # GaussianDistribution.log_prob already sums over the action dim.
-            log_prob = actor.get_output_log_prob(expert_actions)  # [B]
-            return -log_prob.mean()
-
-        mean_actions = actor(obs_mb)  # [B, A], deterministic
-        return F.mse_loss(mean_actions, expert_actions)
+            return -actor.get_output_log_prob(expert_actions).mean()
+        return F.mse_loss(actor(observations), expert_actions)
 
     def compute_loss(self, actor: MLPModel) -> torch.Tensor:
         """Sample a training minibatch and return the BC loss.
@@ -117,7 +103,9 @@ class BC:
         observations, expert_actions = self.storage.sample(
             self.cfg.batch_size, self.device
         )
-        _validate_bounded_expert_actions(expert_actions, policy)
+        _validate_bounded_expert_actions(
+            expert_actions, policy, require_interior=self.cfg.loss_type == "nll"
+        )
         if self.cfg.loss_type == "nll":
             return -policy.log_probability(observations, expert_actions).mean()
         predicted_actions = policy.deterministic_action(observations)
@@ -133,12 +121,16 @@ class BC:
         """
         if self.val_storage is None or len(self.val_storage) == 0:
             return None
+        observations, expert_actions = self.val_storage.all_pairs(self.device)
         with torch.no_grad():
-            return float(self._compute_loss(actor, self.val_storage).item())
+            return float(self._loss(actor, observations, expert_actions).item())
 
 
 def _validate_bounded_expert_actions(
-    expert_actions: torch.Tensor, policy: TanhPolicyProtocol
+    expert_actions: torch.Tensor,
+    policy: TanhPolicyProtocol,
+    *,
+    require_interior: bool = False,
 ) -> None:
     """Reject expert actions a bounded policy could never have produced.
 
@@ -146,13 +138,19 @@ def _validate_bounded_expert_actions(
     clamp before inverting tanh, which silently turns every out-of-range action
     into the same boundary action.
     """
-    action_bound = float(getattr(policy.model, "action_bound", 1.0))
+    action_bound = float(policy.model.action_bound)
     largest = float(expert_actions.abs().max().item())
     if largest > action_bound * (1.0 + 1.0e-6):
         raise ValueError(
             f"Expert actions reach {largest:.4f}, outside the policy action "
             f"bound {action_bound:.4f}. Record demonstrations with the same "
             "action clip as the policy bound, or raise policy.action_bound."
+        )
+    if require_interior and largest >= action_bound * (1.0 - 1.0e-6):
+        raise ValueError(
+            "Tanh-policy NLL is undefined for an expert action at the clipped "
+            f"bound +/-{action_bound:g}. Use action MSE or fit the spread on "
+            "interior actions with spread calibration."
         )
 
 
@@ -170,7 +168,7 @@ def build_bc_alg(
 
     Loads (obs, actions) demos from ``expert_data_path``, optionally subsets
     them, splits off a held-out validation set per ``cfg.val_fraction``, and
-    wraps the result in ``ObsActionBuffer`` instances. Returns ``None`` when
+    wraps the result in ``ExpertObsActionDataset`` instances. Returns ``None`` when
     BC is disabled (``cfg.weight <= 0``) so the caller can short-circuit.
     """
     if cfg.weight <= 0.0:
@@ -198,13 +196,8 @@ def build_bc_alg(
     train_episodes, val_episodes = split_holdout_episodes(
         obs_action_episodes, cfg.val_fraction, seed
     )
-    buf_cfg = ObsActionBufCfg(store_device="cpu", store_dtype=torch.float32)
-    train_storage = ObsActionBuffer(cfg=buf_cfg, ctx=ctx)
-    train_storage.load_episodes(train_episodes)
-    val_storage: ObsActionBuffer | None = None
-    if val_episodes:
-        val_storage = ObsActionBuffer(cfg=buf_cfg, ctx=ctx)
-        val_storage.load_episodes(val_episodes)
+    train_storage = ExpertObsActionDataset(train_episodes)
+    val_storage = ExpertObsActionDataset(val_episodes) if val_episodes else None
     val_summary = (
         f", {len(val_episodes)} val episodes ({len(val_storage)} pairs)"
         if val_storage is not None

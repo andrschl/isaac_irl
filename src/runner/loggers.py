@@ -16,6 +16,15 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol
 
+from runner.summary import TRANSITIONS
+
+# Headline numbers the runs table should sort on, rather than showing whatever
+# the last validation happened to produce.
+_BEST_SUMMARY_METRICS = (
+    "Summary/best_success_rate",
+    "Summary/best_return_per_step",
+)
+
 
 @dataclass(slots=True)
 class LogEvent:
@@ -118,12 +127,20 @@ class WandbLogger:
                 reinit="finish_previous",
                 settings=wandb.Settings(console="off"),
             )
-            self._run.define_metric("Data/simulator_transitions_total", summary="max")
+            # Simulator transitions are the x-axis every summary number is
+            # read against: two algorithms are comparable per transition, not
+            # per iteration.
+            self._run.define_metric(TRANSITIONS, summary="max")
+            self._run.define_metric("Summary/environment_transitions", summary="max")
             self._run.define_metric(
-                "Overview/*",
-                step_metric="Data/simulator_transitions_total",
+                "Summary/*",
+                step_metric="Summary/environment_transitions",
                 summary="last",
             )
+            for name in _BEST_SUMMARY_METRICS:
+                self._run.define_metric(
+                    name, step_metric="Summary/environment_transitions", summary="max"
+                )
             run_url = getattr(self._run, "url", None)
             if run_url:
                 print(f"[INFO] W&B run: {run_url}", flush=True)
@@ -146,16 +163,14 @@ class WandbLogger:
         if self._run is None or self.log_dir is None:
             return
         videos_dir = os.path.join(self.log_dir, "videos")
-        video_names = (
-            "final_inference.mp4",
-            "final_stochastic.mp4",
-        )
+        if not os.path.isdir(videos_dir):
+            return
         video_payload = {
             f"Videos/{os.path.splitext(file_name)[0]}": wandb_module.Video(
                 os.path.join(videos_dir, file_name), format="mp4"
             )
-            for file_name in video_names
-            if os.path.isfile(os.path.join(videos_dir, file_name))
+            for file_name in sorted(os.listdir(videos_dir))
+            if file_name.endswith(".mp4")
         }
         if video_payload:
             self._run.log(video_payload, step=self._last_step)

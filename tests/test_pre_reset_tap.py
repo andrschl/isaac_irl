@@ -6,8 +6,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from adapters.rsl_rl_pre_reset_tap import IsaacPreResetTap  # noqa: E402
-from reward_model.fixed import FixedLinearReward  # noqa: E402
+from adapters.pre_reset_tap import IsaacPreResetTap  # noqa: E402
+from reward.fixed import FixedLinearReward  # noqa: E402
 
 NUM_ENVS = 4
 STEP_DT = 0.05
@@ -130,7 +130,7 @@ def test_ignored_terms_are_excluded() -> None:
 def test_a_reward_manager_without_captured_terms_is_rejected() -> None:
     env = _FakeEnv([("disabled", 0.0, 1.0)])
 
-    with pytest.raises(ValueError, match="no captured terms"):
+    with pytest.raises(ValueError, match="no feature terms"):
         IsaacPreResetTap(env, device="cpu")
 
 
@@ -154,8 +154,8 @@ def test_tap_refuses_a_reward_weight_that_changes_mid_run() -> None:
         env.reward_manager.compute(STEP_DT)
 
 
-def test_the_benchmark_drops_reward_weight_curricula() -> None:
-    from adapters.rsl_rl_benchmark_factory import _drop_reward_curriculum
+def test_training_drops_reward_weight_curricula() -> None:
+    from training.build import drop_reward_curriculum
 
     def modify_reward_weight(env, env_ids):  # noqa: ARG001
         return 0.0
@@ -170,7 +170,7 @@ def test_the_benchmark_drops_reward_weight_curricula() -> None:
 
     env_cfg = SimpleNamespace(curriculum=_Curriculum())
 
-    _drop_reward_curriculum(env_cfg)
+    drop_reward_curriculum(env_cfg)
 
     assert env_cfg.curriculum.action_rate is None
     # Curricula that do not touch reward weights are left alone.
@@ -178,6 +178,6 @@ def test_the_benchmark_drops_reward_weight_curricula() -> None:
 
 
 def test_dropping_curricula_tolerates_an_environment_without_any() -> None:
-    from adapters.rsl_rl_benchmark_factory import _drop_reward_curriculum
+    from training.build import drop_reward_curriculum
 
-    _drop_reward_curriculum(SimpleNamespace())
+    drop_reward_curriculum(SimpleNamespace())

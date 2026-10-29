@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, fields
 
 import torch
 from einops import rearrange
@@ -11,7 +12,6 @@ from storage.observations import (
     Observation,
     assert_finite_observation,
     concat_observations,
-    empty_observation_like,
     map_observation,
     observation_leaves,
     write_observation,
@@ -82,8 +82,6 @@ class TransitionRollout:
         for mask in (self.terminated, self.truncated, self.bootstrap_valid):
             if mask.dtype != torch.bool:
                 raise TypeError("Termination and bootstrap masks must have dtype bool.")
-        if torch.any(self.terminated & self.truncated):
-            raise ValueError("A transition cannot be terminated and truncated.")
         if torch.any(self.bootstrap_valid & self.terminated):
             raise ValueError("Terminated transitions must not bootstrap.")
         if self.policy_version < 0 or self.rollout_id < 0:
@@ -143,6 +141,9 @@ class TransitionRollout:
         )
 
 
+_OBSERVATION_FIELDS = ("policy_observations", "next_policy_observations")
+
+
 @dataclass(slots=True)
 class TransitionBatch:
     """Sampled flat transitions.
@@ -161,6 +162,9 @@ class TransitionBatch:
     terminated: torch.Tensor
     truncated: torch.Tensor
     bootstrap_valid: torch.Tensor
+
+
+_BATCH_FIELDS = tuple(field.name for field in fields(TransitionBatch))
 
 
 class TransitionReplayBuffer:
@@ -202,6 +206,15 @@ class TransitionReplayBuffer:
     @property
     def transition_count(self) -> int:
         return self._transition_count
+
+    @property
+    def demonstration_count(self) -> int:
+        """Protected expert transitions; never counted as online interaction."""
+        return (
+            0
+            if self._demonstrations is None
+            else int(self._demonstrations.actions.shape[0])
+        )
 
     def policy_version_range(self) -> tuple[int, int]:
         """Oldest and newest policy version currently stored."""
@@ -256,12 +269,26 @@ class TransitionReplayBuffer:
 
         With demonstrations seeded, the draw is split so that the demonstration
         share of the batch is fixed and independent of how much the policy has
-        collected.
+        collected. Rows are then shuffled together: contiguous critic-head
+        slices must see the same mixture, not different replay partitions.
         """
-        if self._storage is None or self._transition_count == 0:
-            raise RuntimeError("Cannot sample an empty replay.")
         if batch_size <= 0:
             raise ValueError("batch_size must be > 0.")
+        if self._transition_count == 0:
+            if self._demonstrations is None:
+                raise RuntimeError("Cannot sample an empty replay.")
+            # Before online collection, the protected partition is the entire
+            # available dataset. This enables demo-only critic initialization.
+            return _sample_rows(
+                self._demonstrations,
+                self.demonstration_count,
+                batch_size,
+                generator=generator,
+                device=device,
+                index_device=self.device,
+            )
+        if self._storage is None:
+            raise RuntimeError("Online replay has a count but no storage.")
         demonstration_size = (
             0
             if self._demonstrations is None
@@ -278,7 +305,7 @@ class TransitionReplayBuffer:
         if demonstration_size == 0:
             return collected
         assert self._demonstrations is not None
-        return _concat_batches(
+        batch = _concat_batches(
             _sample_rows(
                 self._demonstrations,
                 int(self._demonstrations.actions.shape[0]),
@@ -289,6 +316,8 @@ class TransitionReplayBuffer:
             ),
             collected,
         )
+        rows = torch.randperm(batch_size, generator=generator).to(batch.actions.device)
+        return _map_batch(batch, lambda leaf: leaf[rows])
 
     def seed_with_demonstrations(self, rollout: TransitionRollout) -> None:
         """Store demonstrations outside the ring, where nothing evicts them."""
@@ -310,53 +339,73 @@ def _sample_rows(
 ) -> TransitionBatch:
     """Draw ``batch_size`` rows uniformly with replacement from ``stored`` of them."""
     index = torch.randint(stored, (batch_size,), generator=generator).to(index_device)
-    return _gather_transitions(storage, index, device)
+    return _map_batch(storage, lambda leaf: leaf[index].to(device))
 
 
 def _concat_batches(*batches: TransitionBatch) -> TransitionBatch:
     """Join sampled batches along the batch dimension."""
-
-    def join(name: str) -> torch.Tensor:
-        return torch.cat([getattr(batch, name) for batch in batches], dim=0)
-
     return TransitionBatch(
-        policy_observations=concat_observations(
-            [batch.policy_observations for batch in batches]
-        ),
-        next_policy_observations=concat_observations(
-            [batch.next_policy_observations for batch in batches]
-        ),
-        critic_observations=join("critic_observations"),
-        next_critic_observations=join("next_critic_observations"),
-        actions=join("actions"),
-        features=join("features"),
-        environment_rewards=join("environment_rewards"),
-        terminated=join("terminated"),
-        truncated=join("truncated"),
-        bootstrap_valid=join("bootstrap_valid"),
+        **{
+            name: (
+                concat_observations([getattr(batch, name) for batch in batches])
+                if name in _OBSERVATION_FIELDS
+                else torch.cat([getattr(batch, name) for batch in batches], dim=0)
+            )
+            for name in _BATCH_FIELDS
+        }
     )
 
 
 def _flatten_rollout(rollout: TransitionRollout) -> TransitionBatch:
     """Flatten one ``[N,T,...]`` chunk into ``[(N T), ...]`` transitions."""
-
-    def flatten(tensor: torch.Tensor) -> torch.Tensor:
-        return rearrange(tensor, "n t ... -> (n t) ...")
-
     return TransitionBatch(
-        policy_observations=map_observation(rollout.policy_observations, flatten),
-        next_policy_observations=map_observation(
-            rollout.next_policy_observations, flatten
-        ),
-        critic_observations=flatten(rollout.critic_observations),
-        next_critic_observations=flatten(rollout.next_critic_observations),
-        actions=flatten(rollout.actions),
-        features=flatten(rollout.features),
-        environment_rewards=flatten(rollout.environment_rewards),
-        terminated=flatten(rollout.terminated),
-        truncated=flatten(rollout.truncated),
-        bootstrap_valid=flatten(rollout.bootstrap_valid),
+        **{
+            name: map_observation(
+                getattr(rollout, name),
+                lambda leaf: rearrange(leaf, "n t ... -> (n t) ..."),
+            )
+            for name in _BATCH_FIELDS
+        }
     )
+
+
+def _allocate_storage(
+    example: TransitionBatch, capacity: int, device: torch.device
+) -> TransitionBatch:
+    """Allocate ring storage shaped like one flattened rollout."""
+    return _map_batch(
+        example,
+        lambda leaf: torch.empty(
+            (capacity, *leaf.shape[1:]), dtype=leaf.dtype, device=device
+        ),
+    )
+
+
+def _write_storage(
+    storage: TransitionBatch, flat: TransitionBatch, rows: torch.Tensor
+) -> None:
+    """Write flattened transitions into the storage rows ``rows`` [M]."""
+    for name in _BATCH_FIELDS:
+        write_observation(getattr(storage, name), getattr(flat, name), rows)
+
+
+def _map_batch(
+    batch: TransitionBatch, function: Callable[[torch.Tensor], torch.Tensor]
+) -> TransitionBatch:
+    """Apply ``function`` to every stored tensor, observation leaves included."""
+    return TransitionBatch(
+        **{
+            name: map_observation(getattr(batch, name), function)
+            for name in _BATCH_FIELDS
+        }
+    )
+
+
+def _batch_tensors(batch: TransitionBatch) -> Iterator[torch.Tensor]:
+    """Yield every stored tensor of one batch, observations included."""
+    for name in _BATCH_FIELDS:
+        for _, leaf in observation_leaves(getattr(batch, name)):
+            yield leaf
 
 
 def _require_capacity_fits(
@@ -378,95 +427,3 @@ def _require_capacity_fits(
             f"{free_bytes / 2**30:.1f} GiB is free. Lower replay.capacity or "
             "set replay.storage_device to 'cpu'."
         )
-
-
-def _batch_tensors(batch: TransitionBatch):
-    """Yield every stored tensor of one batch, observations included."""
-    for observation in (batch.policy_observations, batch.next_policy_observations):
-        for _, leaf in observation_leaves(observation):
-            yield leaf
-    for name in (
-        "critic_observations",
-        "next_critic_observations",
-        "actions",
-        "features",
-        "environment_rewards",
-        "terminated",
-        "truncated",
-        "bootstrap_valid",
-    ):
-        yield getattr(batch, name)
-
-
-def _allocate_storage(
-    example: TransitionBatch, capacity: int, device: torch.device
-) -> TransitionBatch:
-    """Allocate ring storage shaped like one flattened rollout."""
-
-    def allocate(tensor: torch.Tensor) -> torch.Tensor:
-        return torch.empty(
-            (capacity, *tensor.shape[1:]), dtype=tensor.dtype, device=device
-        )
-
-    return TransitionBatch(
-        policy_observations=empty_observation_like(
-            example.policy_observations, capacity
-        ),
-        next_policy_observations=empty_observation_like(
-            example.next_policy_observations, capacity
-        ),
-        critic_observations=allocate(example.critic_observations),
-        next_critic_observations=allocate(example.next_critic_observations),
-        actions=allocate(example.actions),
-        features=allocate(example.features),
-        environment_rewards=allocate(example.environment_rewards),
-        terminated=allocate(example.terminated),
-        truncated=allocate(example.truncated),
-        bootstrap_valid=allocate(example.bootstrap_valid),
-    )
-
-
-def _write_storage(
-    storage: TransitionBatch, flat: TransitionBatch, rows: torch.Tensor
-) -> None:
-    """Write flattened transitions into the storage rows ``rows`` [M]."""
-    write_observation(storage.policy_observations, flat.policy_observations, rows)
-    write_observation(
-        storage.next_policy_observations, flat.next_policy_observations, rows
-    )
-    for name in (
-        "critic_observations",
-        "next_critic_observations",
-        "actions",
-        "features",
-        "environment_rewards",
-        "terminated",
-        "truncated",
-        "bootstrap_valid",
-    ):
-        getattr(storage, name)[rows] = getattr(flat, name)
-
-
-def _gather_transitions(
-    storage: TransitionBatch, index: torch.Tensor, device: torch.device
-) -> TransitionBatch:
-    """Gather stored rows ``index`` [B] and move them to ``device``."""
-
-    def take(name: str) -> torch.Tensor:
-        return getattr(storage, name)[index].to(device)
-
-    def take_observation(observation: Observation) -> Observation:
-        return map_observation(observation, lambda leaf: leaf[index].to(device))
-
-    return TransitionBatch(
-        policy_observations=take_observation(storage.policy_observations),
-        next_policy_observations=take_observation(storage.next_policy_observations),
-        critic_observations=take("critic_observations"),
-        next_critic_observations=take("next_critic_observations"),
-        actions=take("actions"),
-        features=take("features"),
-        environment_rewards=take("environment_rewards"),
-        terminated=take("terminated"),
-        truncated=take("truncated"),
-        bootstrap_valid=take("bootstrap_valid"),
-    )

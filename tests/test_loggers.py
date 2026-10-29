@@ -63,25 +63,29 @@ def _event(payload, step=0, **kwargs):
     return LogEvent(kind="iteration_summary", step=step, payload=payload, **kwargs)
 
 
-def test_console_logger_reports_overview_metrics_without_placeholder_nan(capsys):
+def test_console_prints_the_summary_contract(capsys):
+    """The terminal shows the same numbers the dashboard does, and no others."""
     from runner.console_logger import ConsoleLogger
 
-    logger = ConsoleLogger()
-    logger.log(
+    ConsoleLogger().log(
         _event(
             {
-                "Overview/critic_loss": 0.25,
-                "Overview/actor_parameter_delta": 0.1,
-                "Overview/reward_reconstruction_error": 0.0,
+                "Summary/critic_loss": 0.25,
+                "Summary/success_rate": 0.5,
+                "Summary/feature_gap_norm": 1.5,
+                "Summary/transitions": 4_000.0,
+                "DirectQ/head_0_td_loss": 9.9,
             },
             step=4_000,
         )
     )
+
     output = capsys.readouterr().out
     assert "critic_loss=0.25" in output
-    assert "actor_delta=0.1" in output
-    assert "reward_error=0" in output
-    assert "nan" not in output.lower()
+    assert "success=0.5" in output
+    assert "feature_gap=1.5" in output
+    assert "4,000 transitions" in output
+    assert "head_0" not in output, "per-head debug metrics stay off the console"
 
 
 def test_wandb_logger_start_is_idempotent(monkeypatch):
@@ -95,13 +99,19 @@ def test_wandb_logger_start_is_idempotent(monkeypatch):
 
     assert record["init_calls"] == 1
     assert record["define_metric_calls"] == [
-        ("Data/simulator_transitions_total", {"summary": "max"}),
+        ("Summary/transitions", {"summary": "max"}),
+        ("Summary/environment_transitions", {"summary": "max"}),
         (
-            "Overview/*",
-            {
-                "step_metric": "Data/simulator_transitions_total",
-                "summary": "last",
-            },
+            "Summary/*",
+            {"step_metric": "Summary/environment_transitions", "summary": "last"},
+        ),
+        (
+            "Summary/best_success_rate",
+            {"step_metric": "Summary/environment_transitions", "summary": "max"},
+        ),
+        (
+            "Summary/best_return_per_step",
+            {"step_metric": "Summary/environment_transitions", "summary": "max"},
         ),
     ]
 
@@ -219,8 +229,8 @@ def test_composite_logger_fans_out():
         assert r.finishes == [3]
 
 
-def test_console_keeps_nested_validation_keys_distinguishable(capsys) -> None:
-    """Both policy modes report the same leaf name; the mode must survive."""
+def test_console_distinguishes_the_two_validated_policy_modes(capsys) -> None:
+    """Both modes report a success rate; the deterministic one must stay apart."""
     from runner.console_logger import ConsoleLogger
     from runner.loggers import LogEvent
 
@@ -229,12 +239,12 @@ def test_console_keeps_nested_validation_keys_distinguishable(capsys) -> None:
             kind="validation/summary",
             step=1024,
             payload={
-                "Validation/environment_return_mean": 0.70,
-                "Validation/stochastic/environment_return_mean": 0.72,
+                "Summary/success_rate": 0.70,
+                "Summary/success_rate_stochastic": 0.72,
             },
         )
     )
 
     printed = capsys.readouterr().out
-    assert "environment_return_mean=0.7000" in printed
-    assert "stochastic/environment_return_mean=0.7200" in printed
+    assert "success=0.7" in printed
+    assert "success_stoch=0.72" in printed

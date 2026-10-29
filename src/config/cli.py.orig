@@ -1,0 +1,166 @@
+"""The single command-line surface for training.
+
+Flags exist for the settings that get typed at a prompt. Everything else in the
+schema is reachable with ``--set section.key=value``, so the CLI never has to
+grow a twin of the YAML.
+"""
+
+from __future__ import annotations
+
+import argparse
+from typing import Any
+
+_SET_HELP = (
+    "Override any config value by dotted path, e.g. "
+    "--set algo.train.updates_per_transition=0.25 --set runner.save_interval=10. "
+    "Repeatable."
+)
+
+
+def build_arg_parser(app_launcher_cls: Any | None = None) -> argparse.ArgumentParser:
+    """Build the training parser, with Isaac's launcher flags when available."""
+    parser = argparse.ArgumentParser(
+        description="Train a policy with IRL, RL, and optional BC regularization."
+    )
+
+    experiment = parser.add_argument_group("experiment")
+    experiment.add_argument("--task", type=str, default=None, help="Isaac task name.")
+    experiment.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Experiment YAML. Defaults to configs/<task-slug>/experiment.yaml.",
+    )
+    experiment.add_argument("--seed", type=int, default=None)
+    experiment.add_argument("--num_envs", type=int, default=None)
+    experiment.add_argument("--max_iterations", type=int, default=None)
+    experiment.add_argument(
+        "--transition_budget",
+        type=int,
+        default=None,
+        help="Stop once this many simulator transitions have been collected.",
+    )
+    if app_launcher_cls is None:
+        # Isaac's AppLauncher owns --device when present. Keep the local flag
+        # only for pure-Python callers that build this parser without Isaac.
+        experiment.add_argument("--device", type=str, default=None)
+    experiment.add_argument("--experiment_name", type=str, default=None)
+    experiment.add_argument("--run_name", type=str, default=None)
+
+    algorithm = parser.add_argument_group("algorithm")
+    algorithm.add_argument(
+        "--algorithm", type=str, default=None, choices=("ppo", "pmd")
+    )
+    algorithm.add_argument(
+        "--value_backend",
+        type=str,
+        default=None,
+        choices=("direct", "successor"),
+        help="Action-value representation for PMD.",
+    )
+    algorithm.add_argument("--learning_rate", type=float, default=None)
+
+    reward = parser.add_argument_group("reward")
+    reward.add_argument(
+        "--reward_source",
+        type=str,
+        default=None,
+        choices=("learned", "environment"),
+        help="Maximize the learned reward, or the environment's own.",
+    )
+    reward.add_argument(
+        "--fit_diagnostic",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="With --reward_source environment, still fit the reward model.",
+    )
+    reward.add_argument("--expert_data_path", type=str, default=None)
+    reward.add_argument("--expert_num_trajectories", type=int, default=None)
+    reward.add_argument("--bc_weight", type=float, default=None)
+
+    run = parser.add_argument_group("run")
+    run.add_argument("--logger", type=str, default=None, choices=("wandb", "noop"))
+    run.add_argument("--log_project_name", type=str, default=None)
+    run.add_argument("--validation_interval", type=int, default=None)
+    run.add_argument("--resume", action="store_true", default=None)
+    run.add_argument("--load_run", type=str, default=None)
+    run.add_argument("--checkpoint", type=str, default=None)
+    run.add_argument(
+        "--init_policy_checkpoint",
+        type=str,
+        default=None,
+        help="Warm-start the actor from a checkpoint without resuming a run.",
+    )
+
+    video = parser.add_argument_group("video")
+    video.add_argument("--video", action="store_true", default=False)
+    video.add_argument("--video_length", type=int, default=250)
+    video.add_argument("--video_interval_iterations", type=int, default=None)
+    video.add_argument(
+        "--video_final_only",
+        action="store_true",
+        default=False,
+        help="Record only the post-training clips.",
+    )
+
+    parser.add_argument(
+        "--set", action="append", default=[], metavar="PATH=VALUE", help=_SET_HELP
+    )
+
+    if app_launcher_cls is not None:
+        app_launcher_cls.add_app_launcher_args(parser)
+    return parser
+
+
+def parse_overrides(assignments: list[str]) -> dict[str, Any]:
+    """Turn ``["a.b=1", "c=true"]`` into a nested mapping of parsed values."""
+    overrides: dict[str, Any] = {}
+    for assignment in assignments:
+        if "=" not in assignment:
+            raise ValueError(
+                f"--set expects PATH=VALUE, got {assignment!r} (no '=' found)."
+            )
+        path, _, raw_value = assignment.partition("=")
+        node = overrides
+        keys = path.strip().split(".")
+        if not all(keys):
+            raise ValueError(f"--set path must not have empty segments: {path!r}.")
+        for key in keys[:-1]:
+            node = node.setdefault(key, {})
+            if not isinstance(node, dict):
+                raise ValueError(
+                    f"--set path {path!r} conflicts with an earlier value."
+                )
+        node[keys[-1]] = _parse_value(raw_value)
+    return overrides
+
+
+def _parse_value(raw: str) -> Any:
+    """Parse a YAML-ish scalar: null, bool, number, list, or string."""
+    text = raw.strip()
+    lowered = text.lower()
+    if lowered in {"null", "none", "~"}:
+        return None
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if text.startswith("[") and text.endswith("]"):
+        inner = text[1:-1].strip()
+        return [] if not inner else [_parse_value(item) for item in inner.split(",")]
+    for cast in (int, float):
+        try:
+            return cast(text)
+        except ValueError:
+            continue
+    return text
+
+
+def merge_overrides(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge ``overrides`` into ``base``, returning a new mapping."""
+    merged = dict(base)
+    for key, value in overrides.items():
+        current = merged.get(key)
+        if isinstance(value, dict) and isinstance(current, dict):
+            merged[key] = merge_overrides(current, value)
+        else:
+            merged[key] = value
+    return merged

@@ -124,6 +124,32 @@ def test_rollout_allows_bootstrapping_through_a_time_limit() -> None:
     assert bool(truncating.bootstrap_valid[1, 2])
 
 
+def test_a_failure_on_the_timeout_step_keeps_both_flags() -> None:
+    """Isaac reports both, and collapsing them loses which one actually happened.
+
+    The object can drop on the very step the horizon expires. Failure wins for
+    the Bellman backup, but the episode still ended at its time limit, and a
+    replay that refused the pair would force the collector to lie about one.
+    """
+    rollout = build_rollout(num_envs=2, horizon=3)
+    terminated = torch.zeros(2, 3, dtype=torch.bool)
+    truncated = torch.zeros(2, 3, dtype=torch.bool)
+    terminated[0, 2] = True
+    truncated[0, 2] = True
+    bootstrap_valid = torch.ones(2, 3, dtype=torch.bool)
+    bootstrap_valid[0, 2] = False
+
+    both = _rebuilt(
+        rollout,
+        terminated=terminated,
+        truncated=truncated,
+        bootstrap_valid=bootstrap_valid,
+    )
+
+    assert bool(both.terminated[0, 2]) and bool(both.truncated[0, 2])
+    assert not bool(both.bootstrap_valid[0, 2])
+
+
 def test_rollout_rejects_mismatched_feature_shape() -> None:
     rollout = build_rollout(num_envs=2, horizon=3)
 

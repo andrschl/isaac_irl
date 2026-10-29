@@ -1,0 +1,86 @@
+# Classic cartpole: dense and fast; revalidate learning under the episode protocol.
+# The fixed-reward sanity bench — the task's own reward, no demonstrations.
+experiment_name: cartpole
+run_name: ""
+logger: wandb
+wandb_project: isaac_irl
+
+seed: 42
+max_iterations: 2000     # the transition budget is what actually stops the run
+device: cuda:0
+
+env:
+  name: Isaac-Cartpole-v0
+  device: cuda:0
+  num_envs: 32
+  reward_curriculum: false
+  add_success_bonus: false
+
+feature_map:
+  ignored_reward_terms: []
+
+expert_data:
+  path: ""
+
+reward:
+  source: environment
+  model:
+    is_linear: true
+    regularization: l2
+    regularization_strength: 1.0e-4
+    linear_projection: l2_ball
+
+irl:
+  batch_size: 256
+  gradient_steps: 1
+
+bc:
+  weight: 0.0
+
+# Each algorithm's tuning lives in its own block, so --algorithm and
+# --value_backend select between them instead of falling back to defaults.
+algo:
+  type: pmd
+  ppo:
+    learning_rate: 1.0e-3
+    gamma: 0.99
+    entropy_rate: 0.005
+  pmd:
+    policy_improvements_per_batch: 1
+    actor_batch_size: 256
+    train:
+      gamma: 0.99
+      episodes_per_batch: 32
+      critic_updates_per_batch: 200
+      initial_critic_updates: 200
+      replay:
+        learning_starts: 1024
+        capacity: 200000
+    value:
+      type: successor
+      num_heads: 5
+      width: 256
+      residual_blocks: 1
+      successor: {latent_dim: 64, head_hidden_dim: 64, control_quantile: 0.25}
+      direct: {target_subset_size: 2, control_reduction: min}
+    policy:
+      hidden_dims: [256, 128]
+
+# The tuned on-policy baseline for this task.
+actor_critic:
+  actor_hidden_dims: [32, 32]
+  critic_hidden_dims: [32, 32]
+  activation: elu
+
+runner:
+  steps_per_env_per_cycle: 16      # PPO rollout length
+  reward_updates_per_cycle: 1
+  save_interval: 50
+  imitator_source: collected
+  validation_interval: 5
+  validation_episodes: 10
+  validation_steps_per_env: 250
+  total_transition_budget: 150000
+  # Break-even, "task solved", and near-optimal control, as a per-step return.
+  # PMD evaluates complete episodes; PPO's optional inline window is 250 steps.
+  return_per_step_thresholds: [0.0, 0.012, 0.0156]

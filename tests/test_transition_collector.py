@@ -6,7 +6,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from adapters.rsl_rl_transition_collector import TransitionCollector  # noqa: E402
+from adapters.transition_collector import TransitionCollector  # noqa: E402
 
 NUM_ENVS = 3
 OBSERVATION_DIM = 2
@@ -27,10 +27,11 @@ class _FakeTap:
         self._reward = torch.ones(NUM_ENVS)
         self._terminal: torch.Tensor | None = None
 
-    def observe(self, *, observations: torch.Tensor, timed_out: bool) -> None:
-        self._terminal = (
-            observations.clone() + self.surviving_offset if timed_out else None
-        )
+    def observe(self, *, observations: torch.Tensor, ended: bool) -> None:
+        """Isaac computes the pre-reset observation for failures too, not just
+        timeouts: a terminated transition still has a true successor, and it is
+        the one the reward features were read from."""
+        self._terminal = observations.clone() + self.surviving_offset if ended else None
 
     def features(self, env: Any | None = None) -> torch.Tensor:
         del env
@@ -68,7 +69,7 @@ class _FakeEnv:
         timed_out = self.step_index == self.time_out_step
         terminated = self.step_index == self.terminated_step
         observations = torch.full((NUM_ENVS, OBSERVATION_DIM), float(self.step_index))
-        self.tap.observe(observations=observations, timed_out=timed_out)
+        self.tap.observe(observations=observations, ended=timed_out or terminated)
         time_outs = torch.zeros(NUM_ENVS, dtype=torch.bool)
         dones = torch.zeros(NUM_ENVS, dtype=torch.bool)
         if timed_out:
@@ -82,16 +83,29 @@ class _FakeEnv:
         return observations, torch.ones(NUM_ENVS), dones, {"time_outs": time_outs}
 
 
+class _BoundedModel(torch.nn.Identity):
+    """Stand-in actor carrying the bound the collector checks actions against."""
+
+    action_bound = 1.0
+
+
 class _ConstantPolicy:
-    model = torch.nn.Identity()
+    def __init__(self, action: float = 0.0) -> None:
+        self.model = _BoundedModel()
+        self._action = action
 
     def sample_with_log_probability(self, observations, *, generator=None):
         del generator
         batch = observations.shape[0]
-        return torch.zeros(batch, ACTION_DIM), torch.zeros(batch)
+        return (
+            torch.full((batch, ACTION_DIM), self._action),
+            torch.zeros(batch),
+        )
 
 
-def _collector(*, time_out_step: int, terminated_step: int) -> TransitionCollector:
+def _collector(
+    *, time_out_step: int, terminated_step: int, is_finite_horizon: bool = False
+) -> TransitionCollector:
     tap = _FakeTap()
     env = _FakeEnv(tap, time_out_step=time_out_step, terminated_step=terminated_step)
     return TransitionCollector(
@@ -101,6 +115,7 @@ def _collector(*, time_out_step: int, terminated_step: int) -> TransitionCollect
         rollout_steps=4,
         device="cpu",
         seed=0,
+        is_finite_horizon=is_finite_horizon,
     )
 
 
@@ -130,6 +145,32 @@ def test_termination_stops_the_bellman_backup() -> None:
     assert not bool(rollout.bootstrap_valid[1, 2])
     assert metrics["Data/terminated_fraction"] > 0.0
     assert metrics["Data/bootstrap_disabled_fraction"] > 0.0
+    # The failure has a true successor too, and it is the state the reward
+    # features were read from - not the state the environment reset it to.
+    assert float(rollout.next_critic_observations[1, 2, 0]) == 3.0
+    assert float(rollout.critic_observations[1, 3, 0]) == RESET_MARKER
+
+
+def test_a_finite_horizon_timeout_carries_no_value_past_the_horizon() -> None:
+    """The same time limit means two different things, so it is configured.
+
+    On a continuing task the horizon is a bookkeeping cut and the value beyond
+    it is real. On a finite-horizon task the episode genuinely ends there, and
+    bootstrapping through it invents return the task never pays.
+    """
+    continuing = _collector(time_out_step=2, terminated_step=99)
+    finite = _collector(time_out_step=2, terminated_step=99, is_finite_horizon=True)
+
+    continuing_rollout, _ = continuing.collect(policy_version=0)
+    finite_rollout, metrics = finite.collect(policy_version=0)
+
+    assert bool(continuing_rollout.truncated[0, 1])
+    assert bool(finite_rollout.truncated[0, 1])
+    assert bool(continuing_rollout.bootstrap_valid[0, 1])
+    assert not bool(finite_rollout.bootstrap_valid[0, 1])
+    # Nothing else changes: a lane that did not end still bootstraps.
+    assert bool(finite_rollout.bootstrap_valid[2, 1])
+    assert metrics["Data/bootstrap_disabled_fraction"] > 0.0
 
 
 def test_surviving_environments_must_observe_the_same_state_twice() -> None:
@@ -156,5 +197,5 @@ def test_actions_outside_the_policy_bound_are_rejected() -> None:
         env, _OutOfBoundPolicy(), tap, rollout_steps=2, device="cpu", seed=0
     )
 
-    with pytest.raises(ValueError, match="out-of-bound action"):
+    with pytest.raises(ValueError, match="outside its bound"):
         collector.collect(policy_version=0)

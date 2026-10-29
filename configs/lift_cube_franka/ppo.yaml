@@ -1,0 +1,34 @@
+# Native Lift PPO benchmark: upstream architecture, hyperparameters, curriculum,
+# 4096 environments, 24-step rollouts. No inline evaluation interruptions.
+experiment_name: lift_cube_franka_ppo
+logger: wandb
+wandb_project: isaac_irl
+seed: 42
+max_iterations: 1500
+device: cuda:0
+env:
+  name: Isaac-Lift-Cube-Franka-v0
+  num_envs: 4096
+  reward_curriculum: true
+  add_success_bonus: false
+reward:
+  source: environment
+algo:
+  type: ppo
+  ppo:
+    learning_rate: 0.0001
+    gamma: 0.98
+    lam: 0.95
+    entropy_rate: 0.006
+    num_learning_epochs: 5
+    num_mini_batches: 4
+    schedule: adaptive
+    desired_kl: 0.01
+actor_critic:
+  actor_hidden_dims: [256, 128, 64]
+  critic_hidden_dims: [256, 128, 64]
+  activation: elu
+runner:
+  steps_per_env_per_cycle: 24
+  validation_interval: 0
+  save_interval: 50
